@@ -551,38 +551,19 @@ function applyBlockingCSS() {
     // --- HOMEPAGE CLEANUP ---
 
     if (settings.blockShorts) {
-        // Separate rule block for Shorts to isolate from other selectors
+        // --- SHORTS BLOCKING: Pure CSS, flat selectors only (no :has()) ---
+        // Direct element selectors — O(1) browser matching, zero performance cost
         rules.push(`
             #shorts-inner-container,
             ytd-rich-shelf-renderer[is-shorts],
             ytd-reel-shelf-renderer,
-            [is-shorts]
-        `);
-        // Shorts inside section wrappers (current YT DOM 2025/2026)
-        rules.push(`
-            ytd-rich-section-renderer:has(ytd-rich-shelf-renderer[is-shorts])
-        `);
-        // Individual shorts videos in feed (new lockup view model)
-        rules.push(`
-            ytd-rich-item-renderer:has(ytm-shorts-lockup-view-model),
-            ytd-rich-item-renderer:has(ytm-shorts-lockup-view-model-v2),
-            ytd-rich-item-renderer:has(a[href^="/shorts/"])
-        `);
-        // Search results: Shorts shelf in search (multiple container types)
-        rules.push(`
-            ytd-item-section-renderer:has(ytd-reel-shelf-renderer),
-            ytd-section-list-renderer ytd-reel-shelf-renderer,
+            [is-shorts],
+            ytd-reel-item-renderer,
+            ytm-shorts-lockup-view-model,
+            ytm-shorts-lockup-view-model-v2,
             grid-shelf-view-model,
-            ytd-item-section-renderer:has(grid-shelf-view-model)
-        `);
-        // Sidebar nav
-        rules.push(`
             a[title="Shorts"],
-            ytd-guide-entry-renderer:has(a[title="Shorts"]),
-            ytd-mini-guide-entry-renderer[aria-label="Shorts"]
-        `);
-        // Channel page tab
-        rules.push(`
+            ytd-mini-guide-entry-renderer[aria-label="Shorts"],
             [tab-identifier="FEshorts"]
         `);
     }
@@ -738,16 +719,6 @@ function startObserver() {
     const videoSelectors = 'ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer';
     const shelfSelectors = 'ytd-shelf-renderer, ytd-rich-shelf-renderer, ytd-rich-section-renderer';
 
-    // Throttle hideShortsElements to max once per 2 seconds
-    let shortsThrottleTimer = null;
-    function throttledHideShorts() {
-        if (shortsThrottleTimer) return;
-        shortsThrottleTimer = setTimeout(() => {
-            shortsThrottleTimer = null;
-            hideShortsElements();
-        }, 2000);
-    }
-
     // Debounced MutationObserver — batch rapid DOM mutations
     let pendingMutations = [];
     let rafId = null;
@@ -784,8 +755,6 @@ function startObserver() {
                 if (newVideoNodes.length > 0) processVideos(newVideoNodes);
                 if (newShelfNodes.length > 0) processShelves(newShelfNodes);
 
-                // Throttled JS-based hiding for elements CSS can't target by text
-                throttledHideShorts();
             });
         }
     });
@@ -795,7 +764,6 @@ function startObserver() {
     // Initial scan
     processVideos(document.querySelectorAll(videoSelectors));
     processShelves(document.querySelectorAll(shelfSelectors));
-    hideShortsElements();
 
     // Periodic rescan ONLY on homepage for lazy-loaded yt-lockup-view-model cards
     setInterval(() => {
@@ -813,52 +781,7 @@ function startObserver() {
     }, 5000);
 }
 
-/**
- * JS-based hiding for Shorts elements that CSS can't reach
- * (sidebar nav, section renderers, etc. — require text matching)
- */
-function hideShortsElements() {
-    if (!settings.blockShorts) return;
-
-    // 1. Sidebar guide entries (tp-yt-paper-item with yt-formatted-string "Shorts")
-    document.querySelectorAll('ytd-guide-entry-renderer').forEach(entry => {
-        const title = entry.querySelector('yt-formatted-string.title');
-        if (title && title.textContent.trim() === 'Shorts') {
-            entry.style.display = 'none';
-        }
-    });
-
-    // 2. Mini guide entries
-    document.querySelectorAll('ytd-mini-guide-entry-renderer').forEach(entry => {
-        const title = entry.querySelector('.title');
-        if (title && title.textContent.trim() === 'Shorts') {
-            entry.style.display = 'none';
-        }
-    });
-
-    // 3. Rich section renderers containing shorts
-    document.querySelectorAll('ytd-rich-section-renderer').forEach(section => {
-        if (section.style.display === 'none') return;
-        // Check for shorts lockup models
-        if (section.querySelector('ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2')) {
-            section.style.display = 'none';
-            console.log('[Wallgarden] Hid Shorts section (lockup model)');
-            return;
-        }
-        // Check for is-shorts attribute on inner shelf
-        if (section.querySelector('ytd-rich-shelf-renderer[is-shorts]')) {
-            section.style.display = 'none';
-            console.log('[Wallgarden] Hid Shorts section (is-shorts attr)');
-            return;
-        }
-        // Check for header text containing "Shorts"
-        const header = section.querySelector('#title-text, #rich-shelf-header yt-formatted-string');
-        if (header && header.textContent.trim().toLowerCase() === 'shorts') {
-            section.style.display = 'none';
-            console.log('[Wallgarden] Hid Shorts section (header text)');
-        }
-    });
-}
+// hideShortsElements removed — all Shorts hiding is now pure CSS (no JS scanning needed)
 
 /**
  * Text-based shelf filtering
