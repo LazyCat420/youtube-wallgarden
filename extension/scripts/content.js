@@ -42,6 +42,11 @@ const evaluatedVideos = new Set();
 
 // Load settings + blocklist initially
 chrome.storage.local.get(null, (data) => {
+    // One-time migration: reset blockShorts to true if it was saved as false from v6 default change
+    if (!data._v7_shorts_reset) {
+        chrome.storage.local.set({ blockShorts: true, _v7_shorts_reset: true });
+        data.blockShorts = true;
+    }
     Object.assign(settings, data);
     if (data.blocklist) blocklist = data.blocklist;
     applyBlockingCSS();
