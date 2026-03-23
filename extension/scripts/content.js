@@ -82,7 +82,7 @@ function startMenuInterceptor() {
             // Find parent card (regular videos + Shorts containers)
             const videoCard = menuButton.closest(
                 'ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer, ' +
-                'ytd-reel-item-renderer'
+                'ytd-reel-item-renderer, yt-lockup-view-model'
             );
             if (videoCard) {
                 lastMenuTarget = videoCard;
@@ -261,8 +261,10 @@ function injectBlockMenuItem(listbox) {
 function injectSheetBlockItem(listContainer) {
     if (!settings.enableSmartBlock || !lastMenuTarget) return;
 
-    // Try all channel selectors (sidebar has #channel-name, homepage has a[href^="/@"])
+    // Try all channel selectors across different card types
     let channelName = '';
+
+    // Path A: Standard selectors (#channel-name, ytd-channel-name, handle links)
     const channelEl = lastMenuTarget.querySelector(
         '#channel-name .yt-simple-endpoint, #channel-name a, ' +
         'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a, ' +
@@ -270,9 +272,16 @@ function injectSheetBlockItem(listContainer) {
     );
     if (channelEl) {
         channelName = channelEl.textContent.trim();
-        // If the text is just a handle like "@name", clean it
         if (!channelName && channelEl.getAttribute('href')) {
             channelName = '@' + channelEl.getAttribute('href').replace('/@', '');
+        }
+    }
+
+    // Path B: Sidebar yt-lockup-view-model uses metadata spans (first span = channel name)
+    if (!channelName) {
+        const metaSpan = lastMenuTarget.querySelector('.yt-content-metadata-view-model__metadata-text');
+        if (metaSpan) {
+            channelName = metaSpan.textContent.trim();
         }
     }
 
