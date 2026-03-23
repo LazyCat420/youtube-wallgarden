@@ -540,27 +540,28 @@ function processShelves(shelfElements) {
 
 /**
  * Process individual video cards through heuristics + smart blocklist
+ * Works on: homepage (ytd-rich-item-renderer), search (ytd-video-renderer),
+ *           sidebar (ytd-compact-video-renderer)
  */
 function processVideos(videoElements) {
     videoElements.forEach(videoEl => {
         if (evaluatedVideos.has(videoEl) || videoEl.style.display === 'none') return;
 
         const titleEl = videoEl.querySelector('#video-title');
-        const channelEl = videoEl.querySelector('#channel-name .yt-simple-endpoint, #channel-name a');
-        const linkEl = videoEl.querySelector('a#thumbnail, a.yt-simple-endpoint[href*="watch"]');
+        const channelEl = videoEl.querySelector(
+            '#channel-name .yt-simple-endpoint, #channel-name a, ' +
+            'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a, ' +
+            '.ytd-channel-name a'
+        );
 
-        if (!titleEl || !channelEl || !linkEl) return;
+        if (!titleEl || !channelEl) return;
 
         evaluatedVideos.add(videoEl);
 
         const titleText = titleEl.textContent.trim();
         const channelText = channelEl.textContent.trim();
 
-        const href = linkEl.getAttribute('href') || "";
-        const urlParams = new URLSearchParams(href.split('?')[1]);
-        const videoId = urlParams.get('v');
-
-        if (!videoId) return;
+        if (!channelText) return;
 
         // --- Smart Blocklist: Channel check ---
         if (settings.enableSmartBlock && blocklist.channels.includes(channelText.toLowerCase())) {
@@ -585,7 +586,70 @@ function processVideos(videoElements) {
             hideVideo(videoEl, `Heuristics: "${titleText}"`);
             return;
         }
+
+        // --- Inject Block Button ---
+        if (settings.enableSmartBlock && !videoEl.querySelector('.wg-block-btn')) {
+            injectBlockButton(videoEl, channelText);
+        }
     });
+}
+
+/**
+ * Inject a "🚫 Block" button onto a video card
+ */
+function injectBlockButton(videoEl, channelName) {
+    const btn = document.createElement('button');
+    btn.className = 'wg-block-btn';
+    btn.textContent = '🚫 Block';
+    btn.title = `Block "${channelName}" permanently`;
+
+    btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const channelLower = channelName.toLowerCase();
+        if (!blocklist.channels.includes(channelLower)) {
+            blocklist.channels.push(channelLower);
+            saveBlocklist();
+            console.log(`[Wallgarden] Quick-blocked channel: "${channelName}"`);
+        }
+
+        // Hide this video immediately
+        hideVideo(videoEl, `Quick-blocked: "${channelName}"`);
+        showBlockedBadge(videoEl, channelName);
+
+        // Hide all other visible videos from this channel
+        document.querySelectorAll('ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer').forEach(el => {
+            if (el.style.display === 'none') return;
+            const ch = el.querySelector(
+                '#channel-name .yt-simple-endpoint, #channel-name a, ' +
+                'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a'
+            );
+            if (ch && ch.textContent.trim().toLowerCase() === channelLower) {
+                hideVideo(el, `Quick-blocked: "${channelName}"`);
+                showBlockedBadge(el, channelName);
+            }
+        });
+    });
+
+    // Position the button — find the thumbnail or metadata area
+    const thumbnail = videoEl.querySelector('#thumbnail, ytd-thumbnail');
+    if (thumbnail) {
+        thumbnail.style.position = 'relative';
+        btn.style.cssText = `
+            position: absolute; top: 6px; right: 6px; z-index: 9999;
+            background: rgba(0,0,0,0.85); color: #ff5252;
+            border: 1px solid #ff5252; border-radius: 4px;
+            padding: 3px 8px; font-size: 11px; font-weight: 700;
+            cursor: pointer; opacity: 0; transition: opacity 0.15s;
+            font-family: 'Inter', 'Segoe UI', sans-serif;
+        `;
+        thumbnail.appendChild(btn);
+
+        // Show on hover
+        videoEl.addEventListener('mouseenter', () => { btn.style.opacity = '1'; });
+        videoEl.addEventListener('mouseleave', () => { btn.style.opacity = '0'; });
+    }
 }
 
 function failsHeuristics(title) {
