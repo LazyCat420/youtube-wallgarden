@@ -50,3 +50,29 @@ Added `processShelves()` function as a text-based fallback for shelf elements th
 
 **`popup.js`**: Added `renderBlocklist()` to display blocked channels with per-channel unblock (✕) buttons. Added Export (downloads JSON) and Clear All (with confirm dialog) functionality.
 
+---
+
+### V4: Shorts Blocking Fix + Updated Selectors
+
+**`content.js`**: Fixed Shorts not being hidden due to YouTube DOM changes:
+- Added `ytd-rich-section-renderer:has(ytd-rich-shelf-renderer[is-shorts])` for new Shorts wrapper
+- Added `ytm-shorts-lockup-view-model-v2` and `a[href^="/shorts/"]` selectors for individual shorts
+- Added JS-based `hideShortsElements()` function for text-based sidebar/section hiding (CSS can't match text content)
+- Split CSS rules into isolated blocks so one invalid selector can't break all others
+- Removed invalid `:has-text()` pseudo-selectors (uBlock syntax, not valid browser CSS)
+
+---
+
+### V5: Quick Block from Search + 3-Dot Menu Integration
+
+**`content.js`**: Added two ways to block channels:
+
+1. **🌿 3-dot menu injection**: Click ⋮ on any video → "🌿 Block ChannelName" appears at the bottom. Uses click-event + setTimeout approach (YouTube reuses popup containers, MutationObserver doesn't fire). Closes menu via Escape key dispatch to preserve YouTube's popup state.
+
+2. **🚫 Inline block icon**: Small 🚫 appears next to ⋮ button on hover for quick one-click blocking without opening the menu.
+
+3. **Shorts title-based blocking**: Shorts cards don't expose channel names in DOM. When blocking a Short, title keywords get a +5 weight boost for auto-blocking similar content.
+
+- Removed `videoId` requirement from `processVideos()` — was preventing search results from being processed
+- Broadened channel name selectors to cover YouTube's different element structures across pages
+- Added `blockChannelAndHide()` helper for centralized channel blocking logic
