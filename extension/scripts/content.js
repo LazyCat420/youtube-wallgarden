@@ -71,9 +71,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
 let lastMenuTarget = null;
 
 function startMenuInterceptor() {
-    // 1. Track which video card opened the 3-dot menu
+    // Track which video card opened the 3-dot menu + inject block item after popup renders
     document.addEventListener('click', (e) => {
-        const menuButton = e.target.closest('ytd-menu-renderer button, yt-icon-button#button');
+        const menuButton = e.target.closest('ytd-menu-renderer button, yt-icon-button#button, button.yt-icon-button');
         if (menuButton) {
             const videoCard = menuButton.closest(
                 'ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer'
@@ -81,37 +81,22 @@ function startMenuInterceptor() {
             if (videoCard) {
                 lastMenuTarget = videoCard;
                 console.log('[Wallgarden] Menu opened on video card');
+
+                // Wait for YouTube to populate the popup, then inject our item
+                setTimeout(() => tryInjectBlockItem(), 300);
+                setTimeout(() => tryInjectBlockItem(), 600); // Retry in case popup was slow
             }
         }
     }, true);
 
-    // 2. Watch for popup menus and inject our block item + hook existing items
+    // Also watch for "Not interested" / "Don't recommend" in any mutation
     const menuObserver = new MutationObserver((mutations) => {
         mutations.forEach(mutation => {
             mutation.addedNodes.forEach(node => {
                 if (node.nodeType !== Node.ELEMENT_NODE) return;
-
-                // Find the popup menu listbox
-                const listboxes = [];
-                if (node.matches && node.matches('tp-yt-paper-listbox, ytd-menu-popup-renderer')) {
-                    listboxes.push(node);
-                }
-                if (node.querySelectorAll) {
-                    node.querySelectorAll('tp-yt-paper-listbox, ytd-menu-popup-renderer').forEach(l => listboxes.push(l));
-                }
-
-                listboxes.forEach(listbox => {
-                    // Inject our "Block Channel" item if not already present
-                    if (!listbox.querySelector('.wg-block-menu-item')) {
-                        injectBlockMenuItem(listbox);
-                    }
-                });
-
-                // Also hook "Not interested" / "Don't recommend" items
                 const menuItems = node.querySelectorAll
                     ? node.querySelectorAll('ytd-menu-service-item-renderer, tp-yt-paper-item')
                     : [];
-
                 menuItems.forEach(item => {
                     const text = item.textContent.trim().toLowerCase();
                     if (text.includes('not interested') || text.includes("don't recommend")) {
@@ -120,15 +105,36 @@ function startMenuInterceptor() {
                             item.addEventListener('click', () => {
                                 handleRejection(text, lastMenuTarget);
                             });
-                            console.log(`[Wallgarden] Hooked menu item: "${text}"`);
                         }
                     }
                 });
             });
         });
     });
-
     menuObserver.observe(document.body, { childList: true, subtree: true });
+}
+
+/**
+ * Find the currently visible popup listbox and inject our block item
+ */
+function tryInjectBlockItem() {
+    if (!settings.enableSmartBlock || !lastMenuTarget) return;
+
+    // YouTube's popup: ytd-popup-container > tp-yt-iron-dropdown > ytd-menu-popup-renderer > tp-yt-paper-listbox#items
+    const listbox = document.querySelector(
+        'ytd-popup-container tp-yt-iron-dropdown:not([aria-hidden="true"]) tp-yt-paper-listbox#items,' +
+        'ytd-menu-popup-renderer tp-yt-paper-listbox#items'
+    );
+
+    if (!listbox) {
+        console.log('[Wallgarden] No visible listbox found');
+        return;
+    }
+
+    // Remove stale block items (YouTube reuses the popup for different videos)
+    listbox.querySelectorAll('.wg-block-menu-item').forEach(old => old.remove());
+
+    injectBlockMenuItem(listbox);
 }
 
 /**
