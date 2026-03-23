@@ -123,7 +123,7 @@ function startMenuInterceptor() {
 /**
  * Find the currently visible popup listbox and inject our block item.
  * Regular videos use: tp-yt-paper-listbox#items
- * Shorts use: yt-sheet-view-model > yt-list-view-model
+ * Shorts/Sidebar use: yt-sheet-view-model > yt-list-view-model (or yt-list-view-model directly)
  */
 function tryInjectBlockItem() {
     if (!settings.enableSmartBlock || !lastMenuTarget) return;
@@ -141,15 +141,16 @@ function tryInjectBlockItem() {
         return;
     }
 
-    // --- Path 2: Shorts sheet popup (yt-list-view-model) ---
+    // --- Path 2: Sheet popup used by Shorts + Sidebar recommended (yt-list-view-model) ---
     const sheetPopup = document.querySelector(
-        'tp-yt-iron-dropdown:not([aria-hidden="true"]) yt-sheet-view-model yt-list-view-model'
+        'tp-yt-iron-dropdown:not([aria-hidden="true"]) yt-sheet-view-model yt-list-view-model,' +
+        'tp-yt-iron-dropdown:not([aria-hidden="true"]) yt-list-view-model'
     );
 
     if (sheetPopup) {
         // Remove stale block items
         sheetPopup.querySelectorAll('.wg-block-menu-item').forEach(old => old.remove());
-        injectShortsBlockItem(sheetPopup);
+        injectSheetBlockItem(sheetPopup);
         return;
     }
 
@@ -254,25 +255,35 @@ function injectBlockMenuItem(listbox) {
 }
 
 /**
- * Inject a block item into the Shorts sheet popup (yt-list-view-model)
- * Shorts menus use a different component tree than regular videos
+ * Inject a block item into sheet-style popups (yt-list-view-model).
+ * Used by Shorts menus AND sidebar recommended video menus.
  */
-function injectShortsBlockItem(listContainer) {
+function injectSheetBlockItem(listContainer) {
     if (!settings.enableSmartBlock || !lastMenuTarget) return;
 
-    // Try to get channel handle from the Shorts card's links
+    // Try all channel selectors (sidebar has #channel-name, homepage has a[href^="/@"])
     let channelName = '';
-    const handleLink = lastMenuTarget.querySelector('a[href^="/@"]');
-    if (handleLink) {
-        channelName = handleLink.textContent.trim() || ('@' + handleLink.getAttribute('href').replace('/@', ''));
+    const channelEl = lastMenuTarget.querySelector(
+        '#channel-name .yt-simple-endpoint, #channel-name a, ' +
+        'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a, ' +
+        'a[href^="/@"]'
+    );
+    if (channelEl) {
+        channelName = channelEl.textContent.trim();
+        // If the text is just a handle like "@name", clean it
+        if (!channelName && channelEl.getAttribute('href')) {
+            channelName = '@' + channelEl.getAttribute('href').replace('/@', '');
+        }
     }
 
-    // Get Short title for keyword-based blocking
+    // Fallback: get title for keyword-based blocking (Shorts without channel)
     let shortsTitle = '';
-    const titleEl = lastMenuTarget.querySelector(
-        'h3 a, .shortsLockupViewModelHostMetadataTitle a, a[title]'
-    );
-    if (titleEl) shortsTitle = titleEl.getAttribute('title') || titleEl.textContent.trim();
+    if (!channelName) {
+        const titleEl = lastMenuTarget.querySelector(
+            '#video-title, h3 a, .shortsLockupViewModelHostMetadataTitle a, a[title]'
+        );
+        if (titleEl) shortsTitle = titleEl.getAttribute('title') || titleEl.textContent.trim();
+    }
 
     if (!channelName && !shortsTitle) return;
 
@@ -292,32 +303,7 @@ function injectShortsBlockItem(listContainer) {
     blockItem.textContent = blockLabel;
 
     const cardRef = lastMenuTarget;
-    blockItem.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        if (channelName) {
-            blockChannelAndHide(channelName, cardRef);
-        } else if (shortsTitle) {
-            // Block by title keywords with strong weight
-            const keywords = extractKeywords(shortsTitle);
-            keywords.forEach(kw => {
-                blocklist.keywords[kw] = (blocklist.keywords[kw] || 0) + 5;
-            });
-            saveBlocklist();
-            console.log(`[Wallgarden] Blocked Short by keywords: [${keywords.join(', ')}]`);
-        }
-
-        // Hide the source card
-        if (cardRef) {
-            hideVideo(cardRef, `Blocked: "${channelName || shortsTitle}"`);
-        }
-
-        // Close menu natively
-        document.dispatchEvent(new KeyboardEvent('keydown', {
-            key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true
-        }));
-    });
+    menuItem_clickHandler(blockItem, channelName, shortsTitle, cardRef);
 
     // Hover effect
     blockItem.addEventListener('mouseenter', () => {
@@ -328,7 +314,37 @@ function injectShortsBlockItem(listContainer) {
     });
 
     listContainer.appendChild(blockItem);
-    console.log(`[Wallgarden] Injected Shorts block: "${channelName || shortsTitle}"`);
+    console.log(`[Wallgarden] Injected sheet block: "${channelName || shortsTitle}"`);
+}
+
+/**
+ * Shared click handler for block menu items across all popup types
+ */
+function menuItem_clickHandler(element, channelName, fallbackTitle, cardRef) {
+    element.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (channelName) {
+            blockChannelAndHide(channelName, cardRef);
+        } else if (fallbackTitle) {
+            const keywords = extractKeywords(fallbackTitle);
+            keywords.forEach(kw => {
+                blocklist.keywords[kw] = (blocklist.keywords[kw] || 0) + 5;
+            });
+            saveBlocklist();
+            console.log(`[Wallgarden] Blocked by keywords: [${keywords.join(', ')}]`);
+        }
+
+        if (cardRef) {
+            hideVideo(cardRef, `Blocked: "${channelName || fallbackTitle}"`);
+        }
+
+        // Close menu natively
+        document.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true
+        }));
+    });
 }
 
 /**
