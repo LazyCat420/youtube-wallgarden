@@ -283,8 +283,8 @@ function injectInlineBlockIcon(videoEl, channelName) {
     btn.title = `Block "${channelName}"`;
     btn.style.cssText = `
         background: none; border: none; cursor: pointer;
-        font-size: 14px; padding: 4px 6px; margin-right: 2px;
-        opacity: 0; transition: opacity 0.15s;
+        font-size: 16px; padding: 4px 6px; margin-right: 2px;
+        opacity: 0.5; transition: opacity 0.15s;
         border-radius: 50%; line-height: 1;
     `;
 
@@ -294,9 +294,9 @@ function injectInlineBlockIcon(videoEl, channelName) {
         blockChannelAndHide(channelName, videoEl);
     });
 
-    // Show on video card hover
+    // Brighten on video card hover
     videoEl.addEventListener('mouseenter', () => { btn.style.opacity = '1'; });
-    videoEl.addEventListener('mouseleave', () => { btn.style.opacity = '0'; });
+    videoEl.addEventListener('mouseleave', () => { btn.style.opacity = '0.5'; });
 
     // Insert before the ⋮ menu button
     menuRenderer.style.display = 'flex';
