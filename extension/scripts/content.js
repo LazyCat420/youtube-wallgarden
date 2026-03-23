@@ -631,9 +631,27 @@ function startObserver() {
 
     observer.observe(document.body, { childList: true, subtree: true });
 
+    // Initial scan
     processVideos(document.querySelectorAll(videoSelectors));
     processShelves(document.querySelectorAll(shelfSelectors));
     hideShortsElements();
+
+    // Periodic rescan for lazy-loaded homepage cards
+    // YouTube's new yt-lockup-view-model cards render their content AFTER
+    // the ytd-rich-item-renderer container is added to the DOM, so the
+    // MutationObserver fires before h3/channel elements exist.
+    setInterval(() => {
+        const cards = document.querySelectorAll(videoSelectors);
+        const unprocessed = [];
+        cards.forEach(card => {
+            if (!evaluatedVideos.has(card) && card.style.display !== 'none') {
+                unprocessed.push(card);
+            }
+        });
+        if (unprocessed.length > 0) {
+            processVideos(unprocessed);
+        }
+    }, 2000);
 }
 
 /**
