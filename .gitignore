@@ -1,0 +1,19 @@
+# Extension build artifacts
+extension.crx
+extension.pem
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Node (if added later)
+node_modules/
+package-lock.json
+
+# Gemini agent artifacts
+.gemini/

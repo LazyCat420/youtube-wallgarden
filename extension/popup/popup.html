@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wallgarden Settings</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="container">
+        <h1>🌿 Wallgarden</h1>
+        <p class="subtitle">Anti-Brainrot Filter</p>
+
+        <!-- SMART BLOCKLIST -->
+        <div class="section section-highlight">
+            <h3>🧠 Smart Blocklist</h3>
+            <p class="section-desc">Learns from your "Not Interested" &amp; "Don't Recommend" clicks. Permanently blocks channels &amp; keywords YouTube keeps pushing back.</p>
+            <label class="toggle-container">
+                <input type="checkbox" id="enableSmartBlock" checked>
+                <span class="toggle-slider"></span>
+                Enable Smart Blocking
+            </label>
+            <div class="stats-row">
+                <span class="stat" id="statChannels">0 channels blocked</span>
+                <span class="stat" id="statKeywords">0 keywords tracked</span>
+            </div>
+            <div class="add-channel-row">
+                <input type="text" id="addChannelInput" placeholder="Type channel name to block...">
+                <button id="addChannelBtn" class="btn-add">+ Add</button>
+            </div>
+            <div id="blockedChannelsList" class="blocked-list">
+                <!-- Populated by JS -->
+            </div>
+            <div class="btn-row">
+                <button id="exportBtn" class="btn-small">Export</button>
+                <button id="clearBtn" class="btn-small btn-danger">Clear All</button>
+            </div>
+        </div>
+
+        <!-- HOMEPAGE CLEANUP -->
+        <div class="section">
+            <h3>🏠 Homepage Cleanup</h3>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockShorts" checked>
+                <span class="toggle-slider"></span>
+                Block YouTube Shorts
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockBreakingNews" checked>
+                <span class="toggle-slider"></span>
+                Block "Breaking News" shelf
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockTrending" checked>
+                <span class="toggle-slider"></span>
+                Block "Trending" shelf
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockCommunityPosts" checked>
+                <span class="toggle-slider"></span>
+                Block Community Posts in feed
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockPeopleAlsoWatched" checked>
+                <span class="toggle-slider"></span>
+                Block "People also watched"
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockAds" checked>
+                <span class="toggle-slider"></span>
+                Block ad banners &amp; promoted cards
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockMoviesShows" checked>
+                <span class="toggle-slider"></span>
+                Block "Movies &amp; Shows" shelf
+            </label>
+        </div>
+
+        <!-- WATCH PAGE CLEANUP -->
+        <div class="section">
+            <h3>🎬 Watch Page Cleanup</h3>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockMerch" checked>
+                <span class="toggle-slider"></span>
+                Block merchandise shelf
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockDonations" checked>
+                <span class="toggle-slider"></span>
+                Block Super Thanks / donation prompts
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockShortsRemix" checked>
+                <span class="toggle-slider"></span>
+                Block "Shorts remixing this video"
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockChatReplay" checked>
+                <span class="toggle-slider"></span>
+                Block live chat replay
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockInfoCards" checked>
+                <span class="toggle-slider"></span>
+                Block info cards &amp; end screen overlays
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockClipThanks">
+                <span class="toggle-slider"></span>
+                Hide "Clip" &amp; "Thanks" buttons
+            </label>
+        </div>
+
+        <!-- GLOBAL ANNOYANCES -->
+        <div class="section">
+            <h3>🚫 Global Annoyances</h3>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockPremiumUpsell" checked>
+                <span class="toggle-slider"></span>
+                Block "Try YouTube Premium" banners
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockNotifPopup" checked>
+                <span class="toggle-slider"></span>
+                Block notification bell popup
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockMusicUpsell" checked>
+                <span class="toggle-slider"></span>
+                Block YouTube Music upsells
+            </label>
+        </div>
+
+        <!-- HEURISTICS -->
+        <div class="section">
+            <h3>📐 Heuristics</h3>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockAllCaps" checked>
+                <span class="toggle-slider"></span>
+                Block ALL CAPS Titles
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="blockPunctuation" checked>
+                <span class="toggle-slider"></span>
+                Block excessive punctuation (??/!!)
+            </label>
+        </div>
+
+        <button id="saveBtn">Save Settings</button>
+        <span id="saveStatus"></span>
+    </div>
+    <script src="popup.js"></script>
+</body>
+</html>

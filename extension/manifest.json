@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Wallgarden",
+  "version": "1.0.0",
+  "description": "Filters out YouTube Brainrot, Shorts, clickbait, and spam using CSS rules and heuristics.",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "*://*.youtube.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.youtube.com/*"
+      ],
+      "js": [
+        "scripts/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html"
+  }
+}
