@@ -71,20 +71,26 @@ chrome.storage.onChanged.addListener((changes, area) => {
 let lastMenuTarget = null;
 
 function startMenuInterceptor() {
-    // Track which video card opened the 3-dot menu + inject block item after popup renders
+    // Track which video/shorts card opened the 3-dot menu + inject block item
     document.addEventListener('click', (e) => {
-        const menuButton = e.target.closest('ytd-menu-renderer button, yt-icon-button#button, button.yt-icon-button');
+        // Match both regular video and Shorts ⋮ buttons
+        const menuButton = e.target.closest(
+            'ytd-menu-renderer button, yt-icon-button#button, button.yt-icon-button, ' +
+            'button[aria-label="More actions"], button[aria-label="Action menu"]'
+        );
         if (menuButton) {
+            // Find parent card (regular videos + Shorts containers)
             const videoCard = menuButton.closest(
-                'ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer'
+                'ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer, ' +
+                'ytd-reel-item-renderer'
             );
             if (videoCard) {
                 lastMenuTarget = videoCard;
-                console.log('[Wallgarden] Menu opened on video card');
+                console.log('[Wallgarden] Menu opened on card');
 
                 // Wait for YouTube to populate the popup, then inject our item
                 setTimeout(() => tryInjectBlockItem(), 300);
-                setTimeout(() => tryInjectBlockItem(), 600); // Retry in case popup was slow
+                setTimeout(() => tryInjectBlockItem(), 600);
             }
         }
     }, true);
@@ -143,15 +149,47 @@ function tryInjectBlockItem() {
 function injectBlockMenuItem(listbox) {
     if (!settings.enableSmartBlock || !lastMenuTarget) return;
 
-    // Extract channel name from the video card that triggered the menu
+    // Extract channel name: try regular selectors first
+    let channelName = '';
     const channelEl = lastMenuTarget.querySelector(
         '#channel-name .yt-simple-endpoint, #channel-name a, ' +
         'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a'
     );
-    if (!channelEl) return;
-    const channelName = channelEl.textContent.trim();
-    if (!channelName) return;
+    if (channelEl) {
+        channelName = channelEl.textContent.trim();
+    }
 
+    // Fallback for Shorts: try to get channel from "Don't recommend channel" menu item
+    if (!channelName) {
+        const menuItems = listbox.querySelectorAll('ytd-menu-service-item-renderer, tp-yt-paper-item');
+        menuItems.forEach(item => {
+            const text = item.textContent.trim();
+            if (text.toLowerCase().includes("don't recommend channel")) {
+                // YouTube's item text is "Don't recommend channel" — channel name may be elsewhere
+                // Extract from the card's link href as fallback
+                const shortsLink = lastMenuTarget.querySelector('a[href*="/shorts/"], a[href*="/@"]');
+                if (shortsLink) {
+                    const href = shortsLink.getAttribute('href') || '';
+                    const handleMatch = href.match(/\/@([^/]+)/);
+                    if (handleMatch) channelName = '@' + handleMatch[1];
+                }
+            }
+        });
+    }
+
+    // Fallback: extract title from Shorts card for title-based blocking
+    let shortsTitle = '';
+    if (!channelName) {
+        const titleEl = lastMenuTarget.querySelector(
+            '#video-title, h3, .shortsLockupViewModelHostOutsideMetadataTitle, ' +
+            'a.shortsLockupViewModelHostOutsideMetadataEndpoint'
+        );
+        if (titleEl) shortsTitle = titleEl.textContent.trim();
+    }
+
+    if (!channelName && !shortsTitle) return;
+
+    const blockLabel = channelName ? `Block "${channelName}"` : `Block this Short`;
     const menuItem = document.createElement('tp-yt-paper-item');
     menuItem.className = 'wg-block-menu-item style-scope ytd-menu-popup-renderer';
     menuItem.setAttribute('role', 'option');
@@ -164,17 +202,35 @@ function injectBlockMenuItem(listbox) {
     `;
     menuItem.innerHTML = `
         <span style="font-size: 16px;">🌿</span>
-        <span>Block "${channelName}"</span>
+        <span>${blockLabel}</span>
     `;
 
+    const cardRef = lastMenuTarget; // Capture reference at injection time
     menuItem.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
 
-        blockChannelAndHide(channelName, lastMenuTarget);
+        if (channelName) {
+            blockChannelAndHide(channelName, cardRef);
+        } else if (shortsTitle) {
+            // No channel available — boost title keywords for auto-blocking
+            const keywords = extractKeywords(shortsTitle);
+            keywords.forEach(kw => {
+                blocklist.keywords[kw] = (blocklist.keywords[kw] || 0) + 5; // Strong weight boost
+            });
+            saveBlocklist();
+            console.log(`[Wallgarden] Blocked Short by title keywords: [${keywords.join(', ')}]`);
+        }
+
+        // Hide the source card
+        if (cardRef) {
+            hideVideo(cardRef, `Blocked: "${channelName || shortsTitle}"`);
+        }
 
         // Close menu using YouTube's native Escape key mechanism
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+        document.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true
+        }));
     });
 
     // Find the inner listbox if we landed on the outer wrapper
