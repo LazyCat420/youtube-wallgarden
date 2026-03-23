@@ -83,16 +83,31 @@ function startMenuInterceptor() {
                 console.log('[Wallgarden] Menu opened on video card');
             }
         }
-    }, true); // Use capture phase to fire before YouTube's handlers
+    }, true);
 
-    // 2. Watch for the popup menu items to appear, then intercept clicks
+    // 2. Watch for popup menus and inject our block item + hook existing items
     const menuObserver = new MutationObserver((mutations) => {
         mutations.forEach(mutation => {
             mutation.addedNodes.forEach(node => {
                 if (node.nodeType !== Node.ELEMENT_NODE) return;
 
-                // YouTube renders menu items as <ytd-menu-service-item-renderer>
-                // or <tp-yt-paper-listbox> items
+                // Find the popup menu listbox
+                const listboxes = [];
+                if (node.matches && node.matches('tp-yt-paper-listbox, ytd-menu-popup-renderer')) {
+                    listboxes.push(node);
+                }
+                if (node.querySelectorAll) {
+                    node.querySelectorAll('tp-yt-paper-listbox, ytd-menu-popup-renderer').forEach(l => listboxes.push(l));
+                }
+
+                listboxes.forEach(listbox => {
+                    // Inject our "Block Channel" item if not already present
+                    if (!listbox.querySelector('.wg-block-menu-item')) {
+                        injectBlockMenuItem(listbox);
+                    }
+                });
+
+                // Also hook "Not interested" / "Don't recommend" items
                 const menuItems = node.querySelectorAll
                     ? node.querySelectorAll('ytd-menu-service-item-renderer, tp-yt-paper-item')
                     : [];
@@ -100,7 +115,6 @@ function startMenuInterceptor() {
                 menuItems.forEach(item => {
                     const text = item.textContent.trim().toLowerCase();
                     if (text.includes('not interested') || text.includes("don't recommend")) {
-                        // Attach our interceptor (won't duplicate because we check)
                         if (!item.dataset.wallgardenHooked) {
                             item.dataset.wallgardenHooked = 'true';
                             item.addEventListener('click', () => {
@@ -115,6 +129,78 @@ function startMenuInterceptor() {
     });
 
     menuObserver.observe(document.body, { childList: true, subtree: true });
+}
+
+/**
+ * Inject a "🌿 Block Channel" item into YouTube's 3-dot popup menu
+ */
+function injectBlockMenuItem(listbox) {
+    if (!settings.enableSmartBlock || !lastMenuTarget) return;
+
+    // Extract channel name from the video card that triggered the menu
+    const channelEl = lastMenuTarget.querySelector(
+        '#channel-name .yt-simple-endpoint, #channel-name a, ' +
+        'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a'
+    );
+    if (!channelEl) return;
+    const channelName = channelEl.textContent.trim();
+    if (!channelName) return;
+
+    const menuItem = document.createElement('tp-yt-paper-item');
+    menuItem.className = 'wg-block-menu-item style-scope ytd-menu-popup-renderer';
+    menuItem.setAttribute('role', 'option');
+    menuItem.setAttribute('tabindex', '0');
+    menuItem.style.cssText = `
+        display: flex; align-items: center; gap: 12px;
+        padding: 10px 16px; cursor: pointer; min-height: 36px;
+        color: #ff5252; font-size: 14px;
+        border-top: 1px solid rgba(255,255,255,0.1);
+    `;
+    menuItem.innerHTML = `
+        <span style="font-size: 16px;">🌿</span>
+        <span>Block "${channelName}"</span>
+    `;
+
+    menuItem.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const channelLower = channelName.toLowerCase();
+        if (!blocklist.channels.includes(channelLower)) {
+            blocklist.channels.push(channelLower);
+            saveBlocklist();
+            console.log(`[Wallgarden] Blocked channel from menu: "${channelName}"`);
+        }
+
+        // Hide the current video card
+        if (lastMenuTarget) {
+            hideVideo(lastMenuTarget, `Menu-blocked: "${channelName}"`);
+            showBlockedBadge(lastMenuTarget, channelName);
+        }
+
+        // Hide all other visible videos from this channel
+        document.querySelectorAll('ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer').forEach(el => {
+            if (el.style.display === 'none') return;
+            const ch = el.querySelector(
+                '#channel-name .yt-simple-endpoint, #channel-name a, ' +
+                'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a'
+            );
+            if (ch && ch.textContent.trim().toLowerCase() === channelLower) {
+                hideVideo(el, `Menu-blocked: "${channelName}"`);
+                showBlockedBadge(el, channelName);
+            }
+        });
+
+        // Close the popup menu
+        const popup = menuItem.closest('ytd-popup-container, tp-yt-iron-dropdown, ytd-menu-popup-renderer');
+        if (popup) popup.style.display = 'none';
+        document.body.click(); // Force close any remaining overlay
+    });
+
+    // Find the inner listbox if we landed on the outer wrapper
+    const innerList = listbox.querySelector('tp-yt-paper-listbox') || listbox;
+    innerList.appendChild(menuItem);
+    console.log(`[Wallgarden] Injected "Block ${channelName}" into menu`);
 }
 
 /**
@@ -586,70 +672,7 @@ function processVideos(videoElements) {
             hideVideo(videoEl, `Heuristics: "${titleText}"`);
             return;
         }
-
-        // --- Inject Block Button ---
-        if (settings.enableSmartBlock && !videoEl.querySelector('.wg-block-btn')) {
-            injectBlockButton(videoEl, channelText);
-        }
     });
-}
-
-/**
- * Inject a "🚫 Block" button onto a video card
- */
-function injectBlockButton(videoEl, channelName) {
-    const btn = document.createElement('button');
-    btn.className = 'wg-block-btn';
-    btn.textContent = '🚫 Block';
-    btn.title = `Block "${channelName}" permanently`;
-
-    btn.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        const channelLower = channelName.toLowerCase();
-        if (!blocklist.channels.includes(channelLower)) {
-            blocklist.channels.push(channelLower);
-            saveBlocklist();
-            console.log(`[Wallgarden] Quick-blocked channel: "${channelName}"`);
-        }
-
-        // Hide this video immediately
-        hideVideo(videoEl, `Quick-blocked: "${channelName}"`);
-        showBlockedBadge(videoEl, channelName);
-
-        // Hide all other visible videos from this channel
-        document.querySelectorAll('ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer').forEach(el => {
-            if (el.style.display === 'none') return;
-            const ch = el.querySelector(
-                '#channel-name .yt-simple-endpoint, #channel-name a, ' +
-                'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a'
-            );
-            if (ch && ch.textContent.trim().toLowerCase() === channelLower) {
-                hideVideo(el, `Quick-blocked: "${channelName}"`);
-                showBlockedBadge(el, channelName);
-            }
-        });
-    });
-
-    // Position the button — find the thumbnail or metadata area
-    const thumbnail = videoEl.querySelector('#thumbnail, ytd-thumbnail');
-    if (thumbnail) {
-        thumbnail.style.position = 'relative';
-        btn.style.cssText = `
-            position: absolute; top: 6px; right: 6px; z-index: 9999;
-            background: rgba(0,0,0,0.85); color: #ff5252;
-            border: 1px solid #ff5252; border-radius: 4px;
-            padding: 3px 8px; font-size: 11px; font-weight: 700;
-            cursor: pointer; opacity: 0; transition: opacity 0.15s;
-            font-family: 'Inter', 'Segoe UI', sans-serif;
-        `;
-        thumbnail.appendChild(btn);
-
-        // Show on hover
-        videoEl.addEventListener('mouseenter', () => { btn.style.opacity = '1'; });
-        videoEl.addEventListener('mouseleave', () => { btn.style.opacity = '0'; });
-    }
 }
 
 function failsHeuristics(title) {
