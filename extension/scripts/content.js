@@ -5,7 +5,7 @@
 // Default settings (all ON by default, except blockClipThanks which is opt-in)
 let settings = {
     // Homepage
-    blockShorts: true,
+    blockShorts: false,
     blockBreakingNews: true,
     blockTrending: true,
     blockCommunityPosts: true,
