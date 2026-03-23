@@ -121,26 +121,39 @@ function startMenuInterceptor() {
 }
 
 /**
- * Find the currently visible popup listbox and inject our block item
+ * Find the currently visible popup listbox and inject our block item.
+ * Regular videos use: tp-yt-paper-listbox#items
+ * Shorts use: yt-sheet-view-model > yt-list-view-model
  */
 function tryInjectBlockItem() {
     if (!settings.enableSmartBlock || !lastMenuTarget) return;
 
-    // YouTube's popup: ytd-popup-container > tp-yt-iron-dropdown > ytd-menu-popup-renderer > tp-yt-paper-listbox#items
+    // --- Path 1: Regular video popup (tp-yt-paper-listbox) ---
     const listbox = document.querySelector(
         'ytd-popup-container tp-yt-iron-dropdown:not([aria-hidden="true"]) tp-yt-paper-listbox#items,' +
         'ytd-menu-popup-renderer tp-yt-paper-listbox#items'
     );
 
-    if (!listbox) {
-        console.log('[Wallgarden] No visible listbox found');
+    if (listbox) {
+        // Remove stale block items (YouTube reuses the popup for different videos)
+        listbox.querySelectorAll('.wg-block-menu-item').forEach(old => old.remove());
+        injectBlockMenuItem(listbox);
         return;
     }
 
-    // Remove stale block items (YouTube reuses the popup for different videos)
-    listbox.querySelectorAll('.wg-block-menu-item').forEach(old => old.remove());
+    // --- Path 2: Shorts sheet popup (yt-list-view-model) ---
+    const sheetPopup = document.querySelector(
+        'tp-yt-iron-dropdown:not([aria-hidden="true"]) yt-sheet-view-model yt-list-view-model'
+    );
 
-    injectBlockMenuItem(listbox);
+    if (sheetPopup) {
+        // Remove stale block items
+        sheetPopup.querySelectorAll('.wg-block-menu-item').forEach(old => old.remove());
+        injectShortsBlockItem(sheetPopup);
+        return;
+    }
+
+    console.log('[Wallgarden] No visible popup found');
 }
 
 /**
@@ -241,6 +254,84 @@ function injectBlockMenuItem(listbox) {
 }
 
 /**
+ * Inject a block item into the Shorts sheet popup (yt-list-view-model)
+ * Shorts menus use a different component tree than regular videos
+ */
+function injectShortsBlockItem(listContainer) {
+    if (!settings.enableSmartBlock || !lastMenuTarget) return;
+
+    // Try to get channel handle from the Shorts card's links
+    let channelName = '';
+    const handleLink = lastMenuTarget.querySelector('a[href^="/@"]');
+    if (handleLink) {
+        channelName = handleLink.textContent.trim() || ('@' + handleLink.getAttribute('href').replace('/@', ''));
+    }
+
+    // Get Short title for keyword-based blocking
+    let shortsTitle = '';
+    const titleEl = lastMenuTarget.querySelector(
+        'h3 a, .shortsLockupViewModelHostMetadataTitle a, a[title]'
+    );
+    if (titleEl) shortsTitle = titleEl.getAttribute('title') || titleEl.textContent.trim();
+
+    if (!channelName && !shortsTitle) return;
+
+    const blockLabel = channelName ? `🌿 Block "${channelName}"` : '🌿 Block this Short';
+
+    // Create a menu item styled like YouTube's yt-list-item-view-model
+    const blockItem = document.createElement('div');
+    blockItem.className = 'wg-block-menu-item';
+    blockItem.setAttribute('role', 'menuitem');
+    blockItem.setAttribute('tabindex', '0');
+    blockItem.style.cssText = `
+        display: flex; align-items: center; gap: 16px;
+        padding: 12px 16px; cursor: pointer;
+        color: #ff5252; font-size: 14px; font-family: "Roboto","Arial",sans-serif;
+        border-top: 1px solid rgba(255,255,255,0.1);
+    `;
+    blockItem.textContent = blockLabel;
+
+    const cardRef = lastMenuTarget;
+    blockItem.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (channelName) {
+            blockChannelAndHide(channelName, cardRef);
+        } else if (shortsTitle) {
+            // Block by title keywords with strong weight
+            const keywords = extractKeywords(shortsTitle);
+            keywords.forEach(kw => {
+                blocklist.keywords[kw] = (blocklist.keywords[kw] || 0) + 5;
+            });
+            saveBlocklist();
+            console.log(`[Wallgarden] Blocked Short by keywords: [${keywords.join(', ')}]`);
+        }
+
+        // Hide the source card
+        if (cardRef) {
+            hideVideo(cardRef, `Blocked: "${channelName || shortsTitle}"`);
+        }
+
+        // Close menu natively
+        document.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true
+        }));
+    });
+
+    // Hover effect
+    blockItem.addEventListener('mouseenter', () => {
+        blockItem.style.backgroundColor = 'rgba(255, 82, 82, 0.15)';
+    });
+    blockItem.addEventListener('mouseleave', () => {
+        blockItem.style.backgroundColor = '';
+    });
+
+    listContainer.appendChild(blockItem);
+    console.log(`[Wallgarden] Injected Shorts block: "${channelName || shortsTitle}"`);
+}
+
+/**
  * Block a channel, save to storage, and hide all matching videos
  */
 function blockChannelAndHide(channelName, sourceVideoEl) {
@@ -284,8 +375,10 @@ function injectInlineBlockIcon(videoEl, channelName) {
     btn.style.cssText = `
         background: none; border: none; cursor: pointer;
         font-size: 16px; padding: 4px 6px; margin-right: 2px;
-        opacity: 0.5; transition: opacity 0.15s;
+        opacity: 0; transform: scale(0.7);
+        transition: opacity 0.25s ease, transform 0.25s ease;
         border-radius: 50%; line-height: 1;
+        pointer-events: none;
     `;
 
     btn.addEventListener('click', (e) => {
@@ -294,9 +387,17 @@ function injectInlineBlockIcon(videoEl, channelName) {
         blockChannelAndHide(channelName, videoEl);
     });
 
-    // Brighten on video card hover
-    videoEl.addEventListener('mouseenter', () => { btn.style.opacity = '1'; });
-    videoEl.addEventListener('mouseleave', () => { btn.style.opacity = '0.5'; });
+    // Smooth pop-in on video card hover
+    videoEl.addEventListener('mouseenter', () => {
+        btn.style.opacity = '1';
+        btn.style.transform = 'scale(1)';
+        btn.style.pointerEvents = 'auto';
+    });
+    videoEl.addEventListener('mouseleave', () => {
+        btn.style.opacity = '0';
+        btn.style.transform = 'scale(0.7)';
+        btn.style.pointerEvents = 'none';
+    });
 
     // Insert before the ⋮ menu button
     menuRenderer.style.display = 'flex';

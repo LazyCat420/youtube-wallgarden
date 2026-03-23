@@ -76,3 +76,15 @@ Added `processShelves()` function as a text-based fallback for shelf elements th
 - Removed `videoId` requirement from `processVideos()` — was preventing search results from being processed
 - Broadened channel name selectors to cover YouTube's different element structures across pages
 - Added `blockChannelAndHide()` helper for centralized channel blocking logic
+
+---
+
+### V6: Homepage Block + Shorts Sheet Popup + Smooth Hover
+
+**`content.js`**: Full homepage and Shorts blocking support:
+
+1. **Homepage video blocking (account-independent)**: YouTube's new `yt-lockup-view-model` cards use different selectors — added `h3 a` for titles, `a[href^="/@"]` for channels, `button[aria-label="More actions"]` for ⋮ buttons. Added 2-second periodic rescan because homepage cards load content lazily AFTER the `ytd-rich-item-renderer` container is added to the DOM.
+
+2. **Shorts ⋮ menu block**: Shorts use a different popup (`yt-sheet-view-model` → `yt-list-view-model`) instead of `tp-yt-paper-listbox`. New `injectShortsBlockItem()` function creates a styled block item for the sheet popup. `tryInjectBlockItem()` now has dual-path detection (regular listbox vs Shorts sheet popup).
+
+3. **Smooth 🚫 hover animation**: Block icon uses CSS `transform: scale(0.7→1.0)` + `opacity: 0→1` with 0.25s ease transition for a polished pop-in effect on video card hover.
