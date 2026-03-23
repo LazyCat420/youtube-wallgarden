@@ -171,42 +171,76 @@ function injectBlockMenuItem(listbox) {
         e.preventDefault();
         e.stopPropagation();
 
-        const channelLower = channelName.toLowerCase();
-        if (!blocklist.channels.includes(channelLower)) {
-            blocklist.channels.push(channelLower);
-            saveBlocklist();
-            console.log(`[Wallgarden] Blocked channel from menu: "${channelName}"`);
-        }
+        blockChannelAndHide(channelName, lastMenuTarget);
 
-        // Hide the current video card
-        if (lastMenuTarget) {
-            hideVideo(lastMenuTarget, `Menu-blocked: "${channelName}"`);
-            showBlockedBadge(lastMenuTarget, channelName);
-        }
-
-        // Hide all other visible videos from this channel
-        document.querySelectorAll('ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer').forEach(el => {
-            if (el.style.display === 'none') return;
-            const ch = el.querySelector(
-                '#channel-name .yt-simple-endpoint, #channel-name a, ' +
-                'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a'
-            );
-            if (ch && ch.textContent.trim().toLowerCase() === channelLower) {
-                hideVideo(el, `Menu-blocked: "${channelName}"`);
-                showBlockedBadge(el, channelName);
-            }
-        });
-
-        // Close the popup menu
-        const popup = menuItem.closest('ytd-popup-container, tp-yt-iron-dropdown, ytd-menu-popup-renderer');
-        if (popup) popup.style.display = 'none';
-        document.body.click(); // Force close any remaining overlay
+        // Close menu using YouTube's native Escape key mechanism
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
     });
 
     // Find the inner listbox if we landed on the outer wrapper
     const innerList = listbox.querySelector('tp-yt-paper-listbox') || listbox;
     innerList.appendChild(menuItem);
     console.log(`[Wallgarden] Injected "Block ${channelName}" into menu`);
+}
+
+/**
+ * Block a channel, save to storage, and hide all matching videos
+ */
+function blockChannelAndHide(channelName, sourceVideoEl) {
+    const channelLower = channelName.toLowerCase();
+    if (!blocklist.channels.includes(channelLower)) {
+        blocklist.channels.push(channelLower);
+        saveBlocklist();
+        console.log(`[Wallgarden] Blocked channel: "${channelName}"`);
+    }
+
+    // Hide all visible videos from this channel
+    document.querySelectorAll('ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer').forEach(el => {
+        if (el.style.display === 'none') return;
+        const ch = el.querySelector(
+            '#channel-name .yt-simple-endpoint, #channel-name a, ' +
+            'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a'
+        );
+        if (ch && ch.textContent.trim().toLowerCase() === channelLower) {
+            hideVideo(el, `Blocked: "${channelName}"`);
+        }
+    });
+}
+
+/**
+ * Inject a small 🚫 block icon button next to the ⋮ menu button on each video card
+ */
+function injectInlineBlockIcon(videoEl, channelName) {
+    if (videoEl.querySelector('.wg-inline-block')) return;
+
+    const menuRenderer = videoEl.querySelector('ytd-menu-renderer');
+    if (!menuRenderer) return;
+
+    const btn = document.createElement('button');
+    btn.className = 'wg-inline-block';
+    btn.textContent = '🚫';
+    btn.title = `Block "${channelName}"`;
+    btn.style.cssText = `
+        background: none; border: none; cursor: pointer;
+        font-size: 14px; padding: 4px 6px; margin-right: 2px;
+        opacity: 0; transition: opacity 0.15s;
+        border-radius: 50%; line-height: 1;
+    `;
+
+    btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        blockChannelAndHide(channelName, videoEl);
+    });
+
+    // Show on video card hover
+    videoEl.addEventListener('mouseenter', () => { btn.style.opacity = '1'; });
+    videoEl.addEventListener('mouseleave', () => { btn.style.opacity = '0'; });
+
+    // Insert before the ⋮ menu button
+    menuRenderer.style.display = 'flex';
+    menuRenderer.style.alignItems = 'center';
+    menuRenderer.insertBefore(btn, menuRenderer.firstChild);
 }
 
 /**
@@ -677,6 +711,11 @@ function processVideos(videoElements) {
         if (failsHeuristics(titleText)) {
             hideVideo(videoEl, `Heuristics: "${titleText}"`);
             return;
+        }
+
+        // --- Inject inline block icon next to ⋮ button ---
+        if (settings.enableSmartBlock) {
+            injectInlineBlockIcon(videoEl, channelText);
         }
     });
 }
