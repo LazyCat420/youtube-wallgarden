@@ -563,10 +563,12 @@ function applyBlockingCSS() {
             ytd-rich-item-renderer:has(ytm-shorts-lockup-view-model-v2),
             ytd-rich-item-renderer:has(a[href^="/shorts/"])
         `);
-        // Search results: Shorts shelf in search
+        // Search results: Shorts shelf in search (multiple container types)
         rules.push(`
             ytd-item-section-renderer:has(ytd-reel-shelf-renderer),
-            ytd-section-list-renderer ytd-reel-shelf-renderer
+            ytd-section-list-renderer ytd-reel-shelf-renderer,
+            grid-shelf-view-model,
+            ytd-item-section-renderer:has(grid-shelf-view-model)
         `);
         // Sidebar nav
         rules.push(`
