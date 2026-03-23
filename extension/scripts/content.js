@@ -153,7 +153,8 @@ function injectBlockMenuItem(listbox) {
     let channelName = '';
     const channelEl = lastMenuTarget.querySelector(
         '#channel-name .yt-simple-endpoint, #channel-name a, ' +
-        'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a'
+        'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a, ' +
+        'a[href^="/@"]'
     );
     if (channelEl) {
         channelName = channelEl.textContent.trim();
@@ -255,7 +256,8 @@ function blockChannelAndHide(channelName, sourceVideoEl) {
         if (el.style.display === 'none') return;
         const ch = el.querySelector(
             '#channel-name .yt-simple-endpoint, #channel-name a, ' +
-            'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a'
+            'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a, ' +
+            'a[href^="/@"]'
         );
         if (ch && ch.textContent.trim().toLowerCase() === channelLower) {
             hideVideo(el, `Blocked: "${channelName}"`);
@@ -269,7 +271,10 @@ function blockChannelAndHide(channelName, sourceVideoEl) {
 function injectInlineBlockIcon(videoEl, channelName) {
     if (videoEl.querySelector('.wg-inline-block')) return;
 
-    const menuRenderer = videoEl.querySelector('ytd-menu-renderer');
+    // Find menu area — different on homepage (button[aria-label]) vs search (ytd-menu-renderer)
+    const menuRenderer = videoEl.querySelector(
+        'ytd-menu-renderer, #menu, button[aria-label="More actions"]'
+    )?.closest('ytd-menu-renderer, #menu') || videoEl.querySelector('button[aria-label="More actions"]')?.parentElement;
     if (!menuRenderer) return;
 
     const btn = document.createElement('button');
@@ -729,11 +734,13 @@ function processVideos(videoElements) {
     videoElements.forEach(videoEl => {
         if (evaluatedVideos.has(videoEl) || videoEl.style.display === 'none') return;
 
-        const titleEl = videoEl.querySelector('#video-title');
+        const titleEl = videoEl.querySelector(
+            '#video-title, h3 a, yt-formatted-string#video-title'
+        );
         const channelEl = videoEl.querySelector(
             '#channel-name .yt-simple-endpoint, #channel-name a, ' +
             'ytd-channel-name .yt-simple-endpoint, ytd-channel-name a, ' +
-            '.ytd-channel-name a'
+            '.ytd-channel-name a, a[href^="/@"]'
         );
 
         if (!titleEl || !channelEl) return;
