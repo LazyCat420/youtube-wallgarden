@@ -738,33 +738,56 @@ function startObserver() {
     const videoSelectors = 'ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer';
     const shelfSelectors = 'ytd-shelf-renderer, ytd-rich-shelf-renderer, ytd-rich-section-renderer';
 
+    // Throttle hideShortsElements to max once per 2 seconds
+    let shortsThrottleTimer = null;
+    function throttledHideShorts() {
+        if (shortsThrottleTimer) return;
+        shortsThrottleTimer = setTimeout(() => {
+            shortsThrottleTimer = null;
+            hideShortsElements();
+        }, 2000);
+    }
+
+    // Debounced MutationObserver — batch rapid DOM mutations
+    let pendingMutations = [];
+    let rafId = null;
+
     const observer = new MutationObserver((mutations) => {
-        const newVideoNodes = [];
-        const newShelfNodes = [];
+        pendingMutations.push(...mutations);
+        if (!rafId) {
+            rafId = requestAnimationFrame(() => {
+                const allMutations = pendingMutations;
+                pendingMutations = [];
+                rafId = null;
 
-        mutations.forEach(mutation => {
-            mutation.addedNodes.forEach(node => {
-                if (node.nodeType !== Node.ELEMENT_NODE) return;
+                const newVideoNodes = [];
+                const newShelfNodes = [];
 
-                if (node.matches && node.matches(videoSelectors)) {
-                    newVideoNodes.push(node);
-                } else if (node.querySelectorAll) {
-                    node.querySelectorAll(videoSelectors).forEach(v => newVideoNodes.push(v));
-                }
+                allMutations.forEach(mutation => {
+                    mutation.addedNodes.forEach(node => {
+                        if (node.nodeType !== Node.ELEMENT_NODE) return;
 
-                if (node.matches && node.matches(shelfSelectors)) {
-                    newShelfNodes.push(node);
-                } else if (node.querySelectorAll) {
-                    node.querySelectorAll(shelfSelectors).forEach(s => newShelfNodes.push(s));
-                }
+                        if (node.matches && node.matches(videoSelectors)) {
+                            newVideoNodes.push(node);
+                        } else if (node.querySelectorAll) {
+                            node.querySelectorAll(videoSelectors).forEach(v => newVideoNodes.push(v));
+                        }
+
+                        if (node.matches && node.matches(shelfSelectors)) {
+                            newShelfNodes.push(node);
+                        } else if (node.querySelectorAll) {
+                            node.querySelectorAll(shelfSelectors).forEach(s => newShelfNodes.push(s));
+                        }
+                    });
+                });
+
+                if (newVideoNodes.length > 0) processVideos(newVideoNodes);
+                if (newShelfNodes.length > 0) processShelves(newShelfNodes);
+
+                // Throttled JS-based hiding for elements CSS can't target by text
+                throttledHideShorts();
             });
-        });
-
-        if (newVideoNodes.length > 0) processVideos(newVideoNodes);
-        if (newShelfNodes.length > 0) processShelves(newShelfNodes);
-
-        // JS-based hiding for elements CSS can't target by text
-        hideShortsElements();
+        }
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
@@ -774,11 +797,9 @@ function startObserver() {
     processShelves(document.querySelectorAll(shelfSelectors));
     hideShortsElements();
 
-    // Periodic rescan for lazy-loaded homepage cards
-    // YouTube's new yt-lockup-view-model cards render their content AFTER
-    // the ytd-rich-item-renderer container is added to the DOM, so the
-    // MutationObserver fires before h3/channel elements exist.
+    // Periodic rescan ONLY on homepage for lazy-loaded yt-lockup-view-model cards
     setInterval(() => {
+        if (location.pathname !== '/') return; // Only homepage needs rescan
         const cards = document.querySelectorAll(videoSelectors);
         const unprocessed = [];
         cards.forEach(card => {
@@ -789,7 +810,7 @@ function startObserver() {
         if (unprocessed.length > 0) {
             processVideos(unprocessed);
         }
-    }, 2000);
+    }, 5000);
 }
 
 /**
