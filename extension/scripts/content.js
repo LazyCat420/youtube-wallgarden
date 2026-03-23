@@ -5,7 +5,7 @@
 // Default settings (all ON by default, except blockClipThanks which is opt-in)
 let settings = {
     // Homepage
-    blockShorts: false,
+    blockShorts: true,
     blockBreakingNews: true,
     blockTrending: true,
     blockCommunityPosts: true,
@@ -562,6 +562,11 @@ function applyBlockingCSS() {
             ytd-rich-item-renderer:has(ytm-shorts-lockup-view-model),
             ytd-rich-item-renderer:has(ytm-shorts-lockup-view-model-v2),
             ytd-rich-item-renderer:has(a[href^="/shorts/"])
+        `);
+        // Search results: Shorts shelf in search
+        rules.push(`
+            ytd-item-section-renderer:has(ytd-reel-shelf-renderer),
+            ytd-section-list-renderer ytd-reel-shelf-renderer
         `);
         // Sidebar nav
         rules.push(`
