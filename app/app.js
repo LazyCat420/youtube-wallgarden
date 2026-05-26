@@ -45,6 +45,12 @@ let state = {
 // In-memory session cache for topic search discovery results
 let sessionTopicSearchCache = {};
 let topicSearchLoading = {};
+let renderTimeouts = [];
+
+function clearRenderTimeouts() {
+    renderTimeouts.forEach(t => clearTimeout(t));
+    renderTimeouts = [];
+}
 
 // Initialize Application
 document.addEventListener("DOMContentLoaded", () => {
@@ -689,6 +695,7 @@ function getScoreAndMatches(video) {
 
 // Load and Render Video Grid
 function renderFeed() {
+    clearRenderTimeouts();
     const grid = document.getElementById("video-grid");
     const shortsShelf = document.getElementById("shorts-shelf");
     const shortsGrid = document.getElementById("shorts-grid");
@@ -794,8 +801,8 @@ function renderFeed() {
         allShorts = [...subShorts, ...discShorts];
     }
     
-    // Show spinner if we have no subscribed videos and public search is currently loading
-    if (isTopicView && allVideos.length === 0 && topicSearchLoading[activeTopic]) {
+    // Show spinner if we have no subscribed videos, public search is currently loading, and no discover videos are loaded yet
+    if (isTopicView && allVideos.length === 0 && discoverVideos.length === 0 && topicSearchLoading[activeTopic]) {
         grid.innerHTML = `
             <div class="empty-state" style="grid-column: 1 / -1; min-height: 200px;">
                 <div class="sync-spinner" style="font-size: 2rem; position: static; transform: none; display: block; animation: spin 1s linear infinite; margin: 2rem auto;">🔄</div>
@@ -816,7 +823,7 @@ function renderFeed() {
     // Render Helper Function
     const renderCard = (video, targetContainer) => {
         const card = document.createElement("div");
-        card.className = "video-card";
+        card.className = "video-card fade-in";
         
         let scoreClass = "mid";
         if (video.score >= 5) scoreClass = "high";
@@ -875,7 +882,19 @@ function renderFeed() {
         grid.appendChild(divider);
         
         // Render Discover videos (capped at 30)
-        discoverVideos.slice(0, 30).forEach(video => renderCard(video, grid));
+        const discoverSlice = discoverVideos.slice(0, 30);
+        if (topicSearchLoading[activeTopic]) {
+            // If currently streaming, render already-loaded ones instantly (no timeout) to avoid resetting animations
+            discoverSlice.forEach(video => renderCard(video, grid));
+        } else {
+            // Otherwise stagger them
+            discoverSlice.forEach((video, index) => {
+                const t = setTimeout(() => {
+                    renderCard(video, grid);
+                }, index * 200); // 200ms stagger
+                renderTimeouts.push(t);
+            });
+        }
     }
 }
 
@@ -1127,25 +1146,69 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
                     source: "youtube",
                     query: topicPhrase,
                     limit: 15,
-                    days_back: 30,
-                    require_transcript: false
+                    days_back: 0,
+                    require_transcript: false,
+                    stream: true
                 })
             });
             if (resp.ok) {
-                const data = await resp.json();
-                if (data && Array.isArray(data.items)) {
-                    videos = data.items.map(item => ({
-                        id: item.video_id,
-                        title: item.title,
-                        channelName: item.channel,
-                        channelId: "",
-                        publishedStr: item.published_at ? getRelativeTime(new Date(item.published_at).getTime()) : "Recently",
-                        published: item.published_at ? new Date(item.published_at).getTime() : Date.now(),
-                        duration: item.duration_secs,
-                        viewCount: item.view_count,
-                        isDiscover: true
-                    }));
-                    success = true;
+                sessionTopicSearchCache[topicPhrase] = [];
+                success = true;
+
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = "";
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split("\n");
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        if (line.trim()) {
+                            try {
+                                const item = JSON.parse(line);
+                                if (item.error) {
+                                    console.warn("Error in stream item:", item.error);
+                                    continue;
+                                }
+                                const video = {
+                                    id: item.video_id,
+                                    title: item.title,
+                                    channelName: item.channel,
+                                    channelId: "",
+                                    publishedStr: item.published_at ? getRelativeTime(new Date(item.published_at).getTime()) : "Recently",
+                                    published: item.published_at ? new Date(item.published_at).getTime() : Date.now(),
+                                    duration: item.duration_secs,
+                                    viewCount: item.view_count,
+                                    isDiscover: true
+                                };
+
+                                sessionTopicSearchCache[topicPhrase].push(video);
+
+                                // Append directly if the user is still looking at this topic
+                                const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
+                                if (currentActiveTopic === topicPhrase) {
+                                    appendStreamedDiscoverVideo(video, topicPhrase);
+                                }
+                            } catch (e) {
+                                console.error("Error parsing stream line:", e, line);
+                            }
+                        }
+                    }
+                }
+
+                // Stream ended, update status
+                updateStatusText("Ready");
+                topicSearchLoading[topicPhrase] = false;
+                
+                // Do a final sort/render to keep it fully aligned and clean
+                const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
+                if (currentActiveTopic === topicPhrase) {
+                    renderFeed();
                 }
             } else {
                 console.warn(`Scraper-service returned status ${resp.status}. Falling back to HTML scraping.`);
@@ -1273,6 +1336,121 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
     updateStatusText("Ready");
     topicSearchLoading[topicPhrase] = false;
     renderFeed();
+}
+
+function appendStreamedDiscoverVideo(video, topicPhrase) {
+    const grid = document.getElementById("video-grid");
+    const emptyState = document.getElementById("empty-state");
+    
+    if (emptyState) emptyState.classList.add("hidden");
+    
+    // Clear search loading spinner if it is the only child of the grid
+    const spinnerDiv = grid.querySelector(".empty-state");
+    if (spinnerDiv && spinnerDiv.innerHTML.includes("Searching YouTube")) {
+        grid.innerHTML = "";
+    }
+    
+    // Evaluate video score and matched topics
+    const evaluation = getScoreAndMatches(video);
+    const enrichedVideo = {
+        ...video,
+        score: evaluation.score,
+        matchedTopics: evaluation.matches
+    };
+    
+    // Blocked channel/nuke checks
+    const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === enrichedVideo.channelId);
+    const isBlockedName = state.blockedChannels.some(bc => !bc.id && enrichedVideo.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+    if (isBlockedId || isBlockedName || enrichedVideo.score <= -10) {
+        return; // Filtered out
+    }
+    
+    // Render as standard or short
+    const isShort = isShortVideo(enrichedVideo);
+    if (isShort) {
+        if (state.settings.muteShorts) return;
+        const shortsShelf = document.getElementById("shorts-shelf");
+        const shortsGrid = document.getElementById("shorts-grid");
+        if (shortsShelf) shortsShelf.classList.remove("hidden");
+        
+        const card = document.createElement("div");
+        card.className = "video-card fade-in";
+        
+        let scoreClass = "mid";
+        if (enrichedVideo.score >= 5) scoreClass = "high";
+        if (enrichedVideo.score < 0) scoreClass = "low";
+        
+        const relativeTime = enrichedVideo.publishedStr || "Recently";
+        
+        card.innerHTML = `
+            <div class="thumbnail-area">
+                <img class="thumbnail-img" src="https://i.ytimg.com/vi/${enrichedVideo.id}/hqdefault.jpg" alt="${escapeHTML(enrichedVideo.title)}">
+                <div class="thumbnail-play-overlay">
+                    <div class="play-icon-circle">▶</div>
+                </div>
+                <div class="score-badge ${scoreClass}">★ ${enrichedVideo.score}</div>
+                <div class="search-badge">⚡ Short</div>
+            </div>
+            <div class="card-details">
+                <h3 class="video-title">${escapeHTML(enrichedVideo.title)}</h3>
+                <p class="video-channel">${escapeHTML(enrichedVideo.channelName)}</p>
+                <p class="video-time">${relativeTime}</p>
+            </div>
+        `;
+        
+        const openAction = () => playVideo(enrichedVideo);
+        card.querySelector(".thumbnail-area").addEventListener("click", openAction);
+        card.querySelector(".video-title").addEventListener("click", openAction);
+        
+        shortsGrid.appendChild(card);
+    } else {
+        // Ensure discovery divider exists
+        let divider = grid.querySelector(".discover-section-header");
+        if (!divider) {
+            divider = document.createElement("div");
+            divider.className = "discover-section-header";
+            divider.innerHTML = `
+                <h2 class="discover-section-title">🔍 Discover More on "${capitalizePhrase(topicPhrase)}"</h2>
+                <span class="discover-badge">YouTube Public Search</span>
+            `;
+            grid.appendChild(divider);
+        }
+        
+        const card = document.createElement("div");
+        card.className = "video-card fade-in";
+        
+        let scoreClass = "mid";
+        if (enrichedVideo.score >= 5) scoreClass = "high";
+        if (enrichedVideo.score < 0) scoreClass = "low";
+        
+        const relativeTime = enrichedVideo.publishedStr || "Recently";
+        let metaLine = enrichedVideo.channelName;
+        if (enrichedVideo.viewCount && enrichedVideo.viewCount > 0) {
+            metaLine += ` • ${formatViews(enrichedVideo.viewCount)}`;
+        }
+        
+        card.innerHTML = `
+            <div class="thumbnail-area">
+                <img class="thumbnail-img" src="https://i.ytimg.com/vi/${enrichedVideo.id}/hqdefault.jpg" alt="${escapeHTML(enrichedVideo.title)}">
+                <div class="thumbnail-play-overlay">
+                    <div class="play-icon-circle">▶</div>
+                </div>
+                <div class="score-badge ${scoreClass}">★ ${enrichedVideo.score}</div>
+                <div class="search-badge">🔍 Search</div>
+            </div>
+            <div class="card-details">
+                <h3 class="video-title">${escapeHTML(enrichedVideo.title)}</h3>
+                <p class="video-channel">${escapeHTML(metaLine)}</p>
+                <p class="video-time">${relativeTime}${enrichedVideo.duration ? ` • ${formatDuration(enrichedVideo.duration)}` : ""}</p>
+            </div>
+        `;
+        
+        const openAction = () => playVideo(enrichedVideo);
+        card.querySelector(".thumbnail-area").addEventListener("click", openAction);
+        card.querySelector(".video-title").addEventListener("click", openAction);
+        
+        grid.appendChild(card);
+    }
 }
 
 

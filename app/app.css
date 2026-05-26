@@ -1160,3 +1160,20 @@ body {
     background-color: var(--accent);
 }
 
+/* Smooth Card Pop-In Animation for Staggered Discovery Grid */
+.video-card.fade-in {
+    animation: cardPopIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes cardPopIn {
+    from {
+        opacity: 0;
+        transform: translateY(15px) scale(0.98);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+
