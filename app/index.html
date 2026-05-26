@@ -61,6 +61,17 @@
 
             <!-- Video Grid -->
             <section class="feed-section">
+                <!-- Shorts Dedicated Shelf -->
+                <div id="shorts-shelf" class="shorts-shelf hidden">
+                    <div class="shorts-shelf-header">
+                        <h2 class="shorts-shelf-title">⚡ Shorts</h2>
+                        <span class="shorts-badge">Filtered Feed</span>
+                    </div>
+                    <div id="shorts-grid" class="shorts-grid">
+                        <!-- Shorts cards injected dynamically -->
+                    </div>
+                </div>
+
                 <div id="video-grid" class="video-grid">
                     <!-- Cards injected dynamically -->
                 </div>
@@ -106,12 +117,23 @@
                 <!-- Channels Tab Content -->
                 <div id="tab-channels" class="tab-content active">
                     <div class="input-group">
-                        <label for="input-channel-handle">Add Channel by Handle or ID</label>
+                        <label for="input-channel-handle">Add Channel by Name, Handle, or ID</label>
                         <div class="input-inline">
-                            <input type="text" id="input-channel-handle" placeholder="e.g. @codingtrain or UC29ju8bipRHy1dS8hxg5tVA">
+                            <input type="text" id="input-channel-handle" placeholder="e.g. Fireship, @codingtrain, or UC29ju8bipRHy1dS8hxg5tVA">
                             <button id="btn-add-channel" class="btn btn-primary">Add Channel</button>
                         </div>
-                        <p class="input-hint">Handles start with @. Channel IDs start with UC.</p>
+                        <p class="input-hint">Type a channel name to search, or specify exact handle (@...) or ID (UC...).</p>
+                    </div>
+
+                    <!-- Fuzzy Search Results Container -->
+                    <div id="search-results-container" class="search-results-container hidden">
+                        <div class="search-results-header">
+                            <h4>Select Channel to Add</h4>
+                            <button id="btn-close-search-results" class="btn-close-sm" title="Dismiss results">✕</button>
+                        </div>
+                        <div id="search-results-list" class="search-results-list">
+                            <!-- Search results will populate here dynamically -->
+                        </div>
                     </div>
 
                     <div class="opml-import-area">
@@ -163,6 +185,30 @@
                                 </select>
                                 <button id="btn-save-topic" class="btn btn-primary">Save</button>
                             </div>
+                        </div>
+                    </div>
+
+                    <div class="global-filters-container" style="margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border); margin-bottom: 2rem;">
+                        <h3>Global Filters & Scraper Settings</h3>
+                        <div class="filter-option" style="margin-bottom: 1rem; display: flex; align-items: center; justify-content: space-between; gap: 2rem;">
+                            <div>
+                                <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">Use Deep Metadata Scraper (yt-dlp)</label>
+                                <span style="font-size: 0.85rem; color: var(--text-muted); display: block; line-height: 1.4;">Uses the backend scraper-service to extract view counts and exact video durations for topic search discovery. (Slower but more accurate)</span>
+                            </div>
+                            <label class="switch-toggle">
+                                <input type="checkbox" id="toggle-use-ytdlp">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                        <div class="filter-option" style="display: flex; align-items: center; justify-content: space-between; gap: 2rem;">
+                            <div>
+                                <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">Mute Shorts Entirely</label>
+                                <span style="font-size: 0.85rem; color: var(--text-muted); display: block; line-height: 1.4;">Completely hides YouTube Shorts from the feed rather than showing them in the dedicated shelf.</span>
+                            </div>
+                            <label class="switch-toggle">
+                                <input type="checkbox" id="toggle-mute-shorts">
+                                <span class="slider"></span>
+                            </label>
                         </div>
                     </div>
 
