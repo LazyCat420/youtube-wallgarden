@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🌿 Wallgarden — Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="app.css">
+</head>
+<body>
+    <div class="app-layout">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <span class="brand-icon">🌿</span>
+                <span class="brand-name">Wallgarden</span>
+            </div>
+
+            <nav class="sidebar-nav">
+                <button class="nav-item active" data-view="all">
+                    <span class="nav-icon">📺</span>
+                    <span class="nav-label">All Videos</span>
+                </button>
+                <button class="nav-item" data-view="starred">
+                    <span class="nav-icon">⭐</span>
+                    <span class="nav-label">High Priority</span>
+                </button>
+                
+                <div class="nav-divider">Topics</div>
+                <div id="dynamic-topic-tabs" class="topic-tabs-container">
+                    <!-- Topics will populate here dynamically -->
+                </div>
+            </nav>
+
+            <div class="sidebar-footer">
+                <a href="/extension/" class="btn-sidebar" target="_blank" title="Browse Chrome Extension Files">
+                    <span class="icon">🔌</span> Chrome Extension
+                </a>
+                <button id="btn-open-settings" class="btn-sidebar">
+                    <span class="icon">⚙️</span> Settings
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Dashboard View -->
+        <main class="main-content">
+            <header class="main-header">
+                <div class="header-title-area">
+                    <h1 id="current-view-title">All Videos</h1>
+                    <p id="dashboard-status-text" class="status-subtitle">Loading feeds...</p>
+                </div>
+                <div class="header-actions">
+                    <button id="btn-sync-now" class="btn btn-primary btn-icon-only" title="Sync RSS Feeds">
+                        <span class="btn-text">Sync Feeds</span>
+                        <span class="sync-spinner">🔄</span>
+                    </button>
+                </div>
+            </header>
+
+            <!-- Video Grid -->
+            <section class="feed-section">
+                <div id="video-grid" class="video-grid">
+                    <!-- Cards injected dynamically -->
+                </div>
+                <div id="empty-state" class="empty-state hidden">
+                    <div class="empty-icon">🌾</div>
+                    <h3>No videos found</h3>
+                    <p>Try adding more subscriptions, adjusting topic weights, or verifying connection status.</p>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Distraction-free IFrame Player Overlay -->
+    <div id="player-modal" class="modal-overlay hidden">
+        <button id="btn-close-player" class="modal-close" title="Close Player">✕</button>
+        <div class="player-container">
+            <div id="player-wrapper" class="player-wrapper">
+                <!-- Iframe injected dynamically -->
+            </div>
+            <div class="player-metadata">
+                <h2 id="player-video-title">Video Title</h2>
+                <p id="player-video-channel">Channel Name</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal-overlay hidden">
+        <div class="settings-card">
+            <header class="settings-header">
+                <h2>🌿 Wallgarden Dashboard Settings</h2>
+                <button id="btn-close-settings" class="settings-close">✕</button>
+            </header>
+            
+            <div class="settings-body">
+                <!-- Settings Tabs -->
+                <div class="settings-tabs">
+                    <button class="tab-btn active" data-tab="tab-channels">Channels</button>
+                    <button class="tab-btn" data-tab="tab-topics">Topics & Filters</button>
+                    <button class="tab-btn" data-tab="tab-export">Backup & Restore</button>
+                </div>
+
+                <!-- Channels Tab Content -->
+                <div id="tab-channels" class="tab-content active">
+                    <div class="input-group">
+                        <label for="input-channel-handle">Add Channel by Handle or ID</label>
+                        <div class="input-inline">
+                            <input type="text" id="input-channel-handle" placeholder="e.g. @codingtrain or UC29ju8bipRHy1dS8hxg5tVA">
+                            <button id="btn-add-channel" class="btn btn-primary">Add Channel</button>
+                        </div>
+                        <p class="input-hint">Handles start with @. Channel IDs start with UC.</p>
+                    </div>
+
+                    <div class="opml-import-area">
+                        <h3>Import Subscriptions (OPML)</h3>
+                        <p>Export your subscription list from Google Takeout or YouTube Subscriptions Manager, and drop it here.</p>
+                        <div class="file-drop-zone" id="opml-drop-zone">
+                            <span>📄 Drag & Drop OPML file or click to browse</span>
+                            <input type="file" id="input-opml-file" accept=".opml,.xml" hidden>
+                        </div>
+                    </div>
+
+                    <div class="channels-list-header">
+                        <h3>Subscribed Channels (<span id="subscribed-count">0</span>)</h3>
+                        <button id="btn-clear-channels" class="btn btn-danger btn-sm">Remove All</button>
+                    </div>
+                    <div id="channels-list" class="channels-list">
+                        <!-- Channels injected here -->
+                    </div>
+                </div>
+
+                <!-- Topics Tab Content -->
+                <div id="tab-topics" class="tab-content">
+                    <div class="topic-editor-container">
+                        <div class="input-group">
+                            <label>Add/Edit Topic Keyphrase & Weight</label>
+                            <div class="topic-inputs-row">
+                                <input type="text" id="input-topic-phrase" placeholder="e.g. web dev, artificial intelligence">
+                                <select id="select-topic-weight">
+                                    <option value="10">Must Watch (+10)</option>
+                                    <option value="5">High Interest (+5)</option>
+                                    <option value="2">Interested (+2)</option>
+                                    <option value="-2">Low Interest (-2)</option>
+                                    <option value="-10">Spam / Hide (-10)</option>
+                                </select>
+                                <button id="btn-save-topic" class="btn btn-primary">Save</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <h3>Topic Weightings</h3>
+                    <div id="topics-list" class="topics-list">
+                        <!-- Topics injected here -->
+                    </div>
+                </div>
+
+                <!-- Backup & Restore Tab Content -->
+                <div id="tab-export" class="tab-content">
+                    <p class="tab-desc">Export your configurations (channels, topic weights, settings) as a backup file, or restore them onto another device.</p>
+                    
+                    <div class="backup-actions">
+                        <button id="btn-export-settings" class="btn btn-secondary">📥 Export Settings JSON</button>
+                        
+                        <div class="restore-zone">
+                            <label for="input-restore-json" class="btn btn-secondary">📤 Import Settings JSON</label>
+                            <input type="file" id="input-restore-json" accept=".json" hidden>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

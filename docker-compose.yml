@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  youtube-wallgarden:
+    image: youtube-wallgarden:latest
+    container_name: youtube-wallgarden
+    restart: unless-stopped
+    ports:
+      - "8007:8007"

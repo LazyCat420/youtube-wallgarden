@@ -1,0 +1,714 @@
+// 🌿 Wallgarden - Dashboard Controller
+
+// Seeding Default Channels (if empty)
+const DEFAULT_CHANNELS = [
+    { name: "Fireship", id: "UCsBjURrdUwzDMc21q5cEQcA" },
+    { name: "3Blue1Brown", id: "UCYO_jab_esuFRV4b17AJtAw" },
+    { name: "The Primeagen", id: "UCuzc7nC_G-Ssp-kK1335T4Q" },
+    { name: "Veritasium", id: "UCHnyfMqiRRG1u-2MsSQLbXA" },
+    { name: "Lex Fridman", id: "UCSHZKyawb77KJmFMK23ORVg" }
+];
+
+// Seeding Default Topics (if empty)
+const DEFAULT_TOPICS = [
+    { phrase: "coding", weight: 5 },
+    { phrase: "programming", weight: 5 },
+    { phrase: "javascript", weight: 3 },
+    { phrase: "rust", weight: 4 },
+    { phrase: "ai", weight: 5 },
+    { phrase: "artificial intelligence", weight: 5 },
+    { phrase: "llm", weight: 5 },
+    { phrase: "math", weight: 3 },
+    { phrase: "science", weight: 3 },
+    { phrase: "physics", weight: 3 },
+    { phrase: "gossip", weight: -10 },
+    { phrase: "drama", weight: -10 },
+    { phrase: "brainrot", weight: -10 }
+];
+
+// State Manager
+let state = {
+    channels: [],
+    topics: [],
+    cache: {
+        videos: {}, // channelId -> array of videos
+        lastSync: 0
+    },
+    currentView: "all" // 'all', 'starred', or topic phrase
+};
+
+// Initialize Application
+document.addEventListener("DOMContentLoaded", () => {
+    loadState();
+    setupEventListeners();
+    renderSidebarTopics();
+    
+    // Auto-sync if cache is empty or older than 1 hour (3600 seconds)
+    const cacheAge = (Date.now() - state.cache.lastSync) / 1000;
+    if (cacheAge > 3600 || getCachedVideosCount() === 0) {
+        syncFeeds();
+    } else {
+        renderFeed();
+        updateStatusText(`Loaded from cache (${Math.round(cacheAge/60)}m ago)`);
+    }
+});
+
+// Load variables from Local Storage
+function loadState() {
+    const rawChannels = localStorage.getItem("wallgarden_channels");
+    const rawTopics = localStorage.getItem("wallgarden_topics");
+    const rawCache = localStorage.getItem("wallgarden_cache");
+
+    state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
+    state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
+    
+    if (rawCache) {
+        state.cache = JSON.parse(rawCache);
+    }
+    
+    // Save defaults back to storage if they were missing
+    if (!rawChannels) saveChannels();
+    if (!rawTopics) saveTopics();
+}
+
+// Save helpers
+function saveChannels() {
+    localStorage.setItem("wallgarden_channels", JSON.stringify(state.channels));
+    document.getElementById("subscribed-count").textContent = state.channels.length;
+}
+
+function saveTopics() {
+    localStorage.setItem("wallgarden_topics", JSON.stringify(state.topics));
+}
+
+function saveCache() {
+    localStorage.setItem("wallgarden_cache", JSON.stringify(state.cache));
+}
+
+function getCachedVideosCount() {
+    return Object.values(state.cache.videos).reduce((acc, curr) => acc + curr.length, 0);
+}
+
+// Setup Interactive UI Listeners
+function setupEventListeners() {
+    // Navigation
+    document.querySelectorAll(".nav-item").forEach(item => {
+        item.addEventListener("click", (e) => {
+            document.querySelectorAll(".nav-item").forEach(btn => btn.classList.remove("active"));
+            const btn = e.currentTarget;
+            btn.classList.add("active");
+            
+            state.currentView = btn.dataset.view;
+            document.getElementById("current-view-title").textContent = btn.querySelector(".nav-label").textContent;
+            renderFeed();
+        });
+    });
+
+    // Sync button
+    const btnSync = document.getElementById("btn-sync-now");
+    btnSync.addEventListener("click", () => syncFeeds());
+
+    // Settings Modal toggles
+    const btnOpenSettings = document.getElementById("btn-open-settings");
+    const btnCloseSettings = document.getElementById("btn-close-settings");
+    const settingsModal = document.getElementById("settings-modal");
+
+    btnOpenSettings.addEventListener("click", () => {
+        renderChannelsList();
+        renderTopicsList();
+        settingsModal.classList.remove("hidden");
+    });
+    btnCloseSettings.addEventListener("click", () => {
+        settingsModal.classList.add("hidden");
+        renderSidebarTopics();
+        renderFeed();
+    });
+
+    // Settings Tabs toggles
+    document.querySelectorAll(".tab-btn").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+            document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
+            
+            e.target.classList.add("active");
+            document.getElementById(e.target.dataset.tab).classList.add("active");
+        });
+    });
+
+    // Add channel input
+    const btnAddChannel = document.getElementById("btn-add-channel");
+    const inputChannel = document.getElementById("input-channel-handle");
+    
+    btnAddChannel.addEventListener("click", async () => {
+        const query = inputChannel.value.trim();
+        if (!query) return;
+        
+        btnAddChannel.disabled = true;
+        btnAddChannel.textContent = "Searching...";
+        
+        try {
+            await resolveAndAddChannel(query);
+            inputChannel.value = "";
+            renderChannelsList();
+        } catch (err) {
+            alert(err.message);
+        } finally {
+            btnAddChannel.disabled = false;
+            btnAddChannel.textContent = "Add Channel";
+        }
+    });
+
+    // Clear all channels
+    document.getElementById("btn-clear-channels").addEventListener("click", () => {
+        if (confirm("Are you sure you want to remove all subscribed channels?")) {
+            state.channels = [];
+            saveChannels();
+            renderChannelsList();
+        }
+    });
+
+    // Drag and Drop OPML
+    const dropZone = document.getElementById("opml-drop-zone");
+    const fileInput = document.getElementById("input-opml-file");
+
+    dropZone.addEventListener("click", () => fileInput.click());
+    
+    dropZone.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        dropZone.classList.add("dragover");
+    });
+    
+    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+    
+    dropZone.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dropZone.classList.remove("dragover");
+        if (e.dataTransfer.files.length) {
+            handleOPMLFile(e.dataTransfer.files[0]);
+        }
+    });
+
+    fileInput.addEventListener("change", (e) => {
+        if (e.target.files.length) {
+            handleOPMLFile(e.target.files[0]);
+        }
+    });
+
+    // Save Topic keyword
+    document.getElementById("btn-save-topic").addEventListener("click", () => {
+        const phrase = document.getElementById("input-topic-phrase").value.trim().toLowerCase();
+        const weight = parseInt(document.getElementById("select-topic-weight").value, 10);
+        
+        if (!phrase) return;
+        
+        const existingIdx = state.topics.findIndex(t => t.phrase === phrase);
+        if (existingIdx !== -1) {
+            state.topics[existingIdx].weight = weight;
+        } else {
+            state.topics.push({ phrase, weight });
+        }
+        
+        saveTopics();
+        document.getElementById("input-topic-phrase").value = "";
+        renderTopicsList();
+    });
+
+    // Export/Import settings JSON
+    document.getElementById("btn-export-settings").addEventListener("click", exportSettings);
+    
+    const restoreInput = document.getElementById("input-restore-json");
+    restoreInput.addEventListener("change", (e) => {
+        if (e.target.files.length) {
+            importSettings(e.target.files[0]);
+        }
+    });
+
+    // Close Player Modal
+    document.getElementById("btn-close-player").addEventListener("click", closePlayer);
+    document.getElementById("player-modal").addEventListener("click", (e) => {
+        if (e.target === document.getElementById("player-modal")) {
+            closePlayer();
+        }
+    });
+}
+
+// Dynamic Sidebar topics rendering
+function renderSidebarTopics() {
+    const container = document.getElementById("dynamic-topic-tabs");
+    container.innerHTML = "";
+    
+    // Sort positive topics by weight descending
+    const positiveTopics = state.topics
+        .filter(t => t.weight > 0)
+        .sort((a, b) => b.weight - a.weight)
+        .slice(0, 8); // show top 8 in sidebar
+        
+    positiveTopics.forEach(topic => {
+        const btn = document.createElement("button");
+        btn.className = "nav-item";
+        btn.dataset.view = "topic_" + topic.phrase;
+        
+        // Pick a default emoji for topic styling
+        let emoji = "🏷️";
+        if (["code", "coding", "program", "programming", "dev", "rust", "javascript"].some(k => topic.phrase.includes(k))) emoji = "💻";
+        if (["ai", "intelligence", "llm", "gpt", "model"].some(k => topic.phrase.includes(k))) emoji = "🧠";
+        if (["math", "science", "physics", "quantum"].some(k => topic.phrase.includes(k))) emoji = "🔬";
+
+        btn.innerHTML = `
+            <span class="nav-icon">${emoji}</span>
+            <span class="nav-label">${capitalizePhrase(topic.phrase)}</span>
+        `;
+        
+        btn.addEventListener("click", (e) => {
+            document.querySelectorAll(".nav-item").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            
+            state.currentView = "topic_" + topic.phrase;
+            document.getElementById("current-view-title").textContent = capitalizePhrase(topic.phrase);
+            renderFeed();
+        });
+        
+        container.appendChild(btn);
+    });
+}
+
+// Add/Resolve YouTube Channel via Nginx proxy / scraping
+async function resolveAndAddChannel(query) {
+    let channelId = "";
+    let channelName = "";
+
+    // Case 1: UC... style direct Channel ID
+    if (/^UC[A-Za-z0-9_-]{22}$/.test(query)) {
+        channelId = query;
+        channelName = query.substring(0, 10) + "..."; // Placeholder name, will be fetched in sync
+    } 
+    // Case 2: Handle style, e.g. @fireship
+    else if (query.startsWith("@")) {
+        // Resolve handle via public scrape endpoint proxied through Nginx
+        // By fetching their homepage, we find the canonical link tag: <link rel="canonical" href="https://www.youtube.com/channel/CHANNEL_ID">
+        const cleanHandle = query.substring(1);
+        const resolveUrl = `/youtube-feed/../../@${cleanHandle}`; // Back out of /feeds/videos.xml to fetch homepage
+        
+        try {
+            const resp = await fetch(resolveUrl);
+            if (!resp.ok) throw new Error("Could not reach YouTube to resolve handle");
+            const text = await resp.text();
+            
+            const match = text.match(/<link rel="canonical" href="https:\/\/www\.youtube\.com\/channel\/(UC[A-Za-z0-9_-]{22})"/);
+            if (match && match[1]) {
+                channelId = match[1];
+                
+                // Try to find the title
+                const titleMatch = text.match(/<title>(.*?) - YouTube<\/title>/);
+                channelName = titleMatch ? titleMatch[1] : query;
+            } else {
+                throw new Error("Unable to locate channel ID on YouTube page. Make sure the handle is correct.");
+            }
+        } catch (err) {
+            console.error("Resolve error:", err);
+            throw new Error("Failed resolving handle: " + err.message);
+        }
+    } else {
+        throw new Error("Invalid format. Please enter a Channel ID (UC...) or handle starting with @");
+    }
+
+    // Check duplicates
+    if (state.channels.some(c => c.id === channelId)) {
+        throw new Error("Channel is already in your subscription list!");
+    }
+
+    state.channels.push({ name: channelName, id: channelId });
+    saveChannels();
+}
+
+// Fetch Feeds in parallel via Nginx proxy and parse XML
+async function syncFeeds() {
+    if (state.channels.length === 0) {
+        updateStatusText("No channels to sync.");
+        return;
+    }
+
+    const btnSync = document.getElementById("btn-sync-now");
+    btnSync.classList.add("spinning");
+    updateStatusText("Syncing RSS Feeds...");
+    
+    let activeSyncs = 0;
+    const maxConcurrency = 4;
+    const channelsToSync = [...state.channels];
+    const results = {};
+    
+    // Dynamic parallel chunks worker
+    const worker = async () => {
+        while (channelsToSync.length > 0) {
+            const channel = channelsToSync.shift();
+            try {
+                const response = await fetch(`/youtube-feed/?channel_id=${channel.id}`);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const xmlText = await response.text();
+                
+                // Parse Atom Feed
+                const parser = new DOMParser();
+                const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+                
+                // Update Name from feed metadata if it was UC placeholder
+                const feedTitle = xmlDoc.querySelector("feed > title")?.textContent;
+                if (feedTitle && channel.name.includes("...")) {
+                    channel.name = feedTitle;
+                }
+
+                const entries = xmlDoc.querySelectorAll("feed > entry");
+                const videos = [];
+                
+                entries.forEach(entry => {
+                    const videoId = entry.querySelector("videoId")?.textContent || 
+                                    entry.querySelector("id")?.textContent?.split(":")[2];
+                    const title = entry.querySelector("title")?.textContent || "";
+                    const publishedStr = entry.querySelector("published")?.textContent || 
+                                         entry.querySelector("updated")?.textContent || "";
+                                         
+                    if (videoId && title) {
+                        videos.push({
+                            id: videoId,
+                            title: title,
+                            channelName: feedTitle || channel.name,
+                            channelId: channel.id,
+                            published: new Date(publishedStr).getTime()
+                        });
+                    }
+                });
+                
+                results[channel.id] = videos;
+            } catch (err) {
+                console.error(`Error syncing channel ${channel.name}:`, err);
+                // Keep existing cache for this channel on failure
+                if (state.cache.videos[channel.id]) {
+                    results[channel.id] = state.cache.videos[channel.id];
+                }
+            }
+        }
+    };
+    
+    const workers = Array(Math.min(maxConcurrency, channelsToSync.length))
+        .fill(null)
+        .map(() => worker());
+        
+    await Promise.all(workers);
+    
+    state.cache.videos = results;
+    state.cache.lastSync = Date.now();
+    saveCache();
+    saveChannels(); // Updates names if they changed
+    
+    btnSync.classList.remove("spinning");
+    updateStatusText("Synced successfully just now");
+    
+    renderFeed();
+}
+
+// Compute custom interest score for a video
+function getScoreAndMatches(video) {
+    let score = 0;
+    const title = video.title.toLowerCase();
+    const matches = [];
+    
+    state.topics.forEach(topic => {
+        // Simple phrase matching (with boundaries to prevent substring clashes where possible)
+        const regex = new RegExp(`\\b${escapeRegExp(topic.phrase)}\\b`, "i");
+        if (regex.test(title)) {
+            score += topic.weight;
+            matches.push(topic.phrase);
+        }
+    });
+    
+    // Add heavy penalty for ALL CAPS spams (heuristic trigger)
+    const uppercaseLetters = video.title.replace(/[^A-Z]/g, "").length;
+    const totalLetters = video.title.replace(/[^a-zA-Z]/g, "").length;
+    if (totalLetters > 5 && (uppercaseLetters / totalLetters) > 0.8) {
+        score -= 8;
+        matches.push("all-caps");
+    }
+
+    // Punctuation trigger (e.g. ??? or !!!)
+    if (/(\?{3,}|!{3,})/.test(video.title)) {
+        score -= 5;
+        matches.push("punctuation");
+    }
+    
+    return { score, matches };
+}
+
+// Load and Render Video Grid
+function renderFeed() {
+    const grid = document.getElementById("video-grid");
+    const emptyState = document.getElementById("empty-state");
+    grid.innerHTML = "";
+    
+    // Flatten and enrich video list
+    let allVideos = [];
+    Object.values(state.cache.videos).forEach(channelVideos => {
+        channelVideos.forEach(v => {
+            const evaluation = getScoreAndMatches(v);
+            allVideos.push({
+                ...v,
+                score: evaluation.score,
+                matchedTopics: evaluation.matches
+            });
+        });
+    });
+    
+    // Filter out videos with score <= -10 (auto-nuke spam)
+    allVideos = allVideos.filter(v => v.score > -10);
+    
+    // Apply navigation filter
+    if (state.currentView === "starred") {
+        allVideos = allVideos.filter(v => v.score >= 5);
+    } else if (state.currentView.startsWith("topic_")) {
+        const activeTopic = state.currentView.substring(6);
+        allVideos = allVideos.filter(v => v.matchedTopics.includes(activeTopic));
+    }
+    
+    // Sort: High score at the top, then sort by publishing date descending
+    allVideos.sort((a, b) => {
+        // High scores (starred) float up, otherwise sort primarily by date
+        if (a.score >= 5 && b.score < 5) return -1;
+        if (b.score >= 5 && a.score < 5) return 1;
+        return b.published - a.published;
+    });
+    
+    if (allVideos.length === 0) {
+        emptyState.classList.remove("hidden");
+        return;
+    }
+    emptyState.classList.add("hidden");
+    
+    allVideos.forEach(video => {
+        const card = document.createElement("div");
+        card.className = "video-card";
+        
+        let scoreClass = "mid";
+        if (video.score >= 5) scoreClass = "high";
+        if (video.score < 0) scoreClass = "low";
+        
+        const relativeTime = getRelativeTime(video.published);
+        const topMatchedTopic = video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation");
+        const categoryText = topMatchedTopic ? capitalizePhrase(topMatchedTopic) : "";
+        
+        card.innerHTML = `
+            <div class="thumbnail-area">
+                <img class="thumbnail-img" src="https://i.ytimg.com/vi/${video.id}/hqdefault.jpg" alt="${escapeHTML(video.title)}">
+                <div class="thumbnail-play-overlay">
+                    <div class="play-icon-circle">▶</div>
+                </div>
+                <div class="score-badge ${scoreClass}">★ ${video.score}</div>
+                ${categoryText ? `<div class="category-badge">${categoryText}</div>` : ""}
+            </div>
+            <div class="card-details">
+                <h3 class="video-title">${escapeHTML(video.title)}</h3>
+                <p class="video-channel">${escapeHTML(video.channelName)}</p>
+                <p class="video-time">${relativeTime}</p>
+            </div>
+        `;
+        
+        // Open video player overlay on title/thumbnail click
+        const openAction = () => playVideo(video);
+        card.querySelector(".thumbnail-area").addEventListener("click", openAction);
+        card.querySelector(".video-title").addEventListener("click", openAction);
+        
+        grid.appendChild(card);
+    });
+}
+
+// Display Video in Distraction-Free IFrame Modal
+function playVideo(video) {
+    const playerModal = document.getElementById("player-modal");
+    const playerWrapper = document.getElementById("player-wrapper");
+    
+    document.getElementById("player-video-title").textContent = video.title;
+    document.getElementById("player-video-channel").textContent = video.channelName;
+    
+    playerWrapper.innerHTML = `
+        <iframe 
+            src="https://www.youtube.com/embed/${video.id}?autoplay=1&rel=0&modestbranding=1" 
+            title="${escapeHTML(video.title)}" 
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+            allowfullscreen>
+        </iframe>
+    `;
+    
+    playerModal.classList.remove("hidden");
+}
+
+function closePlayer() {
+    document.getElementById("player-modal").classList.add("hidden");
+    document.getElementById("player-wrapper").innerHTML = ""; // Stops playback instantly
+}
+
+// Parse OPML uploaded file and import channels
+function handleOPMLFile(file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(e.target.result, "text/xml");
+            const outlines = xmlDoc.querySelectorAll("outline[xmlUrl]");
+            
+            let addedCount = 0;
+            outlines.forEach(outline => {
+                const xmlUrl = outline.getAttribute("xmlUrl");
+                const channelTitle = outline.getAttribute("title") || outline.getAttribute("text") || "Unknown Channel";
+                
+                // Extract channel_id query param
+                const match = xmlUrl.match(/[?&]channel_id=(UC[A-Za-z0-9_-]{22})/);
+                if (match && match[1]) {
+                    const id = match[1];
+                    if (!state.channels.some(c => c.id === id)) {
+                        state.channels.push({ name: channelTitle, id: id });
+                        addedCount++;
+                    }
+                }
+            });
+            
+            saveChannels();
+            renderChannelsList();
+            alert(`Imported ${addedCount} new channels successfully!`);
+        } catch (err) {
+            alert("Failed parsing OPML file: " + err.message);
+        }
+    };
+    reader.readAsText(file);
+}
+
+// Settings Rendering lists
+function renderChannelsList() {
+    const list = document.getElementById("channels-list");
+    list.innerHTML = "";
+    
+    state.channels.forEach((channel, idx) => {
+        const row = document.createElement("div");
+        row.className = "channel-row";
+        row.innerHTML = `
+            <div class="channel-info">
+                <span class="channel-name">${escapeHTML(channel.name)}</span>
+                <span class="channel-id">${channel.id}</span>
+            </div>
+            <button class="btn-remove" data-idx="${idx}">✕</button>
+        `;
+        
+        row.querySelector(".btn-remove").addEventListener("click", (e) => {
+            state.channels.splice(e.target.dataset.idx, 1);
+            saveChannels();
+            renderChannelsList();
+        });
+        list.appendChild(row);
+    });
+    
+    document.getElementById("subscribed-count").textContent = state.channels.length;
+}
+
+function renderTopicsList() {
+    const list = document.getElementById("topics-list");
+    list.innerHTML = "";
+    
+    // Sort topics by weight descending
+    const sortedTopics = [...state.topics].sort((a, b) => b.weight - a.weight);
+    
+    sortedTopics.forEach(topic => {
+        const row = document.createElement("div");
+        row.className = "topic-row";
+        
+        const badgeClass = topic.weight >= 0 ? "positive" : "negative";
+        const sign = topic.weight >= 0 ? "+" : "";
+        
+        row.innerHTML = `
+            <span class="topic-phrase">${escapeHTML(topic.phrase)}</span>
+            <div class="topic-controls">
+                <span class="topic-badge-weight ${badgeClass}">${sign}${topic.weight}</span>
+                <button class="btn-remove" data-phrase="${escapeHTML(topic.phrase)}">✕</button>
+            </div>
+        `;
+        
+        row.querySelector(".btn-remove").addEventListener("click", (e) => {
+            const phrase = e.target.dataset.phrase;
+            state.topics = state.topics.filter(t => t.phrase !== phrase);
+            saveTopics();
+            renderTopicsList();
+        });
+        list.appendChild(row);
+    });
+}
+
+// Export Settings to JSON file
+function exportSettings() {
+    const backup = {
+        channels: state.channels,
+        topics: state.topics
+    };
+    
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "wallgarden-settings.json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+// Import Settings from JSON file
+function importSettings(file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            const backup = JSON.parse(e.target.result);
+            if (Array.isArray(backup.channels) && Array.isArray(backup.topics)) {
+                state.channels = backup.channels;
+                state.topics = backup.topics;
+                saveChannels();
+                saveTopics();
+                
+                renderChannelsList();
+                renderTopicsList();
+                alert("Settings restored successfully!");
+            } else {
+                throw new Error("Invalid format. Channels and Topics properties must be arrays.");
+            }
+        } catch (err) {
+            alert("Restoration failed: " + err.message);
+        }
+    };
+    reader.readAsText(file);
+}
+
+// String & utility helper functions
+function escapeHTML(str) {
+    return str.replace(/[&<>'"]/g, 
+        tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)
+    );
+}
+
+function escapeRegExp(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function capitalizePhrase(str) {
+    return str.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+function getRelativeTime(timestamp) {
+    const diffMs = Date.now() - timestamp;
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+    const diffHr = Math.floor(diffMin / 60);
+    const diffDays = Math.floor(diffHr / 24);
+    
+    if (diffDays > 0) return `${diffDays}d ago`;
+    if (diffHr > 0) return `${diffHr}h ago`;
+    if (diffMin > 0) return `${diffMin}m ago`;
+    return "Just now";
+}
+
+function updateStatusText(text) {
+    document.getElementById("dashboard-status-text").textContent = text;
+}
