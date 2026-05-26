@@ -37,7 +37,7 @@ let state = {
     },
     currentView: "all", // 'all', 'starred', or topic phrase
     settings: {
-        useYtdlp: false,
+        useYtdlp: true,
         muteShorts: false
     }
 };
@@ -73,7 +73,7 @@ function loadState() {
     state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
     state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
     state.blockedChannels = rawBlocked ? JSON.parse(rawBlocked) : [];
-    state.settings = rawSettings ? JSON.parse(rawSettings) : { useYtdlp: false, muteShorts: false };
+    state.settings = rawSettings ? JSON.parse(rawSettings) : { useYtdlp: true, muteShorts: false };
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
@@ -1127,7 +1127,8 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
                     source: "youtube",
                     query: topicPhrase,
                     limit: 15,
-                    days_back: 30
+                    days_back: 30,
+                    require_transcript: false
                 })
             });
             if (resp.ok) {
