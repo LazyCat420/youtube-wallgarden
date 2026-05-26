@@ -30,6 +30,7 @@ const DEFAULT_TOPICS = [
 let state = {
     channels: [],
     topics: [],
+    blockedChannels: [], // Array of { name: string, id: string }
     cache: {
         videos: {}, // channelId -> array of videos
         lastSync: 0
@@ -57,10 +58,12 @@ document.addEventListener("DOMContentLoaded", () => {
 function loadState() {
     const rawChannels = localStorage.getItem("wallgarden_channels");
     const rawTopics = localStorage.getItem("wallgarden_topics");
+    const rawBlocked = localStorage.getItem("wallgarden_blocked_channels");
     const rawCache = localStorage.getItem("wallgarden_cache");
 
     state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
     state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
+    state.blockedChannels = rawBlocked ? JSON.parse(rawBlocked) : [];
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
@@ -69,6 +72,15 @@ function loadState() {
     // Save defaults back to storage if they were missing
     if (!rawChannels) saveChannels();
     if (!rawTopics) saveTopics();
+    if (!rawBlocked) saveBlocked();
+
+    document.getElementById("subscribed-count").textContent = state.channels.length;
+    document.getElementById("blocked-count").textContent = state.blockedChannels.length;
+}
+
+function saveBlocked() {
+    localStorage.setItem("wallgarden_blocked_channels", JSON.stringify(state.blockedChannels));
+    document.getElementById("blocked-count").textContent = state.blockedChannels.length;
 }
 
 // Save helpers
@@ -116,6 +128,7 @@ function setupEventListeners() {
     btnOpenSettings.addEventListener("click", () => {
         renderChannelsList();
         renderTopicsList();
+        renderBlockedList();
         settingsModal.classList.remove("hidden");
     });
     btnCloseSettings.addEventListener("click", () => {
@@ -211,6 +224,37 @@ function setupEventListeners() {
         saveTopics();
         document.getElementById("input-topic-phrase").value = "";
         renderTopicsList();
+    });
+
+    // Block channel input
+    const btnBlockChannel = document.getElementById("btn-block-channel");
+    const inputBlockChannel = document.getElementById("input-block-channel");
+    
+    btnBlockChannel.addEventListener("click", () => {
+        const query = inputBlockChannel.value.trim();
+        if (!query) return;
+        
+        const isId = /^UC[A-Za-z0-9_-]{22}$/.test(query);
+        const name = isId ? "Channel ID: " + query : query;
+        const id = isId ? query : "";
+        
+        if (!state.blockedChannels.some(bc => (id && bc.id === id) || (!id && bc.name.toLowerCase() === query.toLowerCase()))) {
+            state.blockedChannels.push({ name, id });
+            saveBlocked();
+            renderBlockedList();
+            inputBlockChannel.value = "";
+        } else {
+            alert("Channel is already blocked!");
+        }
+    });
+
+    // Clear blocked channels
+    document.getElementById("btn-clear-blocked").addEventListener("click", () => {
+        if (confirm("Are you sure you want to clear the blocklist?")) {
+            state.blockedChannels = [];
+            saveBlocked();
+            renderBlockedList();
+        }
     });
 
     // Export/Import settings JSON
@@ -412,11 +456,19 @@ function getScoreAndMatches(video) {
     const matches = [];
     
     state.topics.forEach(topic => {
-        // Simple phrase matching (with boundaries to prevent substring clashes where possible)
-        const regex = new RegExp(`\\b${escapeRegExp(topic.phrase)}\\b`, "i");
-        if (regex.test(title)) {
+        const phrase = topic.phrase.toLowerCase();
+        let matched = false;
+        
+        if (phrase.length <= 3) {
+            const regex = new RegExp(`\\b${escapeRegExp(phrase)}\\b`, "i");
+            matched = regex.test(title);
+        } else {
+            matched = title.includes(phrase);
+        }
+        
+        if (matched) {
             score += topic.weight;
-            matches.push(topic.phrase);
+            matches.push(topic.phrase.toLowerCase());
         }
     });
     
@@ -456,6 +508,13 @@ function renderFeed() {
         });
     });
     
+    // Filter out videos from blocked channels
+    allVideos = allVideos.filter(video => {
+        const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === video.channelId);
+        const isBlockedName = state.blockedChannels.some(bc => !bc.id && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+        return !isBlockedId && !isBlockedName;
+    });
+
     // Filter out videos with score <= -10 (auto-nuke spam)
     allVideos = allVideos.filter(v => v.score > -10);
     
@@ -463,13 +522,12 @@ function renderFeed() {
     if (state.currentView === "starred") {
         allVideos = allVideos.filter(v => v.score >= 5);
     } else if (state.currentView.startsWith("topic_")) {
-        const activeTopic = state.currentView.substring(6);
+        const activeTopic = state.currentView.substring(6).toLowerCase();
         allVideos = allVideos.filter(v => v.matchedTopics.includes(activeTopic));
     }
     
     // Sort: High score at the top, then sort by publishing date descending
     allVideos.sort((a, b) => {
-        // High scores (starred) float up, otherwise sort primarily by date
         if (a.score >= 5 && b.score < 5) return -1;
         if (b.score >= 5 && a.score < 5) return 1;
         return b.published - a.published;
@@ -481,7 +539,8 @@ function renderFeed() {
     }
     emptyState.classList.add("hidden");
     
-    allVideos.forEach(video => {
+    // Performance optimization: Render maximum of 120 most relevant/recent videos
+    allVideos.slice(0, 120).forEach(video => {
         const card = document.createElement("div");
         card.className = "video-card";
         
@@ -509,7 +568,6 @@ function renderFeed() {
             </div>
         `;
         
-        // Open video player overlay on title/thumbnail click
         const openAction = () => playVideo(video);
         card.querySelector(".thumbnail-area").addEventListener("click", openAction);
         card.querySelector(".video-title").addEventListener("click", openAction);
@@ -641,7 +699,8 @@ function renderTopicsList() {
 function exportSettings() {
     const backup = {
         channels: state.channels,
-        topics: state.topics
+        topics: state.topics,
+        blockedChannels: state.blockedChannels
     };
     
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
@@ -665,11 +724,14 @@ function importSettings(file) {
             if (Array.isArray(backup.channels) && Array.isArray(backup.topics)) {
                 state.channels = backup.channels;
                 state.topics = backup.topics;
+                state.blockedChannels = Array.isArray(backup.blockedChannels) ? backup.blockedChannels : [];
                 saveChannels();
                 saveTopics();
+                saveBlocked();
                 
                 renderChannelsList();
                 renderTopicsList();
+                renderBlockedList();
                 alert("Settings restored successfully!");
             } else {
                 throw new Error("Invalid format. Channels and Topics properties must be arrays.");
@@ -679,6 +741,33 @@ function importSettings(file) {
         }
     };
     reader.readAsText(file);
+}
+
+// Render Blocked Channels List in Settings
+function renderBlockedList() {
+    const list = document.getElementById("blocked-list");
+    list.innerHTML = "";
+    
+    state.blockedChannels.forEach((bc, idx) => {
+        const row = document.createElement("div");
+        row.className = "channel-row";
+        row.innerHTML = `
+            <div class="channel-info">
+                <span class="channel-name">${escapeHTML(bc.name)}</span>
+                ${bc.id ? `<span class="channel-id">${bc.id}</span>` : ""}
+            </div>
+            <button class="btn-remove" data-idx="${idx}">✕</button>
+        `;
+        
+        row.querySelector(".btn-remove").addEventListener("click", (e) => {
+            state.blockedChannels.splice(e.target.dataset.idx, 1);
+            saveBlocked();
+            renderBlockedList();
+        });
+        list.appendChild(row);
+    });
+    
+    document.getElementById("blocked-count").textContent = state.blockedChannels.length;
 }
 
 // String & utility helper functions

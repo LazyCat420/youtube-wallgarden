@@ -130,6 +130,21 @@
                     <div id="channels-list" class="channels-list">
                         <!-- Channels injected here -->
                     </div>
+
+                    <div class="channels-list-header" style="margin-top: 2.5rem;">
+                        <h3>Muted/Blocked Channels (<span id="blocked-count">0</span>)</h3>
+                        <button id="btn-clear-blocked" class="btn btn-danger btn-sm">Clear All</button>
+                    </div>
+                    <div class="input-group">
+                        <label for="input-block-channel">Block Channel by Name or ID</label>
+                        <div class="input-inline">
+                            <input type="text" id="input-block-channel" placeholder="e.g. T-Series or UC29ju8bipRHy1dS8hxg5tVA">
+                            <button id="btn-block-channel" class="btn btn-danger">Block Channel</button>
+                        </div>
+                    </div>
+                    <div id="blocked-list" class="channels-list">
+                        <!-- Blocked channels injected here -->
+                    </div>
                 </div>
 
                 <!-- Topics Tab Content -->
