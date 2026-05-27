@@ -41,8 +41,12 @@ let state = {
         useYtdlp: true,
         muteShorts: false
     },
-    discoverPage: 0
+    discoverBatchIndex: 0,
+    discoverMaxReached: false
 };
+
+const DISCOVER_BATCH_SIZE = 30;
+const DISCOVER_MAX_RESULTS = 150;
 
 // In-memory session cache for topic search discovery results
 let sessionTopicSearchCache = {};
@@ -162,13 +166,16 @@ function setupEventListeners() {
             
             // Reset Search Input on Navigation
             state.searchQuery = "";
-            state.discoverPage = 0;
+            state.discoverBatchIndex = 0;
+            state.discoverMaxReached = false;
             const searchInput = document.getElementById("input-search-videos");
             if (searchInput) searchInput.value = "";
             const clearBtn = document.getElementById("btn-clear-search");
             if (clearBtn) clearBtn.classList.add("hidden");
 
             state.currentView = btn.dataset.view;
+            state.discoverBatchIndex = 0;
+            state.discoverMaxReached = false;
             document.getElementById("current-view-title").textContent = btn.querySelector(".nav-label").textContent;
             renderFeed();
         });
@@ -361,7 +368,8 @@ function setupEventListeners() {
             e.preventDefault();
             const query = searchInput.value.trim();
             if (query) {
-                state.discoverPage = 0;
+                state.discoverBatchIndex = 0;
+                state.discoverMaxReached = false;
                 triggerGlobalSearch(query);
             }
         });
@@ -399,7 +407,8 @@ function setupEventListeners() {
                 });
                 document.getElementById("current-view-title").textContent = "All Videos";
             }
-            state.discoverPage = 0;
+            state.discoverBatchIndex = 0;
+            state.discoverMaxReached = false;
             renderFeed();
         });
     }
@@ -463,6 +472,8 @@ function renderSidebarTopics() {
             if (clearBtn) clearBtn.classList.add("hidden");
 
             state.currentView = "topic_" + topic.phrase;
+            state.discoverBatchIndex = 0;
+            state.discoverMaxReached = false;
             document.getElementById("current-view-title").textContent = capitalizePhrase(topic.phrase);
             renderFeed();
         });
@@ -1013,6 +1024,11 @@ function renderFeed() {
             metaLine += ` • ${formatViews(video.viewCount)}`;
         }
         
+        // Check if channel is already subscribed
+        const isSubscribed = state.channels.some(ch => 
+            ch.name.toLowerCase() === video.channelName.toLowerCase() || ch.id === video.channelId
+        );
+        
         card.innerHTML = `
             <div class="thumbnail-area">
                 <img class="thumbnail-img" src="https://i.ytimg.com/vi/${video.id}/hqdefault.jpg" alt="${escapeHTML(video.title)}">
@@ -1021,6 +1037,7 @@ function renderFeed() {
                 </div>
                 <div class="score-badge ${scoreClass}">★ ${video.score}</div>
                 ${video.isDiscover ? `<div class="search-badge">🔍 Search</div>` : (categoryText ? `<div class="category-badge">${categoryText}</div>` : "")}
+                <button class="card-action-btn" title="Actions">⋮</button>
             </div>
             <div class="card-details">
                 <h3 class="video-title">${escapeHTML(video.title)}</h3>
@@ -1030,8 +1047,75 @@ function renderFeed() {
         `;
         
         const openAction = () => playVideo(video);
-        card.querySelector(".thumbnail-area").addEventListener("click", openAction);
+        card.querySelector(".thumbnail-play-overlay").addEventListener("click", openAction);
         card.querySelector(".video-title").addEventListener("click", openAction);
+        
+        // 3-dot action menu
+        const actionBtn = card.querySelector(".card-action-btn");
+        actionBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            // Close any existing dropdown
+            document.querySelectorAll(".card-action-dropdown").forEach(d => d.remove());
+            
+            const dropdown = document.createElement("div");
+            dropdown.className = "card-action-dropdown";
+            dropdown.innerHTML = `
+                <button class="danger" data-action="block">🚫 Block Channel</button>
+                <button data-action="subscribe" ${isSubscribed ? 'disabled' : ''}>➕ ${isSubscribed ? 'Already Subscribed' : 'Subscribe to Channel'}</button>
+                <button data-action="hide">🔇 Hide Video</button>
+            `;
+            
+            dropdown.querySelector('[data-action="block"]').addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                const channelName = video.channelName;
+                const channelId = video.channelId || "";
+                if (!state.blockedChannels.some(bc => bc.name.toLowerCase() === channelName.toLowerCase())) {
+                    state.blockedChannels.push({ name: channelName, id: channelId });
+                    saveBlocked();
+                }
+                dropdown.remove();
+                showToast(`🚫 Blocked ${channelName}`, "danger");
+                // Remove all cards from this channel with fade-out
+                document.querySelectorAll(".video-card").forEach(c => {
+                    const chEl = c.querySelector(".video-channel");
+                    if (chEl && chEl.textContent.toLowerCase().includes(channelName.toLowerCase())) {
+                        c.classList.add("fade-out-remove");
+                        setTimeout(() => c.remove(), 350);
+                    }
+                });
+            });
+            
+            dropdown.querySelector('[data-action="subscribe"]').addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                if (isSubscribed) return;
+                const channelName = video.channelName;
+                const channelId = video.channelId || "";
+                state.channels.push({ name: channelName, id: channelId });
+                saveChannels();
+                dropdown.remove();
+                showToast(`✅ Subscribed to ${channelName}`, "success");
+                renderChannelsList();
+            });
+            
+            dropdown.querySelector('[data-action="hide"]').addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                dropdown.remove();
+                card.classList.add("fade-out-remove");
+                setTimeout(() => card.remove(), 350);
+                showToast(`🔇 Video hidden`, "info");
+            });
+            
+            card.querySelector(".thumbnail-area").appendChild(dropdown);
+            
+            // Close dropdown on outside click
+            const closeDropdown = (ev) => {
+                if (!dropdown.contains(ev.target) && ev.target !== actionBtn) {
+                    dropdown.remove();
+                    document.removeEventListener("click", closeDropdown);
+                }
+            };
+            setTimeout(() => document.addEventListener("click", closeDropdown), 0);
+        });
         
         targetContainer.appendChild(card);
     };
@@ -1058,61 +1142,31 @@ function renderFeed() {
         `;
         grid.appendChild(divider);
         
-        // Paginate Discover videos (10 per page)
-        const PAGE_SIZE = 10;
-        const totalVideos = discoverVideos.length;
-        const totalPages = Math.ceil(totalVideos / PAGE_SIZE);
-        const currentPage = state.discoverPage || 0;
-        
-        const startIndex = currentPage * PAGE_SIZE;
-        const endIndex = startIndex + PAGE_SIZE;
-        const discoverSlice = discoverVideos.slice(startIndex, endIndex);
-        
+        // Render ALL cached discover videos (infinite scroll handles batching)
         if (topicSearchLoading[queryTerm]) {
-            // If currently streaming, render already-loaded ones instantly (no timeout) to avoid resetting animations
-            discoverSlice.forEach(video => renderCard(video, grid));
+            // If currently streaming, render already-loaded ones instantly
+            discoverVideos.forEach(video => renderCard(video, grid));
         } else {
             // Otherwise stagger them
-            discoverSlice.forEach((video, index) => {
+            discoverVideos.forEach((video, index) => {
                 const t = setTimeout(() => {
                     renderCard(video, grid);
-                }, index * 200); // 200ms stagger
+                }, index * 100);
                 renderTimeouts.push(t);
             });
         }
 
-        // Render Pagination Controls if totalPages > 1
-        if (totalPages > 1) {
-            const paginationContainer = document.createElement("div");
-            paginationContainer.className = "discover-pagination-container";
-            
-            const prevBtn = document.createElement("button");
-            prevBtn.className = "pagination-btn";
-            prevBtn.disabled = currentPage === 0;
-            prevBtn.innerHTML = "◀ Prev";
-            prevBtn.addEventListener("click", () => {
-                state.discoverPage = currentPage - 1;
-                renderFeed();
-            });
-            
-            const pageInfo = document.createElement("span");
-            pageInfo.className = "pagination-info";
-            pageInfo.textContent = `Page ${currentPage + 1} of ${totalPages}`;
-            
-            const nextBtn = document.createElement("button");
-            nextBtn.className = "pagination-btn";
-            nextBtn.disabled = currentPage >= totalPages - 1;
-            nextBtn.innerHTML = "Next ▶";
-            nextBtn.addEventListener("click", () => {
-                state.discoverPage = currentPage + 1;
-                renderFeed();
-            });
-            
-            paginationContainer.appendChild(prevBtn);
-            paginationContainer.appendChild(pageInfo);
-            paginationContainer.appendChild(nextBtn);
-            
-            grid.appendChild(paginationContainer);
+        // Show infinite scroll loader if currently fetching more
+        if (topicSearchLoading[queryTerm]) {
+            const loader = document.createElement("div");
+            loader.className = "infinite-scroll-loader";
+            loader.innerHTML = `<div class="loader-spinner"></div><p>Loading more results...</p>`;
+            grid.appendChild(loader);
+        } else if (state.discoverMaxReached) {
+            const endMsg = document.createElement("div");
+            endMsg.className = "end-of-results";
+            endMsg.textContent = `Showing top ${DISCOVER_MAX_RESULTS} results. Refine your search for more.`;
+            grid.appendChild(endMsg);
         }
     }
 }
@@ -1150,7 +1204,8 @@ function triggerGlobalSearch(query) {
     
     state.currentView = "search_" + query;
     document.getElementById("current-view-title").textContent = `Search: "${query}"`;
-    state.discoverPage = 0;
+    state.discoverBatchIndex = 0;
+    state.discoverMaxReached = false;
     
     // Trigger rendering (which will show loading spinner and fetch discovery)
     renderFeed();
@@ -1358,9 +1413,11 @@ function updateStatusText(text) {
 }
 
 // Fetch general YouTube search results for a topic in the background (CORS bypassed)
-async function fetchTopicSearchDiscovery(topicPhrase) {
+async function fetchTopicSearchDiscovery(topicPhrase, offset) {
     const cacheKey = topicPhrase.toLowerCase();
-    console.log(`[Search Debug] fetchTopicSearchDiscovery initiated for: "${topicPhrase}" (cacheKey: "${cacheKey}")`);
+    offset = offset || 0;
+    const fetchCount = offset + DISCOVER_BATCH_SIZE;
+    console.log(`[Search Debug] fetchTopicSearchDiscovery initiated for: "${topicPhrase}" (cacheKey: "${cacheKey}", offset: ${offset}, fetchCount: ${fetchCount})`);
     if (topicSearchLoading[cacheKey]) {
         console.log(`[Search Debug] fetchTopicSearchDiscovery already loading for "${cacheKey}". Aborting duplicate call.`);
         return;
@@ -1374,7 +1431,7 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
     
     if (state.settings.useYtdlp) {
         try {
-            console.log(`[Search Debug] Fetching /scraper/collect stream for "${topicPhrase}" via POST...`);
+            console.log(`[Search Debug] Fetching /scraper/collect stream for "${topicPhrase}" via POST (limit: ${fetchCount})...`);
             updateStatusText(`Searching via yt-dlp for "${topicPhrase}"...`);
             const resp = await fetch("/scraper/collect", {
                 method: "POST",
@@ -1384,7 +1441,7 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
                 body: JSON.stringify({
                     source: "youtube",
                     query: topicPhrase,
-                    limit: 15,
+                    limit: fetchCount,
                     days_back: 0,
                     require_transcript: false,
                     stream: true
@@ -1392,7 +1449,10 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
             });
             console.log(`[Search Debug] /scraper/collect response status: ${resp.status} (${resp.statusText})`);
             if (resp.ok) {
-                sessionTopicSearchCache[cacheKey] = [];
+                if (!sessionTopicSearchCache[cacheKey]) {
+                    sessionTopicSearchCache[cacheKey] = [];
+                }
+                const existingIds = new Set(sessionTopicSearchCache[cacheKey].map(v => v.id));
                 success = true;
 
                 const reader = resp.body.getReader();
@@ -1439,16 +1499,20 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
                                     console.log("[Search Debug] Re-initializing session cache (must have been cleared by sync).");
                                     sessionTopicSearchCache[cacheKey] = [];
                                 }
-                                sessionTopicSearchCache[cacheKey].push(video);
-                                console.log(`[Search Debug] Cached video: "${video.title}" (ID: ${video.id})`);
+                                // Deduplicate against existing cached results
+                                if (!existingIds.has(video.id)) {
+                                    existingIds.add(video.id);
+                                    sessionTopicSearchCache[cacheKey].push(video);
+                                    console.log(`[Search Debug] Cached video: "${video.title}" (ID: ${video.id})`);
 
-                                // Append directly if the user is still looking at this topic or search
-                                const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
-                                const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
-                                console.log(`[Search Debug] View check - ActiveTopic: "${currentActiveTopic}", ActiveSearch: "${currentActiveSearch}", cacheKey: "${cacheKey}"`);
-                                if (currentActiveTopic === cacheKey || currentActiveSearch === cacheKey) {
-                                    console.log(`[Search Debug] Match! Appending streamed video card directly.`);
-                                    appendStreamedDiscoverVideo(video, topicPhrase);
+                                    // Append directly if the user is still looking at this topic or search
+                                    const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
+                                    const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
+                                    console.log(`[Search Debug] View check - ActiveTopic: "${currentActiveTopic}", ActiveSearch: "${currentActiveSearch}", cacheKey: "${cacheKey}"`);
+                                    if (currentActiveTopic === cacheKey || currentActiveSearch === cacheKey) {
+                                        console.log(`[Search Debug] Match! Appending streamed video card directly.`);
+                                        appendStreamedDiscoverVideo(video, topicPhrase);
+                                    }
                                 }
                             } catch (e) {
                                 console.error("[Search Debug] Error parsing stream line:", e, line);
@@ -1461,6 +1525,11 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
                 console.log("[Search Debug] Stream ended successfully.");
                 updateStatusText("Ready");
                 topicSearchLoading[cacheKey] = false;
+                
+                // Check if we hit the max results cap
+                if (sessionTopicSearchCache[cacheKey] && sessionTopicSearchCache[cacheKey].length >= DISCOVER_MAX_RESULTS) {
+                    state.discoverMaxReached = true;
+                }
                 
                 // Do a final sort/render to keep it fully aligned and clean
                 const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
@@ -1590,11 +1659,12 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
             updateStatusText(`Search discovery failed: ${err.message}`);
         }
     }
-
-    sessionTopicSearchCache[cacheKey] = videos;
-    updateStatusText("Ready");
-    topicSearchLoading[cacheKey] = false;
-    renderFeed();
+    if (!success) {
+        sessionTopicSearchCache[cacheKey] = videos;
+        updateStatusText("Ready");
+        topicSearchLoading[cacheKey] = false;
+        renderFeed();
+    }
 }
 
 function appendStreamedDiscoverVideo(video, topicPhrase) {
@@ -1661,9 +1731,9 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         card.querySelector(".thumbnail-area").addEventListener("click", openAction);
         card.querySelector(".video-title").addEventListener("click", openAction);
         
-        // Show up to 10 streaming results on the active page
+        // Show up to 30 streaming short results
         const discoverCardsCount = shortsGrid.querySelectorAll(".discover-card").length;
-        if (discoverCardsCount < 10) {
+        if (discoverCardsCount < DISCOVER_BATCH_SIZE) {
             shortsGrid.appendChild(card);
         }
     } else {
@@ -1716,11 +1786,8 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         card.querySelector(".thumbnail-area").addEventListener("click", openAction);
         card.querySelector(".video-title").addEventListener("click", openAction);
         
-        // Show up to 10 streaming results on the active page
-        const discoverCardsCount = grid.querySelectorAll(".discover-card").length;
-        if (discoverCardsCount < 10) {
-            grid.appendChild(card);
-        }
+        // Append streamed card to the grid
+        grid.appendChild(card);
     }
 }
 
@@ -1759,3 +1826,68 @@ function isShortVideo(video) {
     if (titleLower.includes("#shorts") || titleLower.includes("/shorts/") || titleLower.includes("youtube short")) return true;
     return false;
 }
+
+// Toast notification system
+function showToast(message, type) {
+    type = type || "info";
+    let container = document.querySelector(".toast-container");
+    if (!container) {
+        container = document.createElement("div");
+        container.className = "toast-container";
+        document.body.appendChild(container);
+    }
+    
+    const toast = document.createElement("div");
+    toast.className = `toast-item ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+    
+    setTimeout(() => {
+        toast.classList.add("fade-out");
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+
+// Infinite scroll for search/topic views
+function setupInfiniteScroll() {
+    const feedSection = document.querySelector(".feed-section");
+    if (!feedSection) return;
+    
+    feedSection.addEventListener("scroll", () => {
+        // Only activate for topic/search views
+        const isTopicView = state.currentView.startsWith("topic_");
+        const isSearchView = state.currentView.startsWith("search_");
+        if (!isTopicView && !isSearchView) return;
+        
+        const queryTerm = isTopicView 
+            ? state.currentView.substring(6).toLowerCase() 
+            : state.currentView.substring(7).toLowerCase();
+        
+        // Don't fetch if already loading, max reached, or not near bottom
+        if (topicSearchLoading[queryTerm]) return;
+        if (state.discoverMaxReached) return;
+        
+        const scrollBottom = feedSection.scrollHeight - feedSection.scrollTop - feedSection.clientHeight;
+        if (scrollBottom > 300) return;
+        
+        // Don't fetch more if no initial results yet
+        const cachedCount = sessionTopicSearchCache[queryTerm] ? sessionTopicSearchCache[queryTerm].length : 0;
+        if (cachedCount === 0) return;
+        
+        // Check if we already hit the cap
+        if (cachedCount >= DISCOVER_MAX_RESULTS) {
+            state.discoverMaxReached = true;
+            renderFeed();
+            return;
+        }
+        
+        // Fetch next batch
+        state.discoverBatchIndex++;
+        const offset = state.discoverBatchIndex * DISCOVER_BATCH_SIZE;
+        console.log(`[Infinite Scroll] Fetching batch ${state.discoverBatchIndex + 1} (offset: ${offset}) for "${queryTerm}"`);
+        fetchTopicSearchDiscovery(queryTerm, offset);
+    });
+}
+
+// Initialize infinite scroll on load
+document.addEventListener("DOMContentLoaded", setupInfiniteScroll);
