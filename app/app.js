@@ -40,7 +40,8 @@ let state = {
     settings: {
         useYtdlp: true,
         muteShorts: false
-    }
+    },
+    discoverPage: 0
 };
 
 // In-memory session cache for topic search discovery results
@@ -161,6 +162,7 @@ function setupEventListeners() {
             
             // Reset Search Input on Navigation
             state.searchQuery = "";
+            state.discoverPage = 0;
             const searchInput = document.getElementById("input-search-videos");
             if (searchInput) searchInput.value = "";
             const clearBtn = document.getElementById("btn-clear-search");
@@ -359,6 +361,7 @@ function setupEventListeners() {
             e.preventDefault();
             const query = searchInput.value.trim();
             if (query) {
+                state.discoverPage = 0;
                 triggerGlobalSearch(query);
             }
         });
@@ -396,9 +399,29 @@ function setupEventListeners() {
                 });
                 document.getElementById("current-view-title").textContent = "All Videos";
             }
+            state.discoverPage = 0;
             renderFeed();
         });
     }
+
+    // Recommendation buttons
+    document.querySelectorAll(".btn-add-rec").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            const name = e.target.dataset.name;
+            const id = e.target.dataset.id;
+            
+            if (!state.channels.some(c => c.id === id)) {
+                state.channels.push({ name, id });
+                saveChannels();
+                renderChannelsList();
+                e.target.disabled = true;
+                e.target.textContent = "Added";
+                syncFeeds(); // Trigger sync for the new channel
+            } else {
+                alert("Channel is already subscribed!");
+            }
+        });
+    });
 }
 
 // Dynamic Sidebar topics rendering
@@ -972,6 +995,9 @@ function renderFeed() {
     const renderCard = (video, targetContainer) => {
         const card = document.createElement("div");
         card.className = "video-card fade-in";
+        if (video.isDiscover) {
+            card.classList.add("discover-card");
+        }
         
         let scoreClass = "mid";
         if (video.score >= 5) scoreClass = "high";
@@ -1032,8 +1058,16 @@ function renderFeed() {
         `;
         grid.appendChild(divider);
         
-        // Render Discover videos (capped at 30)
-        const discoverSlice = discoverVideos.slice(0, 30);
+        // Paginate Discover videos (10 per page)
+        const PAGE_SIZE = 10;
+        const totalVideos = discoverVideos.length;
+        const totalPages = Math.ceil(totalVideos / PAGE_SIZE);
+        const currentPage = state.discoverPage || 0;
+        
+        const startIndex = currentPage * PAGE_SIZE;
+        const endIndex = startIndex + PAGE_SIZE;
+        const discoverSlice = discoverVideos.slice(startIndex, endIndex);
+        
         if (topicSearchLoading[queryTerm]) {
             // If currently streaming, render already-loaded ones instantly (no timeout) to avoid resetting animations
             discoverSlice.forEach(video => renderCard(video, grid));
@@ -1045,6 +1079,40 @@ function renderFeed() {
                 }, index * 200); // 200ms stagger
                 renderTimeouts.push(t);
             });
+        }
+
+        // Render Pagination Controls if totalPages > 1
+        if (totalPages > 1) {
+            const paginationContainer = document.createElement("div");
+            paginationContainer.className = "discover-pagination-container";
+            
+            const prevBtn = document.createElement("button");
+            prevBtn.className = "pagination-btn";
+            prevBtn.disabled = currentPage === 0;
+            prevBtn.innerHTML = "◀ Prev";
+            prevBtn.addEventListener("click", () => {
+                state.discoverPage = currentPage - 1;
+                renderFeed();
+            });
+            
+            const pageInfo = document.createElement("span");
+            pageInfo.className = "pagination-info";
+            pageInfo.textContent = `Page ${currentPage + 1} of ${totalPages}`;
+            
+            const nextBtn = document.createElement("button");
+            nextBtn.className = "pagination-btn";
+            nextBtn.disabled = currentPage >= totalPages - 1;
+            nextBtn.innerHTML = "Next ▶";
+            nextBtn.addEventListener("click", () => {
+                state.discoverPage = currentPage + 1;
+                renderFeed();
+            });
+            
+            paginationContainer.appendChild(prevBtn);
+            paginationContainer.appendChild(pageInfo);
+            paginationContainer.appendChild(nextBtn);
+            
+            grid.appendChild(paginationContainer);
         }
     }
 }
@@ -1082,6 +1150,7 @@ function triggerGlobalSearch(query) {
     
     state.currentView = "search_" + query;
     document.getElementById("current-view-title").textContent = `Search: "${query}"`;
+    state.discoverPage = 0;
     
     // Trigger rendering (which will show loading spinner and fetch discovery)
     renderFeed();
@@ -1291,7 +1360,11 @@ function updateStatusText(text) {
 // Fetch general YouTube search results for a topic in the background (CORS bypassed)
 async function fetchTopicSearchDiscovery(topicPhrase) {
     const cacheKey = topicPhrase.toLowerCase();
-    if (topicSearchLoading[cacheKey]) return;
+    console.log(`[Search Debug] fetchTopicSearchDiscovery initiated for: "${topicPhrase}" (cacheKey: "${cacheKey}")`);
+    if (topicSearchLoading[cacheKey]) {
+        console.log(`[Search Debug] fetchTopicSearchDiscovery already loading for "${cacheKey}". Aborting duplicate call.`);
+        return;
+    }
     topicSearchLoading[cacheKey] = true;
     
     updateStatusText(`Searching YouTube for "${topicPhrase}"...`);
@@ -1301,6 +1374,7 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
     
     if (state.settings.useYtdlp) {
         try {
+            console.log(`[Search Debug] Fetching /scraper/collect stream for "${topicPhrase}" via POST...`);
             updateStatusText(`Searching via yt-dlp for "${topicPhrase}"...`);
             const resp = await fetch("/scraper/collect", {
                 method: "POST",
@@ -1316,6 +1390,7 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
                     stream: true
                 })
             });
+            console.log(`[Search Debug] /scraper/collect response status: ${resp.status} (${resp.statusText})`);
             if (resp.ok) {
                 sessionTopicSearchCache[cacheKey] = [];
                 success = true;
@@ -1323,21 +1398,29 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
                 const reader = resp.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = "";
+                console.log("[Search Debug] Stream reader obtained. Starting read loop...");
 
                 while (true) {
+                    console.log("[Search Debug] Awaiting reader.read()...");
                     const { value, done } = await reader.read();
-                    if (done) break;
+                    console.log(`[Search Debug] Reader chunk received. done: ${done}, chunk size: ${value ? value.length : 0} bytes`);
+                    if (done) {
+                        console.log("[Search Debug] Done flag is true. Exiting read loop.");
+                        break;
+                    }
 
                     buffer += decoder.decode(value, { stream: true });
                     const lines = buffer.split("\n");
                     buffer = lines.pop();
+                    console.log(`[Search Debug] Split buffer into ${lines.length} lines. Remaining buffer size: ${buffer.length} chars`);
 
                     for (const line of lines) {
                         if (line.trim()) {
                             try {
+                                console.log(`[Search Debug] Parsing NDJSON line: ${line.substring(0, 120)}...`);
                                 const item = JSON.parse(line);
                                 if (item.error) {
-                                    console.warn("Error in stream item:", item.error);
+                                    console.warn("[Search Debug] Stream item contains error:", item.error);
                                     continue;
                                 }
                                 const video = {
@@ -1353,24 +1436,29 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
                                 };
 
                                 if (!sessionTopicSearchCache[cacheKey]) {
+                                    console.log("[Search Debug] Re-initializing session cache (must have been cleared by sync).");
                                     sessionTopicSearchCache[cacheKey] = [];
                                 }
                                 sessionTopicSearchCache[cacheKey].push(video);
+                                console.log(`[Search Debug] Cached video: "${video.title}" (ID: ${video.id})`);
 
                                 // Append directly if the user is still looking at this topic or search
                                 const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
                                 const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
+                                console.log(`[Search Debug] View check - ActiveTopic: "${currentActiveTopic}", ActiveSearch: "${currentActiveSearch}", cacheKey: "${cacheKey}"`);
                                 if (currentActiveTopic === cacheKey || currentActiveSearch === cacheKey) {
+                                    console.log(`[Search Debug] Match! Appending streamed video card directly.`);
                                     appendStreamedDiscoverVideo(video, topicPhrase);
                                 }
                             } catch (e) {
-                                console.error("Error parsing stream line:", e, line);
+                                console.error("[Search Debug] Error parsing stream line:", e, line);
                             }
                         }
                     }
                 }
 
                 // Stream ended, update status
+                console.log("[Search Debug] Stream ended successfully.");
                 updateStatusText("Ready");
                 topicSearchLoading[cacheKey] = false;
                 
@@ -1378,20 +1466,21 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
                 const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
                 const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
                 if (currentActiveTopic === cacheKey || currentActiveSearch === cacheKey) {
+                    console.log("[Search Debug] Match found at stream end. Performing final renderFeed().");
                     renderFeed();
                 }
             } else {
-                console.warn(`Scraper-service returned status ${resp.status}. Falling back to HTML scraping.`);
+                console.warn(`[Search Debug] Scraper-service returned status ${resp.status}. Falling back to HTML scraping.`);
             }
         } catch (err) {
-            console.error("Failed fetching discovery search via yt-dlp, falling back to HTML scraper:", err);
+            console.error("[Search Debug] Failed fetching discovery search via yt-dlp, falling back to HTML scraper:", err);
         }
     }
     
     // Fallback to raw HTML scraping if yt-dlp is off or failed
     if (!success) {
         try {
-            const url = `/youtube/results?search_query=${encodeURIComponent(topicPhrase)}`;
+            console.log(`[Search Debug] Executing HTML scraper fallback for: "${topicPhrase}"...`);
             const resp = await fetch(url);
             if (!resp.ok) throw new Error("Search request failed.");
             const htmlText = await resp.text();
@@ -1544,7 +1633,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         if (shortsShelf) shortsShelf.classList.remove("hidden");
         
         const card = document.createElement("div");
-        card.className = "video-card fade-in";
+        card.className = "video-card fade-in discover-card";
         
         let scoreClass = "mid";
         if (enrichedVideo.score >= 5) scoreClass = "high";
@@ -1572,7 +1661,11 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         card.querySelector(".thumbnail-area").addEventListener("click", openAction);
         card.querySelector(".video-title").addEventListener("click", openAction);
         
-        shortsGrid.appendChild(card);
+        // Show up to 10 streaming results on the active page
+        const discoverCardsCount = shortsGrid.querySelectorAll(".discover-card").length;
+        if (discoverCardsCount < 10) {
+            shortsGrid.appendChild(card);
+        }
     } else {
         // Ensure discovery divider exists
         let divider = grid.querySelector(".discover-section-header");
@@ -1591,7 +1684,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         }
         
         const card = document.createElement("div");
-        card.className = "video-card fade-in";
+        card.className = "video-card fade-in discover-card";
         
         let scoreClass = "mid";
         if (enrichedVideo.score >= 5) scoreClass = "high";
@@ -1623,7 +1716,11 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         card.querySelector(".thumbnail-area").addEventListener("click", openAction);
         card.querySelector(".video-title").addEventListener("click", openAction);
         
-        grid.appendChild(card);
+        // Show up to 10 streaming results on the active page
+        const discoverCardsCount = grid.querySelectorAll(".discover-card").length;
+        if (discoverCardsCount < 10) {
+            grid.appendChild(card);
+        }
     }
 }
 
