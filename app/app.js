@@ -97,12 +97,14 @@ document.addEventListener("DOMContentLoaded", () => {
     initSmartFeed();
     fetchLlmModel();
     
-    // Auto-sync if cache is empty or older than 1 hour (3600 seconds)
+    // Render cached feed immediately so the UI is active and loads discovery videos
+    renderFeed();
+    
+    // Auto-sync in the background if cache is empty or older than 1 hour (3600 seconds)
     const cacheAge = (Date.now() - state.cache.lastSync) / 1000;
     if (cacheAge > 3600 || getCachedVideosCount() === 0) {
-        syncFeeds();
+        syncFeeds(true); // silent background sync
     } else {
-        renderFeed();
         updateStatusText(`Loaded from cache (${Math.round(cacheAge/60)}m ago)`);
     }
 
@@ -712,7 +714,10 @@ async function syncFeeds() {
             // Try RSS first if use-ytdlp setting is not active
             if (!state.settings.useYtdlp) {
                 try {
-                    const response = await fetch(`/youtube-feed/?channel_id=${channel.id}`);
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 8000);
+                    const response = await fetch(`/youtube-feed/?channel_id=${channel.id}`, { signal: controller.signal });
+                    clearTimeout(timeoutId);
                     if (response.ok) {
                         const xmlText = await response.text();
                         const parser = new DOMParser();
@@ -752,6 +757,8 @@ async function syncFeeds() {
             if (!success) {
                 try {
                     console.log(`Syncing channel ${channel.name} (${channel.id}) via scraper-service...`);
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 12000);
                     const response = await fetch("/scraper/collect", {
                         method: "POST",
                         headers: {
@@ -763,8 +770,10 @@ async function syncFeeds() {
                             limit: 10,
                             days_back: 30,
                             require_transcript: false
-                        })
+                        }),
+                        signal: controller.signal
                     });
+                    clearTimeout(timeoutId);
                     if (response.ok) {
                         const data = await response.json();
                         if (data && Array.isArray(data.items)) {
@@ -867,30 +876,7 @@ function getScoreAndMatches(video) {
     return { score, matches };
 }
 
-// Load and Render Video Grid
-function renderFeed() {
-    clearRenderTimeouts();
-    const grid = document.getElementById("video-grid");
-    const shortsShelf = document.getElementById("shorts-shelf");
-    const shortsGrid = document.getElementById("shorts-grid");
-    const emptyState = document.getElementById("empty-state");
-    const brainstormContainer = document.getElementById("ai-brainstorm-container");
-    
-    if (state.currentView === "ai-brainstorm") {
-        grid.classList.add("hidden");
-        shortsShelf.classList.add("hidden");
-        emptyState.classList.add("hidden");
-        if (brainstormContainer) brainstormContainer.classList.remove("hidden");
-        renderBrainstormView();
-        return;
-    } else {
-        grid.classList.remove("hidden");
-        if (brainstormContainer) brainstormContainer.classList.add("hidden");
-    }
-    
-    grid.innerHTML = "";
-    shortsGrid.innerHTML = "";
-    shortsShelf.classList.add("hidden");
+
 // Render Helper Function (declared globally for reuse)
 function renderCard(video, targetContainer) {
     const card = document.createElement("div");
@@ -1259,7 +1245,6 @@ function renderFeed() {
     }
 }
 }
-}
 
 // Display Video in Distraction-Free IFrame Modal
 function playVideo(video) {
@@ -1511,6 +1496,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
     const cacheKey = topicPhrase.toLowerCase();
     offset = offset || 0;
     const fetchCount = offset + DISCOVER_BATCH_SIZE;
+    const url = `/youtube/results?search_query=${encodeURIComponent(topicPhrase)}`;
     console.log(`[Search Debug] fetchTopicSearchDiscovery initiated for: "${topicPhrase}" (cacheKey: "${cacheKey}", offset: ${offset}, fetchCount: ${fetchCount})`);
     if (topicSearchLoading[cacheKey]) {
         console.log(`[Search Debug] fetchTopicSearchDiscovery already loading for "${cacheKey}". Aborting duplicate call.`);
@@ -1527,6 +1513,8 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
         try {
             console.log(`[Search Debug] Fetching /scraper/collect stream for "${topicPhrase}" via POST (limit: ${fetchCount})...`);
             updateStatusText(`Searching via yt-dlp for "${topicPhrase}"...`);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000);
             const resp = await fetch("/scraper/collect", {
                 method: "POST",
                 headers: {
@@ -1539,8 +1527,10 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                     days_back: 0,
                     require_transcript: false,
                     stream: true
-                })
+                }),
+                signal: controller.signal
             });
+            clearTimeout(timeoutId);
             console.log(`[Search Debug] /scraper/collect response status: ${resp.status} (${resp.statusText})`);
             if (resp.ok) {
                 if (!sessionTopicSearchCache[cacheKey]) {
@@ -1660,7 +1650,10 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
     if (!success) {
         try {
             console.log(`[Search Debug] Executing HTML scraper fallback for: "${topicPhrase}"...`);
-            const resp = await fetch(url);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 12000);
+            const resp = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeoutId);
             if (!resp.ok) throw new Error("Search request failed.");
             const htmlText = await resp.text();
 
@@ -2100,6 +2093,8 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
         }
         
         // Target proxied vllm route
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000);
         const response = await fetch("/vllm/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -2113,8 +2108,10 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
                 ],
                 temperature: 0.7,
                 max_tokens: 4096
-            })
+            }),
+            signal: controller.signal
         });
+        clearTimeout(timeoutId);
         
         if (!response.ok) throw new Error(`vLLM server returned status ${response.status}`);
         
@@ -2149,7 +2146,9 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
         }
         cleanContent = cleanContent.trim();
         
-        const parsed = JSON.parse(cleanContent);
+        // Extract JSON array from the response content to avoid parsing extra reasoning text
+        const jsonMatch = cleanContent.match(/\[\s*\{[\s\S]*\}\s*\]/);
+        const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanContent);
         if (Array.isArray(parsed)) {
             const addedPhrases = [];
             parsed.forEach(item => {
@@ -2221,7 +2220,8 @@ async function loadNextSmartFeedBatch() {
             state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
         }
         
-        await generateBrainstormTopics(true);
+        // Non-blocking background brainstorming call
+        generateBrainstormTopics(true);
     }
     
     // Check if queue runs low (less than 3 topics), if so trigger background brainstorm
@@ -2248,6 +2248,8 @@ async function loadNextSmartFeedBatch() {
     
     if (state.settings.useYtdlp) {
         try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 12000);
             const resp = await fetch("/scraper/collect", {
                 method: "POST",
                 headers: {
@@ -2259,8 +2261,10 @@ async function loadNextSmartFeedBatch() {
                     limit: fetchCount,
                     days_back: 0,
                     require_transcript: false
-                })
+                }),
+                signal: controller.signal
             });
+            clearTimeout(timeoutId);
             if (resp.ok) {
                 const data = await resp.json();
                 if (data && Array.isArray(data.items)) {
@@ -2289,7 +2293,10 @@ async function loadNextSmartFeedBatch() {
     if (!success) {
         try {
             const url = `/youtube/results?search_query=${encodeURIComponent(topic)}`;
-            const resp = await fetch(url);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 12000);
+            const resp = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeoutId);
             if (resp.ok) {
                 const htmlText = await resp.text();
                 const parser = new DOMParser();
