@@ -1531,12 +1531,28 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                     state.discoverMaxReached = true;
                 }
                 
-                // Do a final sort/render to keep it fully aligned and clean
                 const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
                 const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
                 if (currentActiveTopic === cacheKey || currentActiveSearch === cacheKey) {
-                    console.log("[Search Debug] Match found at stream end. Performing final renderFeed().");
-                    renderFeed();
+                    if (offset > 0) {
+                        // Infinite scroll batch — cards are already appended by appendStreamedDiscoverVideo().
+                        // Just remove the loading spinner and show end-of-results if needed.
+                        const grid = document.getElementById("video-grid");
+                        const loader = grid.querySelector(".infinite-scroll-loader");
+                        if (loader) loader.remove();
+                        
+                        if (state.discoverMaxReached) {
+                            const endMsg = document.createElement("div");
+                            endMsg.className = "end-of-results";
+                            endMsg.textContent = `Showing top ${DISCOVER_MAX_RESULTS} results. Refine your search for more.`;
+                            grid.appendChild(endMsg);
+                        }
+                        console.log("[Search Debug] Infinite scroll batch complete. Skipping full renderFeed().");
+                    } else {
+                        // Initial batch — do a full render to set up the grid layout
+                        console.log("[Search Debug] Initial batch complete. Performing final renderFeed().");
+                        renderFeed();
+                    }
                 }
             } else {
                 console.warn(`[Search Debug] Scraper-service returned status ${resp.status}. Falling back to HTML scraping.`);
@@ -1877,8 +1893,24 @@ function setupInfiniteScroll() {
         // Check if we already hit the cap
         if (cachedCount >= DISCOVER_MAX_RESULTS) {
             state.discoverMaxReached = true;
-            renderFeed();
+            // Append end-of-results message without re-rendering
+            const grid = document.getElementById("video-grid");
+            if (!grid.querySelector(".end-of-results")) {
+                const endMsg = document.createElement("div");
+                endMsg.className = "end-of-results";
+                endMsg.textContent = `Showing top ${DISCOVER_MAX_RESULTS} results. Refine your search for more.`;
+                grid.appendChild(endMsg);
+            }
             return;
+        }
+        
+        // Add a loading spinner at the bottom of the grid
+        const grid = document.getElementById("video-grid");
+        if (!grid.querySelector(".infinite-scroll-loader")) {
+            const loader = document.createElement("div");
+            loader.className = "infinite-scroll-loader";
+            loader.innerHTML = `<div class="loader-spinner"></div><p>Loading more results...</p>`;
+            grid.appendChild(loader);
         }
         
         // Fetch next batch
