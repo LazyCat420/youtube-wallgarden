@@ -40,6 +40,8 @@ let state = {
     searchHistory: [], // Rolling history of searches (max 10)
     brainstormTopics: [], // Brainstormed topics from LLM
     brainstormLoading: false,
+    lastBrainstormTime: 0,
+    lastBrainstormAttempt: 0,
     settings: {
         useYtdlp: true,
         muteShorts: false
@@ -2078,6 +2080,7 @@ async function generateBrainstormTopics(append) {
     append = append || false;
     if (state.brainstormLoading) return;
     state.brainstormLoading = true;
+    state.lastBrainstormAttempt = Date.now();
     
     console.log("[Smart Feed] Background LLM brainstorming started...");
     
@@ -2104,7 +2107,7 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
         
         // Target proxied vllm route
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30000);
+        const timeoutId = setTimeout(() => controller.abort(), 90000);
         const response = await fetch("/vllm/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -2117,7 +2120,7 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
                     { role: "user", content: userMessage }
                 ],
                 temperature: 0.7,
-                max_tokens: 4096
+                max_tokens: 1500
             }),
             signal: controller.signal
         });
@@ -2182,7 +2185,7 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
             
             saveTopics();
             console.log("[Smart Feed] Successfully brainstormed and queued new topics:", addedPhrases);
-            if (addedPhrases.length > 0) {
+            if (addedPhrases.length > 0 && !append) {
                 showToast(`💡 Queued topics: ${addedPhrases.join(", ")}`, "success");
             }
         } else {
@@ -2190,9 +2193,12 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
         }
     } catch (err) {
         console.error("Brainstorm error:", err);
-        showToast("❌ Failed to brainstorm topics: " + err.message, "danger");
+        if (!append) {
+            showToast("❌ Failed to brainstorm topics: " + err.message, "danger");
+        }
     } finally {
         state.brainstormLoading = false;
+        state.lastBrainstormTime = Date.now();
         updateStatusText("Ready");
     }
 }
@@ -2240,7 +2246,7 @@ Please brainstorm 10-20 new topics that are similar, related, or logical next st
         }
         
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 45000); // 45s timeout for more topics
+        const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout for more topics
         const response = await fetch("/vllm/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -2253,7 +2259,7 @@ Please brainstorm 10-20 new topics that are similar, related, or logical next st
                     { role: "user", content: userMessage }
                 ],
                 temperature: 0.7,
-                max_tokens: 4096
+                max_tokens: 1500
             }),
             signal: controller.signal
         });
@@ -2479,7 +2485,11 @@ async function fillSmartFeedPreloadBuffer() {
     // Check if we need to brainstorm more topics using LLM
     // Total upcoming topics = queue length + preloaded buffer length
     const totalUpcoming = state.smartFeedTopicsQueue.length + state.smartFeedPreloadedVideos.length;
-    if (totalUpcoming < 12 && !state.brainstormLoading) {
+    const now = Date.now();
+    const cooldownMs = 60000; // 60-second cooldown
+    const isCooldownActive = state.lastBrainstormTime && (now - state.lastBrainstormTime < cooldownMs);
+
+    if (totalUpcoming < 12 && !state.brainstormLoading && !isCooldownActive) {
         console.log("[Smart Feed] Total upcoming topics low, triggering background LLM brainstorm...");
         generateBrainstormTopics(true).then(() => {
             fillSmartFeedPreloadBuffer();
@@ -2487,17 +2497,13 @@ async function fillSmartFeedPreloadBuffer() {
     }
     
     if (state.smartFeedTopicsQueue.length === 0) {
-        if (!state.brainstormLoading) {
-            console.log("[Smart Feed] Queue is empty! Repopulating from positive topics...");
-            const positiveTopics = state.topics
-                .filter(t => t.weight > 0)
-                .map(t => t.phrase.toLowerCase());
-            state.smartFeedTopicsQueue = [...positiveTopics];
-            if (state.smartFeedTopicsQueue.length === 0) {
-                state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
-            }
-        } else {
-            return; // Wait for brainstorm to finish
+        console.log("[Smart Feed] Queue is empty! Repopulating from positive topics...");
+        const positiveTopics = state.topics
+            .filter(t => t.weight > 0)
+            .map(t => t.phrase.toLowerCase());
+        state.smartFeedTopicsQueue = [...positiveTopics];
+        if (state.smartFeedTopicsQueue.length === 0) {
+            state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
         }
     }
     
@@ -2588,7 +2594,7 @@ async function loadNextSmartFeedBatch() {
             state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
         }
         
-        await generateBrainstormTopics(true);
+        generateBrainstormTopics(true);
     }
     
     const topic = state.smartFeedTopicsQueue.shift();
@@ -2640,18 +2646,208 @@ function appendSmartFeedSection(topic, videos) {
     divider.style.borderBottom = "1px solid var(--card-border)";
     divider.style.paddingBottom = "0.5rem";
     
+    const normalizedTopic = topic.trim().toLowerCase();
+    divider.setAttribute("data-discover-topic", normalizedTopic);
+    
     divider.innerHTML = `
         <h2 class="discover-section-title" style="font-size: 1.1rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
             <span>🔍 Discover:</span>
-            <span style="color: var(--accent);">${capitalizePhrase(topic)}</span>
+            <span class="discover-topic-text" style="color: var(--accent);">${escapeHTML(capitalizePhrase(topic))}</span>
+            <div class="discover-topic-actions">
+                <button class="discover-action-btn edit-btn" title="Edit Topic" data-topic="${escapeHTML(normalizedTopic)}">✏️</button>
+                <button class="discover-action-btn remove-btn" title="Remove Topic" data-topic="${escapeHTML(normalizedTopic)}">✕</button>
+            </div>
         </h2>
         <span class="discover-badge" style="font-size: 0.7rem; opacity: 0.6;">Smart Feed Suggestion</span>
     `;
     grid.appendChild(divider);
     
+    // Bind listeners
+    divider.querySelector(".edit-btn").addEventListener("click", (e) => {
+        e.stopPropagation();
+        editDiscoverTopic(normalizedTopic);
+    });
+    divider.querySelector(".remove-btn").addEventListener("click", (e) => {
+        e.stopPropagation();
+        nukeDiscoverTopic(normalizedTopic);
+    });
+    
     const fragment = document.createDocumentFragment();
     videos.forEach(video => {
         renderCard(video, fragment);
+        const card = fragment.lastElementChild;
+        if (card) {
+            card.setAttribute("data-discover-topic", normalizedTopic);
+        }
     });
     grid.appendChild(fragment);
 }
+
+// Mute and remove a discovery topic completely
+function nukeDiscoverTopic(topic) {
+    if (!topic) return;
+    
+    const normalizedTopic = topic.trim().toLowerCase();
+    
+    // 1. Set topic weight to -10 to mute it
+    const existingIndex = state.topics.findIndex(t => t.phrase.toLowerCase() === normalizedTopic);
+    if (existingIndex !== -1) {
+        state.topics[existingIndex].weight = -10;
+    } else {
+        state.topics.push({ phrase: normalizedTopic, weight: -10 });
+    }
+    saveTopics();
+    
+    // 2. Clear from queue/preload states
+    state.smartFeedUsedTopics = state.smartFeedUsedTopics.filter(t => t !== normalizedTopic);
+    state.smartFeedTopicsQueue = state.smartFeedTopicsQueue.filter(t => t !== normalizedTopic);
+    state.smartFeedPreloadedVideos = state.smartFeedPreloadedVideos.filter(item => item.topic !== normalizedTopic);
+    
+    // 3. Remove videos of this topic from active smartFeedVideos state
+    state.smartFeedVideos = state.smartFeedVideos.filter(v => (v.discoveryTopic || "").toLowerCase() !== normalizedTopic);
+    
+    // 4. Locate and remove DOM elements
+    const elements = [
+        ...Array.from(document.querySelectorAll('.discover-section-header')),
+        ...Array.from(document.querySelectorAll('.video-card'))
+    ].filter(el => {
+        const tAttr = el.getAttribute('data-discover-topic');
+        return tAttr && tAttr.toLowerCase() === normalizedTopic;
+    });
+    
+    elements.forEach(el => {
+        el.classList.add("fade-out-remove");
+        setTimeout(() => el.remove(), 350);
+    });
+    
+    showToast(`🚫 Removed "${capitalizePhrase(topic)}" and muted it (-10 weight).`, "danger");
+    
+    // 5. Fill buffer and load next batch in background to keep feed populated
+    setTimeout(() => {
+        fillSmartFeedPreloadBuffer();
+    }, 500);
+}
+
+// Edit a discovery topic and replace its contents inline
+async function editDiscoverTopic(topic) {
+    if (!topic) return;
+    
+    const normalizedTopic = topic.trim().toLowerCase();
+    const newTopic = prompt(`Edit topic "${capitalizePhrase(normalizedTopic)}" keyphrase:`, normalizedTopic);
+    if (newTopic === null) return;
+    
+    const newTopicClean = newTopic.trim().toLowerCase();
+    if (!newTopicClean) {
+        showToast("⚠️ Topic keyphrase cannot be empty.", "warning");
+        return;
+    }
+    
+    if (newTopicClean === normalizedTopic) return;
+    
+    // 1. Update/Add in state.topics (replace old topic with new one)
+    state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== normalizedTopic);
+    const existingNewIndex = state.topics.findIndex(t => t.phrase.toLowerCase() === newTopicClean);
+    if (existingNewIndex !== -1) {
+        state.topics[existingNewIndex].weight = Math.max(state.topics[existingNewIndex].weight, 5); // Ensure not muted
+    } else {
+        state.topics.push({ phrase: newTopicClean, weight: 5 });
+    }
+    saveTopics();
+    
+    // 2. Update used topics
+    state.smartFeedUsedTopics = state.smartFeedUsedTopics.map(t => t === normalizedTopic ? newTopicClean : t);
+    
+    // 3. Find header and show inline loading spinner
+    const headerEl = Array.from(document.querySelectorAll('.discover-section-header'))
+        .find(el => el.getAttribute('data-discover-topic') === normalizedTopic);
+        
+    if (headerEl) {
+        const titleTextEl = headerEl.querySelector(".discover-topic-text");
+        if (titleTextEl) {
+            titleTextEl.innerHTML = `${escapeHTML(capitalizePhrase(newTopicClean))} <span class="sync-spinner" style="position: static; display: inline-block; animation: spinLoader 1s linear infinite; margin-left: 0.5rem; transform: none;">🔄</span>`;
+        }
+    }
+    
+    // 4. Animate and remove old cards for this topic from DOM and state
+    const oldCards = Array.from(document.querySelectorAll('.video-card'))
+        .filter(el => el.getAttribute('data-discover-topic') === normalizedTopic);
+        
+    oldCards.forEach(card => {
+        card.classList.add("fade-out-remove");
+        setTimeout(() => card.remove(), 350);
+    });
+    
+    state.smartFeedVideos = state.smartFeedVideos.filter(v => (v.discoveryTopic || "").toLowerCase() !== normalizedTopic);
+    
+    showToast(`✏️ Updating topic to "${capitalizePhrase(newTopicClean)}"...`, "info");
+    
+    try {
+        const videos = await fetchVideosForTopic(newTopicClean);
+        const existingIds = new Set(state.smartFeedVideos.map(v => v.id));
+        const deduplicated = videos.filter(v => !existingIds.has(v.id));
+        
+        // Find updated/current header element (in case DOM changed)
+        const currentHeaderEl = Array.from(document.querySelectorAll('.discover-section-header'))
+            .find(el => el.getAttribute('data-discover-topic') === normalizedTopic);
+            
+        if (currentHeaderEl) {
+            // Update attributes and HTML of header
+            currentHeaderEl.setAttribute("data-discover-topic", newTopicClean);
+            
+            currentHeaderEl.innerHTML = `
+                <h2 class="discover-section-title" style="font-size: 1.1rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
+                    <span>🔍 Discover:</span>
+                    <span class="discover-topic-text" style="color: var(--accent);">${escapeHTML(capitalizePhrase(newTopicClean))}</span>
+                    <div class="discover-topic-actions">
+                        <button class="discover-action-btn edit-btn" title="Edit Topic" data-topic="${escapeHTML(newTopicClean)}">✏️</button>
+                        <button class="discover-action-btn remove-btn" title="Remove Topic" data-topic="${escapeHTML(newTopicClean)}">✕</button>
+                    </div>
+                </h2>
+                <span class="discover-badge" style="font-size: 0.7rem; opacity: 0.6;">Smart Feed Suggestion</span>
+            `;
+            
+            // Bind new listeners
+            currentHeaderEl.querySelector(".edit-btn").addEventListener("click", (e) => {
+                e.stopPropagation();
+                editDiscoverTopic(newTopicClean);
+            });
+            currentHeaderEl.querySelector(".remove-btn").addEventListener("click", (e) => {
+                e.stopPropagation();
+                nukeDiscoverTopic(newTopicClean);
+            });
+            
+            if (deduplicated.length > 0) {
+                state.smartFeedVideos.push(...deduplicated);
+                
+                const fragment = document.createDocumentFragment();
+                deduplicated.forEach(video => {
+                    renderCard(video, fragment);
+                    const card = fragment.lastElementChild;
+                    if (card) {
+                        card.setAttribute("data-discover-topic", newTopicClean);
+                    }
+                });
+                
+                currentHeaderEl.after(fragment);
+                showToast(`✅ Loaded new videos for "${capitalizePhrase(newTopicClean)}"`, "success");
+            } else {
+                showToast(`⚠️ No videos found for "${capitalizePhrase(newTopicClean)}"`, "warning");
+                currentHeaderEl.classList.add("fade-out-remove");
+                setTimeout(() => currentHeaderEl.remove(), 350);
+            }
+        }
+    } catch (err) {
+        console.error(`[Edit Topic] Fetch failed for "${newTopicClean}":`, err);
+        showToast(`❌ Failed fetching videos for "${capitalizePhrase(newTopicClean)}"`, "danger");
+        
+        const currentHeaderEl = Array.from(document.querySelectorAll('.discover-section-header'))
+            .find(el => el.getAttribute('data-discover-topic') === normalizedTopic);
+        if (currentHeaderEl) {
+            currentHeaderEl.classList.add("fade-out-remove");
+            setTimeout(() => currentHeaderEl.remove(), 350);
+        }
+    } finally {
+        fillSmartFeedPreloadBuffer();
+    }
+}
+
