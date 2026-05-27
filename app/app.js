@@ -53,7 +53,9 @@ let state = {
     smartFeedUsedTopics: [],
     smartFeedLoading: false,
     smartFeedInitialized: false,
-    smartFeedSubscriptionIndex: 0
+    smartFeedSubscriptionIndex: 0,
+    smartFeedPreloadedVideos: [],
+    smartFeedPreloadLoading: false
 };
 
 const DISCOVER_BATCH_SIZE = 30;
@@ -76,6 +78,8 @@ function initSmartFeed() {
     state.smartFeedLoading = false;
     state.smartFeedSubscriptionIndex = 0;
     state.smartFeedInitialized = true;
+    state.smartFeedPreloadedVideos = [];
+    state.smartFeedPreloadLoading = false;
     
     // Get positive topics (weight > 0) sorted by weight descending
     const positiveTopics = state.topics
@@ -88,6 +92,9 @@ function initSmartFeed() {
         state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
     }
     console.log("[Smart Feed] Initialized with topics queue:", state.smartFeedTopicsQueue);
+    
+    // Start background preloading
+    fillSmartFeedPreloadBuffer();
 }
 
 // Initialize Application
@@ -2187,61 +2194,7 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
     }
 }
 
-async function loadNextSmartFeedBatch() {
-    if (state.smartFeedLoading) return;
-    state.smartFeedLoading = true;
-    
-    // Add loading spinner at the bottom
-    const grid = document.getElementById("video-grid");
-    if (!grid) {
-        state.smartFeedLoading = false;
-        return;
-    }
-    let loader = grid.querySelector(".smart-feed-loader");
-    if (!loader) {
-        loader = document.createElement("div");
-        loader.className = "smart-feed-loader infinite-scroll-loader";
-        loader.innerHTML = `<div class="loader-spinner"></div><p style="margin: 0.5rem 0 0 0;">Discovering videos via AI topics...</p>`;
-        loader.style.gridColumn = "1 / -1";
-        loader.style.textAlign = "center";
-        loader.style.padding = "2rem";
-        grid.appendChild(loader);
-    }
-    
-    // Let's pop a topic from the queue
-    if (state.smartFeedTopicsQueue.length === 0) {
-        console.log("[Smart Feed] Queue is empty! Generating more topics first...");
-        const positiveTopics = state.topics
-            .filter(t => t.weight > 0)
-            .map(t => t.phrase.toLowerCase());
-        
-        state.smartFeedTopicsQueue = [...positiveTopics];
-        if (state.smartFeedTopicsQueue.length === 0) {
-            state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
-        }
-        
-        // Non-blocking background brainstorming call
-        generateBrainstormTopics(true);
-    }
-    
-    // Check if queue runs low (less than 3 topics), if so trigger background brainstorm
-    if (state.smartFeedTopicsQueue.length < 3 && !state.brainstormLoading) {
-        console.log("[Smart Feed] Topics queue running low, triggering background LLM brainstorm...");
-        generateBrainstormTopics(true);
-    }
-    
-    const topic = state.smartFeedTopicsQueue.shift();
-    if (!topic) {
-        const updatedLoader = grid.querySelector(".smart-feed-loader");
-        if (updatedLoader) updatedLoader.remove();
-        state.smartFeedLoading = false;
-        return;
-    }
-    state.smartFeedUsedTopics.push(topic);
-    
-    console.log(`[Smart Feed] Fetching discovery videos for topic: "${topic}"...`);
-    updateStatusText(`Smart Feed: Discovering "${capitalizePhrase(topic)}"...`);
-    
+async function fetchVideosForTopic(topic) {
     let videos = [];
     let success = false;
     const fetchCount = 10;
@@ -2286,7 +2239,7 @@ async function loadNextSmartFeedBatch() {
                 }
             }
         } catch (err) {
-            console.error(`[Smart Feed] Scraper fetch failed for "${topic}":`, err);
+            console.error(`[Smart Feed Fetch] Scraper fetch failed for "${topic}":`, err);
         }
     }
     
@@ -2358,12 +2311,12 @@ async function loadNextSmartFeedBatch() {
                 }
             }
         } catch (err) {
-            console.error(`[Smart Feed] HTML search fallback failed for "${topic}":`, err);
+            console.error(`[Smart Feed Fetch] HTML search fallback failed for "${topic}":`, err);
         }
     }
     
     if (videos.length > 0) {
-        const filtered = videos.filter(v => {
+        return videos.filter(v => {
             const evaluation = getScoreAndMatches(v);
             v.score = evaluation.score;
             v.matchedTopics = evaluation.matches;
@@ -2373,21 +2326,166 @@ async function loadNextSmartFeedBatch() {
             
             return !isBlockedId && !isBlockedName && v.score > -10;
         });
+    }
+    
+    return [];
+}
+
+async function fillSmartFeedPreloadBuffer() {
+    if (state.smartFeedPreloadLoading) return;
+    
+    const targetPreloadCount = 10;
+    if (state.smartFeedPreloadedVideos.length >= targetPreloadCount) {
+        return; // Preload buffer is already full
+    }
+    
+    // Check if we need to brainstorm more topics using LLM
+    // Total upcoming topics = queue length + preloaded buffer length
+    const totalUpcoming = state.smartFeedTopicsQueue.length + state.smartFeedPreloadedVideos.length;
+    if (totalUpcoming < 12 && !state.brainstormLoading) {
+        console.log("[Smart Feed] Total upcoming topics low, triggering background LLM brainstorm...");
+        generateBrainstormTopics(true).then(() => {
+            fillSmartFeedPreloadBuffer();
+        });
+    }
+    
+    if (state.smartFeedTopicsQueue.length === 0) {
+        if (!state.brainstormLoading) {
+            console.log("[Smart Feed] Queue is empty! Repopulating from positive topics...");
+            const positiveTopics = state.topics
+                .filter(t => t.weight > 0)
+                .map(t => t.phrase.toLowerCase());
+            state.smartFeedTopicsQueue = [...positiveTopics];
+            if (state.smartFeedTopicsQueue.length === 0) {
+                state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
+            }
+        } else {
+            return; // Wait for brainstorm to finish
+        }
+    }
+    
+    const topic = state.smartFeedTopicsQueue.shift();
+    if (!topic) return;
+    
+    state.smartFeedPreloadLoading = true;
+    state.smartFeedUsedTopics.push(topic);
+    console.log(`[Smart Feed Preload] Pre-fetching discovery videos for topic: "${topic}"...`);
+    
+    try {
+        const videos = await fetchVideosForTopic(topic);
+        if (videos && videos.length > 0) {
+            state.smartFeedPreloadedVideos.push({ topic, videos });
+            console.log(`[Smart Feed Preload] Successfully preloaded topic "${topic}" with ${videos.length} videos. Buffer size: ${state.smartFeedPreloadedVideos.length}`);
+            
+            // If the Smart Feed currently has no discovery videos rendered, and the user is waiting,
+            // we should instantly render this newly loaded batch!
+            if (state.currentView === "smart-feed" && state.smartFeedVideos.length === 0 && !state.smartFeedLoading) {
+                loadNextSmartFeedBatch();
+            }
+        } else {
+            console.warn(`[Smart Feed Preload] No videos found for topic "${topic}".`);
+        }
+    } catch (err) {
+        console.error(`[Smart Feed Preload] Failed preloading for topic "${topic}":`, err);
+    } finally {
+        state.smartFeedPreloadLoading = false;
+        
+        // Cooldown delay of 1.5 seconds between fetches to protect from rate-limiting
+        setTimeout(() => {
+            fillSmartFeedPreloadBuffer();
+        }, 1500);
+    }
+}
+
+async function loadNextSmartFeedBatch() {
+    if (state.smartFeedLoading) return;
+    state.smartFeedLoading = true;
+    
+    const grid = document.getElementById("video-grid");
+    if (!grid) {
+        state.smartFeedLoading = false;
+        return;
+    }
+    
+    // Check if we have preloaded content in the buffer
+    if (state.smartFeedPreloadedVideos.length > 0) {
+        const item = state.smartFeedPreloadedVideos.shift();
+        const { topic, videos } = item;
         
         const existingIds = new Set(state.smartFeedVideos.map(v => v.id));
-        const deduplicated = filtered.filter(v => !existingIds.has(v.id));
+        const deduplicated = videos.filter(v => !existingIds.has(v.id));
         
         if (deduplicated.length > 0) {
             state.smartFeedVideos.push(...deduplicated);
             appendSmartFeedSection(topic, deduplicated);
         }
+        
+        state.smartFeedLoading = false;
+        updateStatusText("Ready");
+        
+        // Trigger preloader to fill the gap
+        fillSmartFeedPreloadBuffer();
+        return;
     }
     
-    const updatedLoader = grid.querySelector(".smart-feed-loader");
-    if (updatedLoader) updatedLoader.remove();
+    // Fallback if buffer is empty
+    let loader = grid.querySelector(".smart-feed-loader");
+    if (!loader) {
+        loader = document.createElement("div");
+        loader.className = "smart-feed-loader infinite-scroll-loader";
+        loader.innerHTML = `<div class="loader-spinner"></div><p style="margin: 0.5rem 0 0 0;">Discovering videos via AI topics...</p>`;
+        loader.style.gridColumn = "1 / -1";
+        loader.style.textAlign = "center";
+        loader.style.padding = "2rem";
+        grid.appendChild(loader);
+    }
     
-    state.smartFeedLoading = false;
-    updateStatusText("Ready");
+    if (state.smartFeedTopicsQueue.length === 0) {
+        console.log("[Smart Feed] Queue is empty! Generating more topics first...");
+        const positiveTopics = state.topics
+            .filter(t => t.weight > 0)
+            .map(t => t.phrase.toLowerCase());
+        
+        state.smartFeedTopicsQueue = [...positiveTopics];
+        if (state.smartFeedTopicsQueue.length === 0) {
+            state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
+        }
+        
+        await generateBrainstormTopics(true);
+    }
+    
+    const topic = state.smartFeedTopicsQueue.shift();
+    if (!topic) {
+        const updatedLoader = grid.querySelector(".smart-feed-loader");
+        if (updatedLoader) updatedLoader.remove();
+        state.smartFeedLoading = false;
+        return;
+    }
+    state.smartFeedUsedTopics.push(topic);
+    
+    console.log(`[Smart Feed] Fetching discovery videos for topic: "${topic}" (on-demand fallback)...`);
+    updateStatusText(`Smart Feed: Discovering "${capitalizePhrase(topic)}"...`);
+    
+    try {
+        const videos = await fetchVideosForTopic(topic);
+        const existingIds = new Set(state.smartFeedVideos.map(v => v.id));
+        const deduplicated = videos.filter(v => !existingIds.has(v.id));
+        
+        if (deduplicated.length > 0) {
+            state.smartFeedVideos.push(...deduplicated);
+            appendSmartFeedSection(topic, deduplicated);
+        }
+    } catch (err) {
+        console.error(`[Smart Feed] Fallback fetch failed for "${topic}":`, err);
+    } finally {
+        const updatedLoader = grid.querySelector(".smart-feed-loader");
+        if (updatedLoader) updatedLoader.remove();
+        
+        state.smartFeedLoading = false;
+        updateStatusText("Ready");
+        
+        fillSmartFeedPreloadBuffer();
+    }
 }
 
 function appendSmartFeedSection(topic, videos) {
