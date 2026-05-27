@@ -77,6 +77,14 @@ document.addEventListener("DOMContentLoaded", () => {
         renderFeed();
         updateStatusText(`Loaded from cache (${Math.round(cacheAge/60)}m ago)`);
     }
+
+    // Pre-fetch brainstorm topics in background on load if cache is empty
+    if (state.brainstormTopics.length === 0 && !state.brainstormLoading) {
+        setTimeout(() => {
+            console.log("[Brainstorm] Pre-fetching brainstorm topics in background...");
+            generateBrainstormTopics();
+        }, 1000);
+    }
 });
 
 // Load variables from Local Storage
@@ -1992,16 +2000,16 @@ document.addEventListener("DOMContentLoaded", setupInfiniteScroll);
 let activeLlmModel = "default-model";
 
 const systemPrompt = `You are a creative topic brainstorming assistant for a YouTube feed curation dashboard. 
-Your goal is to brainstorm a list of 8-10 interesting, specific topic keywords or short phrases that the user might want to explore.
+Your goal is to brainstorm a list of 5 interesting, specific topic keywords or short phrases that the user might want to explore.
 
 To help the user discover new content and prevent feedback bubble overfitting, you MUST mix topics according to these rules:
-1. **Subcategories (3-4 topics)**: Take some of the user's liked topics and suggest more specific, niche subcategories (e.g. if they like "coding", recommend "systems programming" or "AST parsing").
-2. **Contrasting Alternatives (2-3 topics)**: Find areas that are the opposite or highly contrasting alternatives to the user's disliked topics. For example, if they dislike clickbait/gossip, suggest calm, academic, or high-educational topics.
-3. **Surprise Explorations (2-3 topics)**: Generate subjects that are completely uncorrelated to any topics on their liked or disliked lists to surprise them and break the bubble.
+1. **Subcategories (2 topics)**: Take some of the user's liked topics and suggest more specific, niche subcategories (e.g. if they like "coding", recommend "systems programming" or "AST parsing").
+2. **Contrasting Alternatives (1-2 topics)**: Find areas that are the opposite or highly contrasting alternatives to the user's disliked topics. For example, if they dislike clickbait/gossip, suggest calm, academic, or high-educational topics.
+3. **Surprise Explorations (1-2 topics)**: Generate subjects that are completely uncorrelated to any topics on their liked or disliked lists to surprise them and break the bubble.
 
 Guidelines:
 - Keep your reasoning/thinking process extremely brief and concise (under 2-3 sentences if possible).
-- Generate exactly 8-10 diverse topics.
+- Generate exactly 5 diverse topics.
 - Keep them short (1-3 words maximum, e.g. "Docker Containers", "Quantum Computing").
 - Explain the reason for recommending each topic in a brief sentence, referencing the category mix rules (e.g., "Niche expansion based on coding", "Contrasting alternative to gossip", "Surprise exploration of new domains").
 - Do NOT suggest any topics that are on the user's disliked list.
@@ -2055,9 +2063,21 @@ async function generateBrainstormTopics(append) {
         if (btnMore) btnMore.disabled = true;
         if (spinner) spinner.classList.remove("hidden");
         if (btnText) btnText.textContent = "Brainstorming...";
+        
+        // If we are currently viewing the brainstorm tab, show loader in the grid
+        if (state.currentView === "ai-brainstorm" && grid && state.brainstormTopics.length === 0) {
+            grid.innerHTML = `
+                <div class="infinite-scroll-loader">
+                    <div class="loader-spinner"></div>
+                    <p>Brainstorming topics with AI...</p>
+                </div>
+            `;
+        }
     }
     
-    updateStatusText("Brainstorming topics with AI...");
+    if (state.currentView === "ai-brainstorm") {
+        updateStatusText("Brainstorming topics with AI...");
+    }
 
     // Construct user profile message
     const liked = state.topics.filter(t => t.weight > 0).map(t => `${t.phrase} (weight: +${t.weight})`).join(", ");
@@ -2071,7 +2091,7 @@ async function generateBrainstormTopics(append) {
 - Recent Searches: [${searches}]
 - Currently Shown Brainstormed Topics (Avoid duplicates): [${currentShown}]
 
-Please brainstorm 8-10 new topics that fit this profile. Return ONLY JSON.`;
+Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
 
     try {
         if (activeLlmModel === "default-model") {
@@ -2161,7 +2181,10 @@ Please brainstorm 8-10 new topics that fit this profile. Return ONLY JSON.`;
         if (btnMore) btnMore.disabled = false;
         if (spinner) spinner.classList.add("hidden");
         if (btnText) btnText.textContent = "Brainstorm More";
-        updateStatusText("Ready");
+        
+        if (state.currentView === "ai-brainstorm") {
+            updateStatusText("Ready");
+        }
         
         if (append) {
             renderAppendedBrainstormTopics();
@@ -2176,22 +2199,48 @@ function renderBrainstormView() {
     if (!grid) return;
     grid.innerHTML = "";
     
-    // If empty and not currently loading, trigger automatic generation
-    if (state.brainstormTopics.length === 0 && !state.brainstormLoading) {
-        generateBrainstormTopics();
+    // If empty and currently loading, show loading spinner
+    if (state.brainstormTopics.length === 0 && state.brainstormLoading) {
+        grid.innerHTML = `
+            <div class="infinite-scroll-loader">
+                <div class="loader-spinner"></div>
+                <p>Brainstorming topics with AI...</p>
+            </div>
+        `;
+        return;
+    }
+    
+    // If empty and not currently loading, show empty state with trigger button
+    if (state.brainstormTopics.length === 0) {
+        grid.innerHTML = `
+            <div class="empty-state" style="grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 3rem 1rem; text-align: center;">
+                <div class="empty-icon" style="font-size: 2.5rem; margin-bottom: 1rem;">💡</div>
+                <h3>No brainstormed topics yet</h3>
+                <p style="color: var(--text-muted); margin-bottom: 1.5rem; max-width: 400px;">Generate personalized topic recommendations based on your liked and disliked content.</p>
+                <button id="btn-brainstorm-trigger" class="btn btn-primary">Brainstorm Topics Now</button>
+            </div>
+        `;
+        const triggerBtn = document.getElementById("btn-brainstorm-trigger");
+        if (triggerBtn) {
+            triggerBtn.addEventListener("click", () => generateBrainstormTopics());
+        }
         return;
     }
     
     const fragment = document.createDocumentFragment();
     
     state.brainstormTopics.forEach((topic) => {
+        if (!topic || !topic.phrase) return;
+        const phrase = topic.phrase.trim();
+        const reason = topic.reason ? topic.reason.trim() : "Suggested topic";
+        
         const card = document.createElement("div");
         card.className = "brainstorm-card fade-in";
-        card.dataset.phrase = topic.phrase.toLowerCase().trim();
+        card.dataset.phrase = phrase.toLowerCase();
         
         card.innerHTML = `
-            <div class="brainstorm-topic-name">${escapeHTML(topic.phrase)}</div>
-            <div class="brainstorm-reason">${escapeHTML(topic.reason)}</div>
+            <div class="brainstorm-topic-name">${escapeHTML(phrase)}</div>
+            <div class="brainstorm-reason">${escapeHTML(reason)}</div>
             <div class="brainstorm-actions">
                 <button class="btn-vote upvote" title="Upvote Topic">👍 Upvote</button>
                 <button class="btn-vote downvote" title="Downvote Topic">👎 Downvote</button>
@@ -2200,12 +2249,12 @@ function renderBrainstormView() {
         
         // Upvote click handler
         card.querySelector(".upvote").addEventListener("click", () => {
-            voteTopic(topic.phrase, true, card);
+            voteTopic(phrase, true, card);
         });
         
         // Downvote click handler
         card.querySelector(".downvote").addEventListener("click", () => {
-            voteTopic(topic.phrase, false, card);
+            voteTopic(phrase, false, card);
         });
         
         fragment.appendChild(card);
@@ -2229,15 +2278,19 @@ function renderAppendedBrainstormTopics() {
     const fragment = document.createDocumentFragment();
     
     state.brainstormTopics.forEach((topic) => {
-        const cleanPhrase = topic.phrase.toLowerCase().trim();
+        if (!topic || !topic.phrase) return;
+        const phrase = topic.phrase.trim();
+        const reason = topic.reason ? topic.reason.trim() : "Suggested topic";
+        
+        const cleanPhrase = phrase.toLowerCase();
         if (!renderedPhrases.has(cleanPhrase)) {
             const card = document.createElement("div");
             card.className = "brainstorm-card fade-in";
             card.dataset.phrase = cleanPhrase;
             
             card.innerHTML = `
-                <div class="brainstorm-topic-name">${escapeHTML(topic.phrase)}</div>
-                <div class="brainstorm-reason">${escapeHTML(topic.reason)}</div>
+                <div class="brainstorm-topic-name">${escapeHTML(phrase)}</div>
+                <div class="brainstorm-reason">${escapeHTML(reason)}</div>
                 <div class="brainstorm-actions">
                     <button class="btn-vote upvote" title="Upvote Topic">👍 Upvote</button>
                     <button class="btn-vote downvote" title="Downvote Topic">👎 Downvote</button>
@@ -2246,12 +2299,12 @@ function renderAppendedBrainstormTopics() {
             
             // Upvote click handler
             card.querySelector(".upvote").addEventListener("click", () => {
-                voteTopic(topic.phrase, true, card);
+                voteTopic(phrase, true, card);
             });
             
             // Downvote click handler
             card.querySelector(".downvote").addEventListener("click", () => {
-                voteTopic(topic.phrase, false, card);
+                voteTopic(phrase, false, card);
             });
             
             fragment.appendChild(card);
