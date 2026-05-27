@@ -36,6 +36,7 @@ let state = {
         lastSync: 0
     },
     currentView: "all", // 'all', 'starred', or topic phrase
+    searchQuery: "",
     settings: {
         useYtdlp: true,
         muteShorts: false
@@ -158,6 +159,13 @@ function setupEventListeners() {
             const btn = e.currentTarget;
             btn.classList.add("active");
             
+            // Reset Search Input on Navigation
+            state.searchQuery = "";
+            const searchInput = document.getElementById("input-search-videos");
+            if (searchInput) searchInput.value = "";
+            const clearBtn = document.getElementById("btn-clear-search");
+            if (clearBtn) clearBtn.classList.add("hidden");
+
             state.currentView = btn.dataset.view;
             document.getElementById("current-view-title").textContent = btn.querySelector(".nav-label").textContent;
             renderFeed();
@@ -340,6 +348,57 @@ function setupEventListeners() {
         saveSettings();
         renderFeed();
     });
+
+    // Search input handlers
+    const searchForm = document.getElementById("search-form");
+    const searchInput = document.getElementById("input-search-videos");
+    const clearSearchBtn = document.getElementById("btn-clear-search");
+
+    if (searchForm && searchInput) {
+        searchForm.addEventListener("submit", (e) => {
+            e.preventDefault();
+            const query = searchInput.value.trim();
+            if (query) {
+                triggerGlobalSearch(query);
+            }
+        });
+
+        searchInput.addEventListener("input", (e) => {
+            state.searchQuery = e.target.value.trim();
+            if (state.searchQuery) {
+                clearSearchBtn.classList.remove("hidden");
+            } else {
+                clearSearchBtn.classList.add("hidden");
+                // If we were in a search view, go back to all
+                if (state.currentView.startsWith("search_")) {
+                    state.currentView = "all";
+                    document.querySelectorAll(".nav-item").forEach(btn => {
+                        if (btn.dataset.view === "all") btn.classList.add("active");
+                        else btn.classList.remove("active");
+                    });
+                    document.getElementById("current-view-title").textContent = "All Videos";
+                }
+            }
+            renderFeed();
+        });
+    }
+
+    if (clearSearchBtn) {
+        clearSearchBtn.addEventListener("click", () => {
+            searchInput.value = "";
+            state.searchQuery = "";
+            clearSearchBtn.classList.add("hidden");
+            if (state.currentView.startsWith("search_")) {
+                state.currentView = "all";
+                document.querySelectorAll(".nav-item").forEach(btn => {
+                    if (btn.dataset.view === "all") btn.classList.add("active");
+                    else btn.classList.remove("active");
+                });
+                document.getElementById("current-view-title").textContent = "All Videos";
+            }
+            renderFeed();
+        });
+    }
 }
 
 // Dynamic Sidebar topics rendering
@@ -373,6 +432,13 @@ function renderSidebarTopics() {
             document.querySelectorAll(".nav-item").forEach(b => b.classList.remove("active"));
             btn.classList.add("active");
             
+            // Reset Search Input on Navigation
+            state.searchQuery = "";
+            const searchInput = document.getElementById("input-search-videos");
+            if (searchInput) searchInput.value = "";
+            const clearBtn = document.getElementById("btn-clear-search");
+            if (clearBtn) clearBtn.classList.add("hidden");
+
             state.currentView = "topic_" + topic.phrase;
             document.getElementById("current-view-title").textContent = capitalizePhrase(topic.phrase);
             renderFeed();
@@ -589,46 +655,103 @@ async function syncFeeds() {
     const worker = async () => {
         while (channelsToSync.length > 0) {
             const channel = channelsToSync.shift();
-            try {
-                const response = await fetch(`/youtube-feed/?channel_id=${channel.id}`);
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                const xmlText = await response.text();
-                
-                // Parse Atom Feed
-                const parser = new DOMParser();
-                const xmlDoc = parser.parseFromString(xmlText, "text/xml");
-                
-                // Update Name from feed metadata if it was UC placeholder
-                const feedTitle = xmlDoc.querySelector("feed > title")?.textContent;
-                if (feedTitle && channel.name.includes("...")) {
-                    channel.name = feedTitle;
-                }
+            let videos = [];
+            let success = false;
 
-                const entries = xmlDoc.querySelectorAll("feed > entry");
-                const videos = [];
-                
-                entries.forEach(entry => {
-                    const videoId = entry.querySelector("videoId")?.textContent || 
-                                    entry.querySelector("id")?.textContent?.split(":")[2];
-                    const title = entry.querySelector("title")?.textContent || "";
-                    const publishedStr = entry.querySelector("published")?.textContent || 
-                                         entry.querySelector("updated")?.textContent || "";
-                                         
-                    if (videoId && title) {
-                        videos.push({
-                            id: videoId,
-                            title: title,
-                            channelName: feedTitle || channel.name,
-                            channelId: channel.id,
-                            published: new Date(publishedStr).getTime()
+            // Try RSS first if use-ytdlp setting is not active
+            if (!state.settings.useYtdlp) {
+                try {
+                    const response = await fetch(`/youtube-feed/?channel_id=${channel.id}`);
+                    if (response.ok) {
+                        const xmlText = await response.text();
+                        const parser = new DOMParser();
+                        const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+                        
+                        const feedTitle = xmlDoc.querySelector("feed > title")?.textContent;
+                        if (feedTitle && channel.name.includes("...")) {
+                            channel.name = feedTitle;
+                        }
+
+                        const entries = xmlDoc.querySelectorAll("feed > entry");
+                        entries.forEach(entry => {
+                            const videoId = entry.querySelector("videoId")?.textContent || 
+                                            entry.querySelector("id")?.textContent?.split(":")[2];
+                            const title = entry.querySelector("title")?.textContent || "";
+                            const publishedStr = entry.querySelector("published")?.textContent || 
+                                                 entry.querySelector("updated")?.textContent || "";
+                                                 
+                            if (videoId && title) {
+                                videos.push({
+                                    id: videoId,
+                                    title: title,
+                                    channelName: feedTitle || channel.name,
+                                    channelId: channel.id,
+                                    published: new Date(publishedStr).getTime()
+                                });
+                            }
                         });
+                        success = true;
+                    }
+                } catch (rssErr) {
+                    console.warn(`RSS feed sync failed for channel ${channel.name}, falling back to scraper-service:`, rssErr);
+                }
+            }
+
+            // Fallback to Scraper Service (yt-dlp) if RSS failed or useYtdlp is true
+            if (!success) {
+                try {
+                    console.log(`Syncing channel ${channel.name} (${channel.id}) via scraper-service...`);
+                    const response = await fetch("/scraper/collect", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({
+                            source: "youtube",
+                            channels: [channel.id],
+                            limit: 10,
+                            days_back: 30,
+                            require_transcript: false
+                        })
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        if (data && Array.isArray(data.items)) {
+                            data.items.forEach(item => {
+                                videos.push({
+                                    id: item.video_id,
+                                    title: item.title,
+                                    channelName: item.channel || channel.name,
+                                    channelId: channel.id,
+                                    published: item.published_at ? new Date(item.published_at).getTime() : Date.now()
+                                });
+                            });
+                            
+                            if (data.items.length > 0 && data.items[0].channel && channel.name.includes("...")) {
+                                channel.name = data.items[0].channel;
+                            }
+                            success = true;
+                        }
+                    } else {
+                        console.warn(`Scraper-service returned status ${response.status} for ${channel.name}`);
+                    }
+                } catch (scraperErr) {
+                    console.error(`Scraper sync failed for ${channel.name}:`, scraperErr);
+                }
+            }
+
+            if (success) {
+                const existing = state.cache.videos[channel.id] || [];
+                const merged = [...videos];
+                existing.forEach(ev => {
+                    if (!merged.some(nv => nv.id === ev.id)) {
+                        merged.push(ev);
                     }
                 });
-                
-                results[channel.id] = videos;
-            } catch (err) {
-                console.error(`Error syncing channel ${channel.name}:`, err);
-                // Keep existing cache for this channel on failure
+                merged.sort((a, b) => b.published - a.published);
+                results[channel.id] = merged.slice(0, 50);
+            } else {
+                console.warn(`All sync methods failed for channel ${channel.name}. Retaining cache.`);
                 if (state.cache.videos[channel.id]) {
                     results[channel.id] = state.cache.videos[channel.id];
                 }
@@ -728,9 +851,20 @@ function renderFeed() {
 
     // Filter out videos with score <= -10 (auto-nuke spam)
     allVideos = allVideos.filter(v => v.score > -10);
+
+    // Apply local text search filter if user is NOT in a dedicated global search view
+    if (state.searchQuery && !state.currentView.startsWith("search_")) {
+        const q = state.searchQuery.toLowerCase();
+        allVideos = allVideos.filter(v => 
+            v.title.toLowerCase().includes(q) || 
+            v.channelName.toLowerCase().includes(q)
+        );
+    }
     
     let isTopicView = false;
+    let isSearchView = false;
     let activeTopic = "";
+    let searchQuery = "";
     
     // Apply navigation filter
     if (state.currentView === "starred") {
@@ -739,6 +873,14 @@ function renderFeed() {
         isTopicView = true;
         activeTopic = state.currentView.substring(6).toLowerCase();
         allVideos = allVideos.filter(v => v.matchedTopics.includes(activeTopic));
+    } else if (state.currentView.startsWith("search_")) {
+        isSearchView = true;
+        searchQuery = state.currentView.substring(7);
+        // For dedicated search view, we also show matching subscribed videos
+        allVideos = allVideos.filter(v => 
+            v.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+            v.channelName.toLowerCase().includes(searchQuery.toLowerCase())
+        );
     }
     
     // Sort: High score at the top, then sort by publishing date descending
@@ -748,16 +890,17 @@ function renderFeed() {
         return b.published - a.published;
     });
     
-    // Topic Discovery Logic
+    // Topic/Search Discovery Logic
     let discoverVideos = [];
-    if (isTopicView) {
+    const queryTerm = isTopicView ? activeTopic : searchQuery;
+    if (isTopicView || isSearchView) {
         // Trigger background search if not cached yet
-        if (sessionTopicSearchCache[activeTopic] === undefined && !topicSearchLoading[activeTopic]) {
-            fetchTopicSearchDiscovery(activeTopic);
+        if (sessionTopicSearchCache[queryTerm] === undefined && !topicSearchLoading[queryTerm]) {
+            fetchTopicSearchDiscovery(queryTerm);
         }
         
-        if (sessionTopicSearchCache[activeTopic]) {
-            discoverVideos = sessionTopicSearchCache[activeTopic].map(v => {
+        if (sessionTopicSearchCache[queryTerm]) {
+            discoverVideos = sessionTopicSearchCache[queryTerm].map(v => {
                 const evaluation = getScoreAndMatches(v);
                 return {
                     ...v,
@@ -802,12 +945,13 @@ function renderFeed() {
     }
     
     // Show spinner if we have no subscribed videos, public search is currently loading, and no discover videos are loaded yet
-    if (isTopicView && allVideos.length === 0 && discoverVideos.length === 0 && topicSearchLoading[activeTopic]) {
+    const isSearchLoading = (isTopicView || isSearchView) && topicSearchLoading[queryTerm];
+    if ((isTopicView || isSearchView) && allVideos.length === 0 && discoverVideos.length === 0 && isSearchLoading) {
         grid.innerHTML = `
             <div class="empty-state" style="grid-column: 1 / -1; min-height: 200px;">
                 <div class="sync-spinner" style="font-size: 2rem; position: static; transform: none; display: block; animation: spin 1s linear infinite; margin: 2rem auto;">🔄</div>
                 <h3>Searching YouTube...</h3>
-                <p>Fetching public search results for "${capitalizePhrase(activeTopic)}"</p>
+                <p>Fetching public search results for "${capitalizePhrase(queryTerm)}"</p>
             </div>
         `;
         emptyState.classList.add("hidden");
@@ -921,6 +1065,19 @@ function playVideo(video) {
 function closePlayer() {
     document.getElementById("player-modal").classList.add("hidden");
     document.getElementById("player-wrapper").innerHTML = ""; // Stops playback instantly
+}
+
+function triggerGlobalSearch(query) {
+    if (!query) return;
+    
+    // Switch navigation active states (clear active highlight on menu)
+    document.querySelectorAll(".nav-item").forEach(btn => btn.classList.remove("active"));
+    
+    state.currentView = "search_" + query;
+    document.getElementById("current-view-title").textContent = `Search: "${query}"`;
+    
+    // Trigger rendering (which will show loading spinner and fetch discovery)
+    renderFeed();
 }
 
 // Parse OPML uploaded file and import channels

@@ -52,6 +52,12 @@
                     <p id="dashboard-status-text" class="status-subtitle">Loading feeds...</p>
                 </div>
                 <div class="header-actions">
+                    <form id="search-form" class="header-search-bar" action="" onsubmit="return false;">
+                        <span class="search-icon">🔍</span>
+                        <input type="text" id="input-search-videos" placeholder="Search feed or query YouTube...">
+                        <button id="btn-clear-search" class="btn-clear-search hidden" title="Clear search" type="button">✕</button>
+                        <button id="btn-submit-search" class="btn-submit-search" title="Search YouTube" type="submit">➤</button>
+                    </form>
                     <button id="btn-sync-now" class="btn btn-primary btn-icon-only" title="Sync RSS Feeds">
                         <span class="btn-text">Sync Feeds</span>
                         <span class="sync-spinner">🔄</span>
