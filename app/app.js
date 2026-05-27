@@ -1295,6 +1295,9 @@ function triggerGlobalSearch(query) {
     
     // Trigger rendering (which will show loading spinner and fetch discovery)
     renderFeed();
+    
+    // Trigger background similar topic generation using LLM
+    generateSimilarTopicsFromSearch(query);
 }
 
 // Parse OPML uploaded file and import channels
@@ -2191,6 +2194,140 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
     } finally {
         state.brainstormLoading = false;
         updateStatusText("Ready");
+    }
+}
+
+async function generateSimilarTopicsFromSearch(searchQuery) {
+    if (!searchQuery) return;
+    console.log(`[Smart Feed] Background similar topics generation started for query: "${searchQuery}"`);
+    
+    const disliked = state.topics.filter(t => t.weight < 0).map(t => `${t.phrase} (weight: ${t.weight})`).join(", ");
+    const currentQueue = state.smartFeedTopicsQueue.join(", ");
+    const usedTopics = state.smartFeedUsedTopics.join(", ");
+    
+    const systemPromptSimilar = `You are a creative topic brainstorming assistant for a YouTube feed curation dashboard. 
+Your goal is to brainstorm a list of 10 to 20 interesting, specific topic keywords or short phrases that are closely related, similar, or logical next steps/expansions to the search query topic provided by the user.
+
+Guidelines:
+- Generate between 10 and 20 diverse, highly relevant topics.
+- Keep them short (1-3 words maximum, e.g. "Quantum Computing", "Deep Learning").
+- Explain the reason for recommending each topic in a brief sentence.
+- Do NOT suggest any topics that are on the user's disliked list.
+- Do NOT suggest any topics that are already in the list of currently displayed brainstormed topics.
+
+You MUST respond ONLY with a valid JSON array of objects. No markdown, no HTML, no explanation outside the JSON.
+Each object must have the following keys:
+- "phrase": The topic phrase (e.g. "Docker Containerization")
+- "reason": A short explanation of why this topic is similar or related to the search query.
+
+Example response:
+[
+  {"phrase": "Docker Containers", "reason": "Related topic on virtualization"},
+  {"phrase": "Kubernetes Orchestration", "reason": "Next step after containerization"}
+]`;
+
+    const userMessage = `The user just searched for the topic: "${searchQuery}".
+User Profile:
+- Disliked Topics: [${disliked}]
+- Currently Queued Topics (Avoid duplicates): [${currentQueue}]
+- Already Used Topics (Avoid duplicates): [${usedTopics}]
+
+Please brainstorm 10-20 new topics that are similar, related, or logical next steps/expansions to the searched topic "${searchQuery}" and fit the user's profile. Return ONLY JSON.`;
+
+    try {
+        if (activeLlmModel === "default-model") {
+            await fetchLlmModel();
+        }
+        
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 45000); // 45s timeout for more topics
+        const response = await fetch("/vllm/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                model: activeLlmModel,
+                messages: [
+                    { role: "system", content: systemPromptSimilar },
+                    { role: "user", content: userMessage }
+                ],
+                temperature: 0.7,
+                max_tokens: 4096
+            }),
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) throw new Error(`vLLM server returned status ${response.status}`);
+        
+        const data = await response.json();
+        const message = data.choices?.[0]?.message;
+        if (!message) throw new Error("No message returned from vLLM server.");
+        
+        let content = message.content;
+        if (content === null || content === undefined) {
+            if (message.reasoning) {
+                const jsonMatch = message.reasoning.match(/\[\s*\{[\s\S]*\}\s*\]/);
+                if (jsonMatch) {
+                    content = jsonMatch[0];
+                }
+            }
+        }
+        
+        if (!content) {
+            throw new Error("vLLM server returned empty content. Try again.");
+        }
+        
+        content = content.trim();
+        
+        let cleanContent = content;
+        if (cleanContent.startsWith("```json")) {
+            cleanContent = cleanContent.substring(7);
+        } else if (cleanContent.startsWith("```")) {
+            cleanContent = cleanContent.substring(3);
+        }
+        if (cleanContent.endsWith("```")) {
+            cleanContent = cleanContent.substring(0, cleanContent.length - 3);
+        }
+        cleanContent = cleanContent.trim();
+        
+        const jsonMatch = cleanContent.match(/\[\s*\{[\s\S]*\}\s*\]/);
+        const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanContent);
+        if (Array.isArray(parsed)) {
+            const addedPhrases = [];
+            parsed.forEach(item => {
+                const phrase = item.phrase.trim().toLowerCase();
+                if (!phrase) return;
+                
+                // Add to state.topics with default positive weight if not present
+                const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
+                if (!existsInTopics) {
+                    state.topics.push({ phrase, weight: 5 });
+                }
+                
+                // Push to smartFeedTopicsQueue if not already in queue or used
+                const inQueue = state.smartFeedTopicsQueue.includes(phrase);
+                const inUsed = state.smartFeedUsedTopics.includes(phrase);
+                if (!inQueue && !inUsed) {
+                    state.smartFeedTopicsQueue.push(phrase);
+                    addedPhrases.push(phrase);
+                }
+            });
+            
+            saveTopics();
+            console.log(`[Smart Feed] Successfully brainstormed and queued ${addedPhrases.length} similar topics for "${searchQuery}":`, addedPhrases);
+            if (addedPhrases.length > 0) {
+                showToast(`💡 Queued ${addedPhrases.length} topics similar to "${searchQuery}"`, "success");
+                
+                // Trigger filling preload buffer with newly queued topics
+                fillSmartFeedPreloadBuffer();
+            }
+        } else {
+            throw new Error("Invalid response format: expected a JSON array.");
+        }
+    } catch (err) {
+        console.error("Similar search topics brainstorm error:", err);
     }
 }
 
