@@ -35,7 +35,7 @@ let state = {
         videos: {}, // channelId -> array of videos
         lastSync: 0
     },
-    currentView: "all", // 'all', 'starred', or topic phrase
+    currentView: "smart-feed", // 'smart-feed', or search queries
     searchQuery: "",
     searchHistory: [], // Rolling history of searches (max 10)
     brainstormTopics: [], // Brainstormed topics from LLM
@@ -45,7 +45,15 @@ let state = {
         muteShorts: false
     },
     discoverBatchIndex: 0,
-    discoverMaxReached: false
+    discoverMaxReached: false,
+
+    // Smart Feed State
+    smartFeedVideos: [],
+    smartFeedTopicsQueue: [],
+    smartFeedUsedTopics: [],
+    smartFeedLoading: false,
+    smartFeedInitialized: false,
+    smartFeedSubscriptionIndex: 0
 };
 
 const DISCOVER_BATCH_SIZE = 30;
@@ -62,11 +70,31 @@ function clearRenderTimeouts() {
     renderTimeouts = [];
 }
 
+function initSmartFeed() {
+    state.smartFeedVideos = [];
+    state.smartFeedUsedTopics = [];
+    state.smartFeedLoading = false;
+    state.smartFeedSubscriptionIndex = 0;
+    state.smartFeedInitialized = true;
+    
+    // Get positive topics (weight > 0) sorted by weight descending
+    const positiveTopics = state.topics
+        .filter(t => t.weight > 0)
+        .sort((a, b) => b.weight - a.weight)
+        .map(t => t.phrase.toLowerCase());
+    
+    state.smartFeedTopicsQueue = [...positiveTopics];
+    if (state.smartFeedTopicsQueue.length === 0) {
+        state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
+    }
+    console.log("[Smart Feed] Initialized with topics queue:", state.smartFeedTopicsQueue);
+}
+
 // Initialize Application
 document.addEventListener("DOMContentLoaded", () => {
     loadState();
     setupEventListeners();
-    renderSidebarTopics();
+    initSmartFeed();
     fetchLlmModel();
     
     // Auto-sync if cache is empty or older than 1 hour (3600 seconds)
@@ -78,11 +106,11 @@ document.addEventListener("DOMContentLoaded", () => {
         updateStatusText(`Loaded from cache (${Math.round(cacheAge/60)}m ago)`);
     }
 
-    // Pre-fetch brainstorm topics in background on load if cache is empty
-    if (state.brainstormTopics.length === 0 && !state.brainstormLoading) {
+    // Pre-fetch brainstorm topics in background on load if queue is low
+    if (state.smartFeedTopicsQueue.length < 5 && !state.brainstormLoading) {
         setTimeout(() => {
-            console.log("[Brainstorm] Pre-fetching brainstorm topics in background...");
-            generateBrainstormTopics();
+            console.log("[Smart Feed] Pre-fetching brainstorm topics in background...");
+            generateBrainstormTopics(true); // Appends new topics
         }, 1000);
     }
 });
@@ -221,7 +249,7 @@ function setupEventListeners() {
     btnCloseSettings.addEventListener("click", () => {
         settingsModal.classList.add("hidden");
         document.getElementById("search-results-container").classList.add("hidden");
-        renderSidebarTopics();
+        initSmartFeed(); // Reinitialize topic queue with updated weights
         renderFeed();
     });
 
@@ -401,14 +429,14 @@ function setupEventListeners() {
                 clearSearchBtn.classList.remove("hidden");
             } else {
                 clearSearchBtn.classList.add("hidden");
-                // If we were in a search view, go back to all
+                // If we were in a search view, go back to smart-feed
                 if (state.currentView.startsWith("search_")) {
-                    state.currentView = "all";
+                    state.currentView = "smart-feed";
                     document.querySelectorAll(".nav-item").forEach(btn => {
-                        if (btn.dataset.view === "all") btn.classList.add("active");
+                        if (btn.dataset.view === "smart-feed") btn.classList.add("active");
                         else btn.classList.remove("active");
                     });
-                    document.getElementById("current-view-title").textContent = "All Videos";
+                    document.getElementById("current-view-title").textContent = "Smart Feed";
                 }
             }
             clearTimeout(searchDebounceTimeout);
@@ -424,12 +452,12 @@ function setupEventListeners() {
             state.searchQuery = "";
             clearSearchBtn.classList.add("hidden");
             if (state.currentView.startsWith("search_")) {
-                state.currentView = "all";
+                state.currentView = "smart-feed";
                 document.querySelectorAll(".nav-item").forEach(btn => {
-                    if (btn.dataset.view === "all") btn.classList.add("active");
+                    if (btn.dataset.view === "smart-feed") btn.classList.add("active");
                     else btn.classList.remove("active");
                 });
-                document.getElementById("current-view-title").textContent = "All Videos";
+                document.getElementById("current-view-title").textContent = "Smart Feed";
             }
             state.discoverBatchIndex = 0;
             state.discoverMaxReached = false;
@@ -463,53 +491,8 @@ function setupEventListeners() {
     }
 }
 
-// Dynamic Sidebar topics rendering
 function renderSidebarTopics() {
-    const container = document.getElementById("dynamic-topic-tabs");
-    container.innerHTML = "";
-    
-    // Sort positive topics by weight descending
-    const positiveTopics = state.topics
-        .filter(t => t.weight > 0)
-        .sort((a, b) => b.weight - a.weight)
-        .slice(0, 8); // show top 8 in sidebar
-        
-    positiveTopics.forEach(topic => {
-        const btn = document.createElement("button");
-        btn.className = "nav-item";
-        btn.dataset.view = "topic_" + topic.phrase;
-        
-        // Pick a default emoji for topic styling
-        let emoji = "🏷️";
-        if (["code", "coding", "program", "programming", "dev", "rust", "javascript"].some(k => topic.phrase.includes(k))) emoji = "💻";
-        if (["ai", "intelligence", "llm", "gpt", "model"].some(k => topic.phrase.includes(k))) emoji = "🧠";
-        if (["math", "science", "physics", "quantum"].some(k => topic.phrase.includes(k))) emoji = "🔬";
-
-        btn.innerHTML = `
-            <span class="nav-icon">${emoji}</span>
-            <span class="nav-label">${capitalizePhrase(topic.phrase)}</span>
-        `;
-        
-        btn.addEventListener("click", (e) => {
-            document.querySelectorAll(".nav-item").forEach(b => b.classList.remove("active"));
-            btn.classList.add("active");
-            
-            // Reset Search Input on Navigation
-            state.searchQuery = "";
-            const searchInput = document.getElementById("input-search-videos");
-            if (searchInput) searchInput.value = "";
-            const clearBtn = document.getElementById("btn-clear-search");
-            if (clearBtn) clearBtn.classList.add("hidden");
-
-            state.currentView = "topic_" + topic.phrase;
-            state.discoverBatchIndex = 0;
-            state.discoverMaxReached = false;
-            document.getElementById("current-view-title").textContent = capitalizePhrase(topic.phrase);
-            renderFeed();
-        });
-        
-        container.appendChild(btn);
-    });
+    // Consolidated into Smart Feed - no sidebar topic tabs anymore
 }
 
 // Add/Resolve YouTube Channel via Nginx proxy / scraping
@@ -908,78 +891,265 @@ function renderFeed() {
     grid.innerHTML = "";
     shortsGrid.innerHTML = "";
     shortsShelf.classList.add("hidden");
+// Render Helper Function (declared globally for reuse)
+function renderCard(video, targetContainer) {
+    const card = document.createElement("div");
+    card.className = "video-card fade-in";
+    if (video.isDiscover) {
+        card.classList.add("discover-card");
+    }
     
-    // Flatten and enrich video list
-    let allVideos = [];
-    Object.values(state.cache.videos).forEach(channelVideos => {
-        channelVideos.forEach(v => {
-            const evaluation = getScoreAndMatches(v);
-            allVideos.push({
-                ...v,
-                score: evaluation.score,
-                matchedTopics: evaluation.matches,
-                isDiscover: false
+    let scoreClass = "mid";
+    if (video.score >= 5) scoreClass = "high";
+    if (video.score < 0) scoreClass = "low";
+    
+    const relativeTime = video.isDiscover ? (video.publishedStr || "Recently") : getRelativeTime(video.published);
+    const topMatchedTopic = video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation");
+    const categoryText = topMatchedTopic ? capitalizePhrase(topMatchedTopic) : "";
+    
+    // Format meta/views if available
+    let metaLine = video.channelName;
+    if (video.viewCount && video.viewCount > 0) {
+        metaLine += ` • ${formatViews(video.viewCount)}`;
+    }
+    
+    // Check if channel is already subscribed
+    const isSubscribed = state.channels.some(ch => 
+        ch.name.toLowerCase() === video.channelName.toLowerCase() || ch.id === video.channelId
+    );
+    
+    card.innerHTML = `
+        <div class="thumbnail-area">
+            <img class="thumbnail-img" src="https://i.ytimg.com/vi/${video.id}/hqdefault.jpg" alt="${escapeHTML(video.title)}">
+            <div class="thumbnail-play-overlay">
+                <div class="play-icon-circle">▶</div>
+            </div>
+            <div class="score-badge ${scoreClass}">★ ${video.score}</div>
+            ${video.isDiscover ? `<div class="search-badge">🔍 Search</div>` : (categoryText ? `<div class="category-badge">${categoryText}</div>` : "")}
+            <button class="card-action-btn" title="Actions">⋮</button>
+        </div>
+        <div class="card-details">
+            <h3 class="video-title">${escapeHTML(video.title)}</h3>
+            <p class="video-channel">${escapeHTML(metaLine)}</p>
+            <p class="video-time">${relativeTime}${video.duration ? ` • ${formatDuration(video.duration)}` : ""}</p>
+        </div>
+    `;
+    
+    const openAction = () => playVideo(video);
+    card.querySelector(".thumbnail-play-overlay").addEventListener("click", openAction);
+    card.querySelector(".video-title").addEventListener("click", openAction);
+    
+    // 3-dot action menu
+    const actionBtn = card.querySelector(".card-action-btn");
+    actionBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        // Close any existing dropdown
+        document.querySelectorAll(".card-action-dropdown").forEach(d => d.remove());
+        
+        const dropdown = document.createElement("div");
+        dropdown.className = "card-action-dropdown";
+        dropdown.innerHTML = `
+            <button class="danger" data-action="block">🚫 Block Channel</button>
+            <button data-action="subscribe" ${isSubscribed ? 'disabled' : ''}>➕ ${isSubscribed ? 'Already Subscribed' : 'Subscribe to Channel'}</button>
+            <button data-action="hide">🔇 Hide Video</button>
+        `;
+        
+        dropdown.querySelector('[data-action="block"]').addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            const channelName = video.channelName;
+            const channelId = video.channelId || "";
+            if (!state.blockedChannels.some(bc => bc.name.toLowerCase() === channelName.toLowerCase())) {
+                state.blockedChannels.push({ name: channelName, id: channelId });
+                saveBlocked();
+            }
+            dropdown.remove();
+            showToast(`🚫 Blocked ${channelName}`, "danger");
+            // Remove all cards from this channel with fade-out
+            document.querySelectorAll(".video-card").forEach(c => {
+                const chEl = c.querySelector(".video-channel");
+                if (chEl && chEl.textContent.toLowerCase().includes(channelName.toLowerCase())) {
+                    c.classList.add("fade-out-remove");
+                    setTimeout(() => c.remove(), 350);
+                }
             });
         });
+        
+        dropdown.querySelector('[data-action="subscribe"]').addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            if (isSubscribed) return;
+            const channelName = video.channelName;
+            const channelId = video.channelId || "";
+            state.channels.push({ name: channelName, id: channelId });
+            saveChannels();
+            dropdown.remove();
+            showToast(`✅ Subscribed to ${channelName}`, "success");
+            renderChannelsList();
+        });
+        
+        dropdown.querySelector('[data-action="hide"]').addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            dropdown.remove();
+            card.classList.add("fade-out-remove");
+            setTimeout(() => card.remove(), 350);
+            showToast(`🔇 Video hidden`, "info");
+        });
+        
+        card.querySelector(".thumbnail-area").appendChild(dropdown);
+        
+        // Close dropdown on outside click
+        const closeDropdown = (ev) => {
+            if (!dropdown.contains(ev.target) && ev.target !== actionBtn) {
+                dropdown.remove();
+                document.removeEventListener("click", closeDropdown);
+            }
+        };
+        setTimeout(() => document.addEventListener("click", closeDropdown), 0);
     });
     
-    // Filter out videos from blocked channels
-    allVideos = allVideos.filter(video => {
-        const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === video.channelId);
-        const isBlockedName = state.blockedChannels.some(bc => !bc.id && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
-        return !isBlockedId && !isBlockedName;
-    });
+    targetContainer.appendChild(card);
+}
 
-    // Filter out videos with score <= -10 (auto-nuke spam)
-    allVideos = allVideos.filter(v => v.score > -10);
-
-    // Apply local text search filter if user is NOT in a dedicated global search view
-    if (state.searchQuery && !state.currentView.startsWith("search_")) {
-        const q = state.searchQuery.toLowerCase();
-        allVideos = allVideos.filter(v => 
-            v.title.toLowerCase().includes(q) || 
-            v.channelName.toLowerCase().includes(q)
-        );
+// Load and Render Video Grid
+function renderFeed() {
+    clearRenderTimeouts();
+    const grid = document.getElementById("video-grid");
+    const shortsShelf = document.getElementById("shorts-shelf");
+    const shortsGrid = document.getElementById("shorts-grid");
+    const emptyState = document.getElementById("empty-state");
+    const brainstormContainer = document.getElementById("ai-brainstorm-container");
+    
+    if (grid) grid.classList.remove("hidden");
+    if (brainstormContainer) brainstormContainer.classList.add("hidden");
+    
+    grid.innerHTML = "";
+    shortsGrid.innerHTML = "";
+    shortsShelf.classList.add("hidden");
+    
+    // Handle Smart Feed
+    if (state.currentView === "smart-feed") {
+        let subVideos = [];
+        Object.values(state.cache.videos).forEach(channelVideos => {
+            channelVideos.forEach(v => {
+                const evaluation = getScoreAndMatches(v);
+                subVideos.push({
+                    ...v,
+                    score: evaluation.score,
+                    matchedTopics: evaluation.matches,
+                    isDiscover: false
+                });
+            });
+        });
+        
+        subVideos = subVideos.filter(video => {
+            const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === video.channelId);
+            const isBlockedName = state.blockedChannels.some(bc => !bc.id && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+            return !isBlockedId && !isBlockedName && video.score > -10;
+        });
+        
+        let subShorts = [];
+        if (state.settings.muteShorts) {
+            subVideos = subVideos.filter(v => !isShortVideo(v));
+        } else {
+            subShorts = subVideos.filter(isShortVideo);
+            subVideos = subVideos.filter(v => !isShortVideo(v));
+        }
+        
+        subVideos.sort((a, b) => {
+            if (a.score >= 5 && b.score < 5) return -1;
+            if (b.score >= 5 && a.score < 5) return 1;
+            return b.published - a.published;
+        });
+        
+        const initialSubVideos = subVideos.slice(0, 20);
+        
+        if (subShorts.length > 0) {
+            shortsShelf.classList.remove("hidden");
+            const shortsFragment = document.createDocumentFragment();
+            subShorts.slice(0, 10).forEach(short => renderCard(short, shortsFragment));
+            shortsGrid.appendChild(shortsFragment);
+        }
+        
+        if (initialSubVideos.length > 0) {
+            const subHeader = document.createElement("div");
+            subHeader.className = "discover-section-header";
+            subHeader.style.gridColumn = "1 / -1";
+            subHeader.style.marginBottom = "1rem";
+            subHeader.innerHTML = `
+                <h2 class="discover-section-title" style="font-size: 1.15rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
+                    <span>🌿 Subscribed Feeds</span>
+                </h2>
+                <span class="discover-badge" style="font-size: 0.7rem; opacity: 0.6;">Your Subscriptions</span>
+            `;
+            grid.appendChild(subHeader);
+            
+            const feedFragment = document.createDocumentFragment();
+            initialSubVideos.forEach(video => renderCard(video, feedFragment));
+            grid.appendChild(feedFragment);
+        }
+        
+        if (state.smartFeedVideos.length > 0) {
+            const groups = {};
+            state.smartFeedVideos.forEach(v => {
+                const topic = v.discoveryTopic || "discovery";
+                if (!groups[topic]) groups[topic] = [];
+                groups[topic].push(v);
+            });
+            
+            for (const topic in groups) {
+                appendSmartFeedSection(topic, groups[topic]);
+            }
+        } else {
+            loadNextSmartFeedBatch();
+        }
+        
+        if (initialSubVideos.length === 0 && state.smartFeedVideos.length === 0) {
+            emptyState.classList.remove("hidden");
+        } else {
+            emptyState.classList.add("hidden");
+        }
+        return;
     }
     
-    let isTopicView = false;
-    let isSearchView = false;
-    let activeTopic = "";
-    let searchQuery = "";
-    
-    // Apply navigation filter
-    if (state.currentView === "starred") {
-        allVideos = allVideos.filter(v => v.score >= 5);
-    } else if (state.currentView.startsWith("topic_")) {
-        isTopicView = true;
-        activeTopic = state.currentView.substring(6).toLowerCase();
-        allVideos = allVideos.filter(v => v.matchedTopics.includes(activeTopic));
-    } else if (state.currentView.startsWith("search_")) {
-        isSearchView = true;
-        searchQuery = state.currentView.substring(7);
-        // For dedicated search view, we also show matching subscribed videos
+    // Handle Search View (when state.currentView starts with "search_")
+    if (state.currentView.startsWith("search_")) {
+        const searchQuery = state.currentView.substring(7);
+        const queryTerm = searchQuery.toLowerCase();
+        
+        let allVideos = [];
+        Object.values(state.cache.videos).forEach(channelVideos => {
+            channelVideos.forEach(v => {
+                const evaluation = getScoreAndMatches(v);
+                allVideos.push({
+                    ...v,
+                    score: evaluation.score,
+                    matchedTopics: evaluation.matches,
+                    isDiscover: false
+                });
+            });
+        });
+        
+        allVideos = allVideos.filter(video => {
+            const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === video.channelId);
+            const isBlockedName = state.blockedChannels.some(bc => !bc.id && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+            return !isBlockedId && !isBlockedName && video.score > -10;
+        });
+        
         allVideos = allVideos.filter(v => 
-            v.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
-            v.channelName.toLowerCase().includes(searchQuery.toLowerCase())
+            v.title.toLowerCase().includes(queryTerm) || 
+            v.channelName.toLowerCase().includes(queryTerm)
         );
-    }
-    
-    // Sort: High score at the top, then sort by publishing date descending
-    allVideos.sort((a, b) => {
-        if (a.score >= 5 && b.score < 5) return -1;
-        if (b.score >= 5 && a.score < 5) return 1;
-        return b.published - a.published;
-    });
-    
-    // Topic/Search Discovery Logic
-    let discoverVideos = [];
-    const queryTerm = (isTopicView ? activeTopic : searchQuery).toLowerCase();
-    if (isTopicView || isSearchView) {
-        // Trigger background search if not cached yet
+        
+        allVideos.sort((a, b) => {
+            if (a.score >= 5 && b.score < 5) return -1;
+            if (b.score >= 5 && a.score < 5) return 1;
+            return b.published - a.published;
+        });
+        
         if (sessionTopicSearchCache[queryTerm] === undefined && !topicSearchLoading[queryTerm]) {
             fetchTopicSearchDiscovery(queryTerm);
         }
         
+        let discoverVideos = [];
         if (sessionTopicSearchCache[queryTerm]) {
             discoverVideos = sessionTopicSearchCache[queryTerm].map(v => {
                 const evaluation = getScoreAndMatches(v);
@@ -990,204 +1160,66 @@ function renderFeed() {
                 };
             });
             
-            // Filter discover videos
             discoverVideos = discoverVideos.filter(video => {
                 const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === video.channelId);
                 const isBlockedName = state.blockedChannels.some(bc => !bc.id && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
-                return !isBlockedId && !isBlockedName;
+                return !isBlockedId && !isBlockedName && video.score > -10;
             });
-            discoverVideos = discoverVideos.filter(v => v.score > -10);
             
-            // Deduplicate (exclude videos already in subscribed topic feed)
             discoverVideos = discoverVideos.filter(dv => !allVideos.some(sv => sv.id === dv.id));
-            
-            // Sort discover videos by score descending
             discoverVideos.sort((a, b) => b.score - a.score);
         }
-    }
-    
-    // Separate Shorts from standard videos
-    let allShorts = [];
-    
-    if (state.settings.muteShorts) {
-        // If Shorts are muted, completely filter them out
-        allVideos = allVideos.filter(v => !isShortVideo(v));
-        discoverVideos = discoverVideos.filter(v => !isShortVideo(v));
-    } else {
-        // Extract Shorts from Subscribed Feed
-        const subShorts = allVideos.filter(isShortVideo);
-        allVideos = allVideos.filter(v => !isShortVideo(v));
         
-        // Extract Shorts from Discover Feed
-        const discShorts = discoverVideos.filter(isShortVideo);
-        discoverVideos = discoverVideos.filter(v => !isShortVideo(v));
-        
-        allShorts = [...subShorts, ...discShorts];
-    }
-    
-    // Show spinner if we have no subscribed videos, public search is currently loading, and no discover videos are loaded yet
-    const isSearchLoading = (isTopicView || isSearchView) && topicSearchLoading[queryTerm];
-    if ((isTopicView || isSearchView) && allVideos.length === 0 && discoverVideos.length === 0 && isSearchLoading) {
-        grid.innerHTML = `
-            <div class="empty-state" style="grid-column: 1 / -1; min-height: 200px;">
-                <div class="sync-spinner" style="font-size: 2rem; position: static; transform: none; display: block; animation: spin 1s linear infinite; margin: 2rem auto;">🔄</div>
-                <h3>Searching YouTube...</h3>
-                <p>Fetching public search results for "${capitalizePhrase(queryTerm)}"</p>
-            </div>
-        `;
-        emptyState.classList.add("hidden");
-        return;
-    }
-    
-    if (allVideos.length === 0 && discoverVideos.length === 0 && allShorts.length === 0) {
-        emptyState.classList.remove("hidden");
-        return;
-    }
-    emptyState.classList.add("hidden");
-    
-    // Render Helper Function
-    const renderCard = (video, targetContainer) => {
-        const card = document.createElement("div");
-        card.className = "video-card fade-in";
-        if (video.isDiscover) {
-            card.classList.add("discover-card");
+        let allShorts = [];
+        if (state.settings.muteShorts) {
+            allVideos = allVideos.filter(v => !isShortVideo(v));
+            discoverVideos = discoverVideos.filter(v => !isShortVideo(v));
+        } else {
+            const subShorts = allVideos.filter(isShortVideo);
+            allVideos = allVideos.filter(v => !isShortVideo(v));
+            const discShorts = discoverVideos.filter(isShortVideo);
+            discoverVideos = discoverVideos.filter(v => !isShortVideo(v));
+            allShorts = [...subShorts, ...discShorts];
         }
         
-        let scoreClass = "mid";
-        if (video.score >= 5) scoreClass = "high";
-        if (video.score < 0) scoreClass = "low";
-        
-        const relativeTime = video.isDiscover ? (video.publishedStr || "Recently") : getRelativeTime(video.published);
-        const topMatchedTopic = video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation");
-        const categoryText = topMatchedTopic ? capitalizePhrase(topMatchedTopic) : "";
-        
-        // Format meta/views if available
-        let metaLine = video.channelName;
-        if (video.viewCount && video.viewCount > 0) {
-            metaLine += ` • ${formatViews(video.viewCount)}`;
-        }
-        
-        // Check if channel is already subscribed
-        const isSubscribed = state.channels.some(ch => 
-            ch.name.toLowerCase() === video.channelName.toLowerCase() || ch.id === video.channelId
-        );
-        
-        card.innerHTML = `
-            <div class="thumbnail-area">
-                <img class="thumbnail-img" src="https://i.ytimg.com/vi/${video.id}/hqdefault.jpg" alt="${escapeHTML(video.title)}">
-                <div class="thumbnail-play-overlay">
-                    <div class="play-icon-circle">▶</div>
+        const isSearchLoading = topicSearchLoading[queryTerm];
+        if (allVideos.length === 0 && discoverVideos.length === 0 && isSearchLoading) {
+            grid.innerHTML = `
+                <div class="empty-state" style="grid-column: 1 / -1; min-height: 200px;">
+                    <div class="sync-spinner" style="font-size: 2rem; position: static; transform: none; display: block; animation: spin 1s linear infinite; margin: 2rem auto;">🔄</div>
+                    <h3>Searching YouTube...</h3>
+                    <p>Fetching public search results for "${capitalizePhrase(queryTerm)}"</p>
                 </div>
-                <div class="score-badge ${scoreClass}">★ ${video.score}</div>
-                ${video.isDiscover ? `<div class="search-badge">🔍 Search</div>` : (categoryText ? `<div class="category-badge">${categoryText}</div>` : "")}
-                <button class="card-action-btn" title="Actions">⋮</button>
-            </div>
-            <div class="card-details">
-                <h3 class="video-title">${escapeHTML(video.title)}</h3>
-                <p class="video-channel">${escapeHTML(metaLine)}</p>
-                <p class="video-time">${relativeTime}${video.duration ? ` • ${formatDuration(video.duration)}` : ""}</p>
-            </div>
-        `;
-        
-        const openAction = () => playVideo(video);
-        card.querySelector(".thumbnail-play-overlay").addEventListener("click", openAction);
-        card.querySelector(".video-title").addEventListener("click", openAction);
-        
-        // 3-dot action menu
-        const actionBtn = card.querySelector(".card-action-btn");
-        actionBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            // Close any existing dropdown
-            document.querySelectorAll(".card-action-dropdown").forEach(d => d.remove());
-            
-            const dropdown = document.createElement("div");
-            dropdown.className = "card-action-dropdown";
-            dropdown.innerHTML = `
-                <button class="danger" data-action="block">🚫 Block Channel</button>
-                <button data-action="subscribe" ${isSubscribed ? 'disabled' : ''}>➕ ${isSubscribed ? 'Already Subscribed' : 'Subscribe to Channel'}</button>
-                <button data-action="hide">🔇 Hide Video</button>
             `;
-            
-            dropdown.querySelector('[data-action="block"]').addEventListener("click", (ev) => {
-                ev.stopPropagation();
-                const channelName = video.channelName;
-                const channelId = video.channelId || "";
-                if (!state.blockedChannels.some(bc => bc.name.toLowerCase() === channelName.toLowerCase())) {
-                    state.blockedChannels.push({ name: channelName, id: channelId });
-                    saveBlocked();
-                }
-                dropdown.remove();
-                showToast(`🚫 Blocked ${channelName}`, "danger");
-                // Remove all cards from this channel with fade-out
-                document.querySelectorAll(".video-card").forEach(c => {
-                    const chEl = c.querySelector(".video-channel");
-                    if (chEl && chEl.textContent.toLowerCase().includes(channelName.toLowerCase())) {
-                        c.classList.add("fade-out-remove");
-                        setTimeout(() => c.remove(), 350);
-                    }
-                });
-            });
-            
-            dropdown.querySelector('[data-action="subscribe"]').addEventListener("click", (ev) => {
-                ev.stopPropagation();
-                if (isSubscribed) return;
-                const channelName = video.channelName;
-                const channelId = video.channelId || "";
-                state.channels.push({ name: channelName, id: channelId });
-                saveChannels();
-                dropdown.remove();
-                showToast(`✅ Subscribed to ${channelName}`, "success");
-                renderChannelsList();
-            });
-            
-            dropdown.querySelector('[data-action="hide"]').addEventListener("click", (ev) => {
-                ev.stopPropagation();
-                dropdown.remove();
-                card.classList.add("fade-out-remove");
-                setTimeout(() => card.remove(), 350);
-                showToast(`🔇 Video hidden`, "info");
-            });
-            
-            card.querySelector(".thumbnail-area").appendChild(dropdown);
-            
-            // Close dropdown on outside click
-            const closeDropdown = (ev) => {
-                if (!dropdown.contains(ev.target) && ev.target !== actionBtn) {
-                    dropdown.remove();
-                    document.removeEventListener("click", closeDropdown);
-                }
-            };
-            setTimeout(() => document.addEventListener("click", closeDropdown), 0);
-        });
+            emptyState.classList.add("hidden");
+            return;
+        }
         
-        targetContainer.appendChild(card);
-    };
-
-    // Render Shorts shelf if there are Shorts
-    if (allShorts.length > 0) {
-        shortsShelf.classList.remove("hidden");
-        const shortsFragment = document.createDocumentFragment();
-        allShorts.forEach(short => renderCard(short, shortsFragment));
-        shortsGrid.appendChild(shortsFragment);
-    }
-
-    // Render Subscribed videos (capped at 120)
-    const feedFragment = document.createDocumentFragment();
-    allVideos.slice(0, 120).forEach(video => renderCard(video, feedFragment));
-    grid.appendChild(feedFragment);
-    
-    // Render Discover section
-    if ((isTopicView || isSearchView) && discoverVideos.length > 0) {
-        const divider = document.createElement("div");
-        divider.className = "discover-section-header";
-        const titleText = isTopicView 
-            ? `🔍 Discover More on "${capitalizePhrase(activeTopic)}"`
-            : `🔍 Public Search Results for "${capitalizePhrase(searchQuery)}"`;
-        divider.innerHTML = `
-            <h2 class="discover-section-title">${titleText}</h2>
-            <span class="discover-badge">YouTube Public Search</span>
-        `;
-        grid.appendChild(divider);
+        if (allVideos.length === 0 && discoverVideos.length === 0 && allShorts.length === 0) {
+            emptyState.classList.remove("hidden");
+            return;
+        }
+        emptyState.classList.add("hidden");
+        
+        if (allShorts.length > 0) {
+            shortsShelf.classList.remove("hidden");
+            const shortsFragment = document.createDocumentFragment();
+            allShorts.forEach(short => renderCard(short, shortsFragment));
+            shortsGrid.appendChild(shortsFragment);
+        }
+        
+        const feedFragment = document.createDocumentFragment();
+        allVideos.slice(0, 120).forEach(video => renderCard(video, feedFragment));
+        grid.appendChild(feedFragment);
+        
+        if (discoverVideos.length > 0) {
+            const divider = document.createElement("div");
+            divider.className = "discover-section-header";
+            divider.innerHTML = `
+                <h2 class="discover-section-title">🔍 Public Search Results for "${capitalizePhrase(searchQuery)}"</h2>
+                <span class="discover-badge">YouTube Public Search</span>
+            `;
+            grid.appendChild(divider);
         
         // Render ALL cached discover videos (infinite scroll handles batching)
         if (topicSearchLoading[queryTerm]) {
@@ -1225,6 +1257,8 @@ function renderFeed() {
             grid.appendChild(endMsg);
         }
     }
+}
+}
 }
 
 // Display Video in Distraction-Free IFrame Modal
@@ -1930,15 +1964,11 @@ function setupInfiniteScroll() {
     if (!feedSection) return;
     
     feedSection.addEventListener("scroll", () => {
-        // Handle AI brainstorm infinite scroll
-        if (state.currentView === "ai-brainstorm") {
-            if (state.brainstormLoading) return;
+        // Handle Smart Feed scroll discovery
+        if (state.currentView === "smart-feed") {
             const scrollBottom = feedSection.scrollHeight - feedSection.scrollTop - feedSection.clientHeight;
-            if (scrollBottom > 300) return;
-            
-            // Check that we have initial topics before loading more on scroll
-            if (state.brainstormTopics.length > 0) {
-                generateBrainstormTopics(true); // pass true to append
+            if (scrollBottom <= 300) {
+                loadNextSmartFeedBatch();
             }
             return;
         }
@@ -2046,50 +2076,21 @@ async function generateBrainstormTopics(append) {
     if (state.brainstormLoading) return;
     state.brainstormLoading = true;
     
-    const grid = document.getElementById("brainstorm-grid");
-    let scrollLoader = null;
+    console.log("[Smart Feed] Background LLM brainstorming started...");
     
-    const btnMore = document.getElementById("btn-brainstorm-more");
-    const spinner = btnMore?.querySelector(".brainstorm-spinner");
-    const btnText = btnMore?.querySelector(".btn-text");
-    
-    if (append && grid) {
-        // Show scroll loader at the bottom of the grid
-        scrollLoader = document.createElement("div");
-        scrollLoader.className = "infinite-scroll-loader";
-        scrollLoader.innerHTML = `<div class="loader-spinner"></div><p>Brainstorming more topics...</p>`;
-        grid.appendChild(scrollLoader);
-    } else {
-        if (btnMore) btnMore.disabled = true;
-        if (spinner) spinner.classList.remove("hidden");
-        if (btnText) btnText.textContent = "Brainstorming...";
-        
-        // If we are currently viewing the brainstorm tab, show loader in the grid
-        if (state.currentView === "ai-brainstorm" && grid && state.brainstormTopics.length === 0) {
-            grid.innerHTML = `
-                <div class="infinite-scroll-loader">
-                    <div class="loader-spinner"></div>
-                    <p>Brainstorming topics with AI...</p>
-                </div>
-            `;
-        }
-    }
-    
-    if (state.currentView === "ai-brainstorm") {
-        updateStatusText("Brainstorming topics with AI...");
-    }
-
     // Construct user profile message
     const liked = state.topics.filter(t => t.weight > 0).map(t => `${t.phrase} (weight: +${t.weight})`).join(", ");
     const disliked = state.topics.filter(t => t.weight < 0).map(t => `${t.phrase} (weight: ${t.weight})`).join(", ");
     const searches = state.searchHistory.join(", ");
-    const currentShown = state.brainstormTopics.map(t => t.phrase).join(", ");
+    const currentQueue = state.smartFeedTopicsQueue.join(", ");
+    const usedTopics = state.smartFeedUsedTopics.join(", ");
     
     const userMessage = `User Profile:
 - Liked Topics: [${liked}]
 - Disliked Topics: [${disliked}]
 - Recent Searches: [${searches}]
-- Currently Shown Brainstormed Topics (Avoid duplicates): [${currentShown}]
+- Currently Queued Topics (Avoid duplicates): [${currentQueue}]
+- Already Used Topics (Avoid duplicates): [${usedTopics}]
 
 Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
 
@@ -2123,7 +2124,6 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
         
         let content = message.content;
         if (content === null || content === undefined) {
-            // Check if JSON array was returned inside reasoning block due to model cutoff or formatting
             if (message.reasoning) {
                 const jsonMatch = message.reasoning.match(/\[\s*\{[\s\S]*\}\s*\]/);
                 if (jsonMatch) {
@@ -2138,7 +2138,6 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
         
         content = content.trim();
         
-        // Clean JSON formatting if LLM wrapped it in markdown code blocks
         let cleanContent = content;
         if (cleanContent.startsWith("```json")) {
             cleanContent = cleanContent.substring(7);
@@ -2152,197 +2151,265 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
         
         const parsed = JSON.parse(cleanContent);
         if (Array.isArray(parsed)) {
-            const newTopics = parsed.map(item => ({
-                phrase: item.phrase.trim(),
-                reason: item.reason.trim()
-            }));
-            
-            if (append) {
-                // Deduplicate new topics against current list just in case
-                const currentPhrases = new Set(state.brainstormTopics.map(t => t.phrase.toLowerCase()));
-                const filteredNew = newTopics.filter(t => !currentPhrases.has(t.phrase.toLowerCase()));
+            const addedPhrases = [];
+            parsed.forEach(item => {
+                const phrase = item.phrase.trim().toLowerCase();
+                if (!phrase) return;
                 
-                state.brainstormTopics = [...state.brainstormTopics, ...filteredNew];
-            } else {
-                state.brainstormTopics = newTopics;
-            }
+                // Add to state.topics with default positive weight if not present
+                const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
+                if (!existsInTopics) {
+                    state.topics.push({ phrase, weight: 5 });
+                }
+                
+                // Push to smartFeedTopicsQueue if not already in queue or used
+                const inQueue = state.smartFeedTopicsQueue.includes(phrase);
+                const inUsed = state.smartFeedUsedTopics.includes(phrase);
+                if (!inQueue && !inUsed) {
+                    state.smartFeedTopicsQueue.push(phrase);
+                    addedPhrases.push(phrase);
+                }
+            });
             
-            localStorage.setItem("wallgarden_brainstorm_topics", JSON.stringify(state.brainstormTopics));
+            saveTopics();
+            console.log("[Smart Feed] Successfully brainstormed and queued new topics:", addedPhrases);
+            if (addedPhrases.length > 0) {
+                showToast(`💡 Queued topics: ${addedPhrases.join(", ")}`, "success");
+            }
         } else {
             throw new Error("Invalid response format: expected a JSON array.");
         }
-        showToast(append ? "💡 More topic ideas loaded!" : "💡 Fresh ideas brainstormed!", "success");
     } catch (err) {
         console.error("Brainstorm error:", err);
         showToast("❌ Failed to brainstorm topics: " + err.message, "danger");
     } finally {
-        if (scrollLoader) scrollLoader.remove();
         state.brainstormLoading = false;
-        if (btnMore) btnMore.disabled = false;
-        if (spinner) spinner.classList.add("hidden");
-        if (btnText) btnText.textContent = "Brainstorm More";
-        
-        if (state.currentView === "ai-brainstorm") {
-            updateStatusText("Ready");
-        }
-        
-        if (append) {
-            renderAppendedBrainstormTopics();
-        } else {
-            renderBrainstormView();
-        }
+        updateStatusText("Ready");
     }
 }
 
-function renderBrainstormView() {
-    const grid = document.getElementById("brainstorm-grid");
-    if (!grid) return;
-    grid.innerHTML = "";
+async function loadNextSmartFeedBatch() {
+    if (state.smartFeedLoading) return;
+    state.smartFeedLoading = true;
     
-    // If empty and currently loading, show loading spinner
-    if (state.brainstormTopics.length === 0 && state.brainstormLoading) {
-        grid.innerHTML = `
-            <div class="infinite-scroll-loader">
-                <div class="loader-spinner"></div>
-                <p>Brainstorming topics with AI...</p>
-            </div>
-        `;
+    // Add loading spinner at the bottom
+    const grid = document.getElementById("video-grid");
+    if (!grid) {
+        state.smartFeedLoading = false;
         return;
     }
+    let loader = grid.querySelector(".smart-feed-loader");
+    if (!loader) {
+        loader = document.createElement("div");
+        loader.className = "smart-feed-loader infinite-scroll-loader";
+        loader.innerHTML = `<div class="loader-spinner"></div><p style="margin: 0.5rem 0 0 0;">Discovering videos via AI topics...</p>`;
+        loader.style.gridColumn = "1 / -1";
+        loader.style.textAlign = "center";
+        loader.style.padding = "2rem";
+        grid.appendChild(loader);
+    }
     
-    // If empty and not currently loading, show empty state with trigger button
-    if (state.brainstormTopics.length === 0) {
-        grid.innerHTML = `
-            <div class="empty-state" style="grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 3rem 1rem; text-align: center;">
-                <div class="empty-icon" style="font-size: 2.5rem; margin-bottom: 1rem;">💡</div>
-                <h3>No brainstormed topics yet</h3>
-                <p style="color: var(--text-muted); margin-bottom: 1.5rem; max-width: 400px;">Generate personalized topic recommendations based on your liked and disliked content.</p>
-                <button id="btn-brainstorm-trigger" class="btn btn-primary">Brainstorm Topics Now</button>
-            </div>
-        `;
-        const triggerBtn = document.getElementById("btn-brainstorm-trigger");
-        if (triggerBtn) {
-            triggerBtn.addEventListener("click", () => generateBrainstormTopics());
+    // Let's pop a topic from the queue
+    if (state.smartFeedTopicsQueue.length === 0) {
+        console.log("[Smart Feed] Queue is empty! Generating more topics first...");
+        const positiveTopics = state.topics
+            .filter(t => t.weight > 0)
+            .map(t => t.phrase.toLowerCase());
+        
+        state.smartFeedTopicsQueue = [...positiveTopics];
+        if (state.smartFeedTopicsQueue.length === 0) {
+            state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
         }
+        
+        await generateBrainstormTopics(true);
+    }
+    
+    // Check if queue runs low (less than 3 topics), if so trigger background brainstorm
+    if (state.smartFeedTopicsQueue.length < 3 && !state.brainstormLoading) {
+        console.log("[Smart Feed] Topics queue running low, triggering background LLM brainstorm...");
+        generateBrainstormTopics(true);
+    }
+    
+    const topic = state.smartFeedTopicsQueue.shift();
+    if (!topic) {
+        const updatedLoader = grid.querySelector(".smart-feed-loader");
+        if (updatedLoader) updatedLoader.remove();
+        state.smartFeedLoading = false;
         return;
     }
+    state.smartFeedUsedTopics.push(topic);
     
-    const fragment = document.createDocumentFragment();
+    console.log(`[Smart Feed] Fetching discovery videos for topic: "${topic}"...`);
+    updateStatusText(`Smart Feed: Discovering "${capitalizePhrase(topic)}"...`);
     
-    state.brainstormTopics.forEach((topic) => {
-        if (!topic || !topic.phrase) return;
-        const phrase = topic.phrase.trim();
-        const reason = topic.reason ? topic.reason.trim() : "Suggested topic";
-        
-        const card = document.createElement("div");
-        card.className = "brainstorm-card fade-in";
-        card.dataset.phrase = phrase.toLowerCase();
-        
-        card.innerHTML = `
-            <div class="brainstorm-topic-name">${escapeHTML(phrase)}</div>
-            <div class="brainstorm-reason">${escapeHTML(reason)}</div>
-            <div class="brainstorm-actions">
-                <button class="btn-vote upvote" title="Upvote Topic">👍 Upvote</button>
-                <button class="btn-vote downvote" title="Downvote Topic">👎 Downvote</button>
-            </div>
-        `;
-        
-        // Upvote click handler
-        card.querySelector(".upvote").addEventListener("click", () => {
-            voteTopic(phrase, true, card);
+    let videos = [];
+    let success = false;
+    const fetchCount = 10;
+    
+    if (state.settings.useYtdlp) {
+        try {
+            const resp = await fetch("/scraper/collect", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    source: "youtube",
+                    query: topic,
+                    limit: fetchCount,
+                    days_back: 0,
+                    require_transcript: false
+                })
+            });
+            if (resp.ok) {
+                const data = await resp.json();
+                if (data && Array.isArray(data.items)) {
+                    data.items.forEach(item => {
+                        videos.push({
+                            id: item.video_id,
+                            title: item.title,
+                            channelName: item.channel,
+                            channelId: "",
+                            publishedStr: item.published_at ? getRelativeTime(new Date(item.published_at).getTime()) : "Recently",
+                            published: item.published_at ? new Date(item.published_at).getTime() : Date.now(),
+                            duration: item.duration_secs,
+                            viewCount: item.view_count,
+                            isDiscover: true,
+                            discoveryTopic: topic
+                        });
+                    });
+                    success = true;
+                }
+            }
+        } catch (err) {
+            console.error(`[Smart Feed] Scraper fetch failed for "${topic}":`, err);
+        }
+    }
+    
+    if (!success) {
+        try {
+            const url = `/youtube/results?search_query=${encodeURIComponent(topic)}`;
+            const resp = await fetch(url);
+            if (resp.ok) {
+                const htmlText = await resp.text();
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(htmlText, "text/html");
+                const scripts = doc.querySelectorAll("script");
+                let ytData = null;
+                for (const script of scripts) {
+                    if (script.textContent.includes("ytInitialData")) {
+                        const text = script.textContent;
+                        const startIndex = text.indexOf("ytInitialData =");
+                        if (startIndex !== -1) {
+                            const jsonStart = text.indexOf("{", startIndex);
+                            if (jsonStart !== -1) {
+                                let jsonText = text.substring(jsonStart);
+                                const endIndex = jsonText.lastIndexOf("}");
+                                if (endIndex !== -1) {
+                                    jsonText = jsonText.substring(0, endIndex + 1);
+                                }
+                                try {
+                                    ytData = JSON.parse(jsonText);
+                                    break;
+                                } catch (e) {
+                                    console.error("JSON parse error in ytInitialData", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                if (ytData) {
+                    const contents = ytData.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents || [];
+                    for (const sec of contents) {
+                        const items = sec.itemSectionRenderer?.contents || [];
+                        for (const item of items) {
+                            if (item.videoRenderer) {
+                                const vr = item.videoRenderer;
+                                const videoId = vr.videoId;
+                                const title = vr.title?.runs?.[0]?.text || "";
+                                const channelName = vr.ownerText?.runs?.[0]?.text || "Unknown Channel";
+                                const publishedStr = vr.publishedTimeText?.simpleText || "Recently";
+                                if (videoId && title) {
+                                    videos.push({
+                                        id: videoId,
+                                        title: title,
+                                        channelName: channelName,
+                                        channelId: "",
+                                        publishedStr: publishedStr,
+                                        published: Date.now(),
+                                        isDiscover: true,
+                                        discoveryTopic: topic
+                                    });
+                                    if (videos.length >= fetchCount) break;
+                                }
+                            }
+                        }
+                        if (videos.length >= fetchCount) break;
+                    }
+                    success = true;
+                }
+            }
+        } catch (err) {
+            console.error(`[Smart Feed] HTML search fallback failed for "${topic}":`, err);
+        }
+    }
+    
+    if (videos.length > 0) {
+        const filtered = videos.filter(v => {
+            const evaluation = getScoreAndMatches(v);
+            v.score = evaluation.score;
+            v.matchedTopics = evaluation.matches;
+            
+            const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === v.channelId);
+            const isBlockedName = state.blockedChannels.some(bc => !bc.id && v.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+            
+            return !isBlockedId && !isBlockedName && v.score > -10;
         });
         
-        // Downvote click handler
-        card.querySelector(".downvote").addEventListener("click", () => {
-            voteTopic(phrase, false, card);
-        });
+        const existingIds = new Set(state.smartFeedVideos.map(v => v.id));
+        const deduplicated = filtered.filter(v => !existingIds.has(v.id));
         
-        fragment.appendChild(card);
-    });
+        if (deduplicated.length > 0) {
+            state.smartFeedVideos.push(...deduplicated);
+            appendSmartFeedSection(topic, deduplicated);
+        }
+    }
     
-    grid.appendChild(fragment);
+    const updatedLoader = grid.querySelector(".smart-feed-loader");
+    if (updatedLoader) updatedLoader.remove();
+    
+    state.smartFeedLoading = false;
+    updateStatusText("Ready");
 }
 
-function renderAppendedBrainstormTopics() {
-    const grid = document.getElementById("brainstorm-grid");
+function appendSmartFeedSection(topic, videos) {
+    const grid = document.getElementById("video-grid");
     if (!grid) return;
     
-    // Find already rendered phrases
-    const renderedPhrases = new Set();
-    grid.querySelectorAll(".brainstorm-card").forEach(c => {
-        if (c.dataset.phrase) {
-            renderedPhrases.add(c.dataset.phrase);
-        }
-    });
+    const divider = document.createElement("div");
+    divider.className = "discover-section-header fade-in";
+    divider.style.gridColumn = "1 / -1";
+    divider.style.marginTop = "2.5rem";
+    divider.style.marginBottom = "1rem";
+    divider.style.display = "flex";
+    divider.style.alignItems = "center";
+    divider.style.justifyContent = "space-between";
+    divider.style.borderBottom = "1px solid var(--card-border)";
+    divider.style.paddingBottom = "0.5rem";
+    
+    divider.innerHTML = `
+        <h2 class="discover-section-title" style="font-size: 1.1rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
+            <span>🔍 Discover:</span>
+            <span style="color: var(--accent);">${capitalizePhrase(topic)}</span>
+        </h2>
+        <span class="discover-badge" style="font-size: 0.7rem; opacity: 0.6;">Smart Feed Suggestion</span>
+    `;
+    grid.appendChild(divider);
     
     const fragment = document.createDocumentFragment();
-    
-    state.brainstormTopics.forEach((topic) => {
-        if (!topic || !topic.phrase) return;
-        const phrase = topic.phrase.trim();
-        const reason = topic.reason ? topic.reason.trim() : "Suggested topic";
-        
-        const cleanPhrase = phrase.toLowerCase();
-        if (!renderedPhrases.has(cleanPhrase)) {
-            const card = document.createElement("div");
-            card.className = "brainstorm-card fade-in";
-            card.dataset.phrase = cleanPhrase;
-            
-            card.innerHTML = `
-                <div class="brainstorm-topic-name">${escapeHTML(phrase)}</div>
-                <div class="brainstorm-reason">${escapeHTML(reason)}</div>
-                <div class="brainstorm-actions">
-                    <button class="btn-vote upvote" title="Upvote Topic">👍 Upvote</button>
-                    <button class="btn-vote downvote" title="Downvote Topic">👎 Downvote</button>
-                </div>
-            `;
-            
-            // Upvote click handler
-            card.querySelector(".upvote").addEventListener("click", () => {
-                voteTopic(phrase, true, card);
-            });
-            
-            // Downvote click handler
-            card.querySelector(".downvote").addEventListener("click", () => {
-                voteTopic(phrase, false, card);
-            });
-            
-            fragment.appendChild(card);
-        }
+    videos.forEach(video => {
+        renderCard(video, fragment);
     });
-    
     grid.appendChild(fragment);
-}
-
-function voteTopic(phrase, isUpvote, cardElement) {
-    const cleanPhrase = phrase.toLowerCase().trim();
-    
-    // Save to state.topics
-    const weight = isUpvote ? 5 : -10;
-    const existingIdx = state.topics.findIndex(t => t.phrase === cleanPhrase);
-    if (existingIdx !== -1) {
-        state.topics[existingIdx].weight = weight;
-    } else {
-        state.topics.push({ phrase: cleanPhrase, weight });
-    }
-    saveTopics();
-    renderSidebarTopics();
-    
-    // Remove from in-memory brainstorm list
-    state.brainstormTopics = state.brainstormTopics.filter(t => t.phrase.toLowerCase().trim() !== cleanPhrase);
-    localStorage.setItem("wallgarden_brainstorm_topics", JSON.stringify(state.brainstormTopics));
-    
-    // Perform card exit animation
-    const animClass = isUpvote ? "fade-out-upvote" : "fade-out-downvote";
-    cardElement.classList.add(animClass);
-    
-    showToast(isUpvote ? `👍 Added topic "${phrase}"` : `👎 Muted topic "${phrase}"`, isUpvote ? "success" : "danger");
-    
-    setTimeout(() => {
-        cardElement.remove();
-        // If all cards voted, brainstorm more automatically
-        if (state.brainstormTopics.length === 0) {
-            generateBrainstormTopics();
-        }
-    }, 400);
 }
