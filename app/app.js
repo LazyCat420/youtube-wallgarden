@@ -37,6 +37,9 @@ let state = {
     },
     currentView: "all", // 'all', 'starred', or topic phrase
     searchQuery: "",
+    searchHistory: [], // Rolling history of searches (max 10)
+    brainstormTopics: [], // Brainstormed topics from LLM
+    brainstormLoading: false,
     settings: {
         useYtdlp: true,
         muteShorts: false
@@ -52,6 +55,7 @@ const DISCOVER_MAX_RESULTS = 150;
 let sessionTopicSearchCache = {};
 let topicSearchLoading = {};
 let renderTimeouts = [];
+let searchDebounceTimeout = null;
 
 function clearRenderTimeouts() {
     renderTimeouts.forEach(t => clearTimeout(t));
@@ -63,6 +67,7 @@ document.addEventListener("DOMContentLoaded", () => {
     loadState();
     setupEventListeners();
     renderSidebarTopics();
+    fetchLlmModel();
     
     // Auto-sync if cache is empty or older than 1 hour (3600 seconds)
     const cacheAge = (Date.now() - state.cache.lastSync) / 1000;
@@ -81,11 +86,15 @@ function loadState() {
     const rawBlocked = localStorage.getItem("wallgarden_blocked_channels");
     const rawCache = localStorage.getItem("wallgarden_cache");
     const rawSettings = localStorage.getItem("wallgarden_settings");
+    const rawSearchHistory = localStorage.getItem("wallgarden_search_history");
+    const rawBrainstorm = localStorage.getItem("wallgarden_brainstorm_topics");
 
     state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
     state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
     state.blockedChannels = rawBlocked ? JSON.parse(rawBlocked) : [];
     state.settings = rawSettings ? JSON.parse(rawSettings) : { useYtdlp: true, muteShorts: false };
+    state.searchHistory = rawSearchHistory ? JSON.parse(rawSearchHistory) : [];
+    state.brainstormTopics = rawBrainstorm ? JSON.parse(rawBrainstorm) : [];
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
@@ -149,6 +158,10 @@ function saveTopics() {
 
 function saveCache() {
     localStorage.setItem("wallgarden_cache", JSON.stringify(state.cache));
+}
+
+function saveSearchHistory() {
+    localStorage.setItem("wallgarden_search_history", JSON.stringify(state.searchHistory));
 }
 
 function getCachedVideosCount() {
@@ -390,7 +403,10 @@ function setupEventListeners() {
                     document.getElementById("current-view-title").textContent = "All Videos";
                 }
             }
-            renderFeed();
+            clearTimeout(searchDebounceTimeout);
+            searchDebounceTimeout = setTimeout(() => {
+                renderFeed();
+            }, 250);
         });
     }
 
@@ -431,6 +447,12 @@ function setupEventListeners() {
             }
         });
     });
+
+    // Brainstorm More button
+    const btnBrainstormMore = document.getElementById("btn-brainstorm-more");
+    if (btnBrainstormMore) {
+        btnBrainstormMore.addEventListener("click", () => generateBrainstormTopics());
+    }
 }
 
 // Dynamic Sidebar topics rendering
@@ -861,6 +883,19 @@ function renderFeed() {
     const shortsShelf = document.getElementById("shorts-shelf");
     const shortsGrid = document.getElementById("shorts-grid");
     const emptyState = document.getElementById("empty-state");
+    const brainstormContainer = document.getElementById("ai-brainstorm-container");
+    
+    if (state.currentView === "ai-brainstorm") {
+        grid.classList.add("hidden");
+        shortsShelf.classList.add("hidden");
+        emptyState.classList.add("hidden");
+        if (brainstormContainer) brainstormContainer.classList.remove("hidden");
+        renderBrainstormView();
+        return;
+    } else {
+        grid.classList.remove("hidden");
+        if (brainstormContainer) brainstormContainer.classList.add("hidden");
+    }
     
     grid.innerHTML = "";
     shortsGrid.innerHTML = "";
@@ -1123,11 +1158,15 @@ function renderFeed() {
     // Render Shorts shelf if there are Shorts
     if (allShorts.length > 0) {
         shortsShelf.classList.remove("hidden");
-        allShorts.forEach(short => renderCard(short, shortsGrid));
+        const shortsFragment = document.createDocumentFragment();
+        allShorts.forEach(short => renderCard(short, shortsFragment));
+        shortsGrid.appendChild(shortsFragment);
     }
 
     // Render Subscribed videos (capped at 120)
-    allVideos.slice(0, 120).forEach(video => renderCard(video, grid));
+    const feedFragment = document.createDocumentFragment();
+    allVideos.slice(0, 120).forEach(video => renderCard(video, feedFragment));
+    grid.appendChild(feedFragment);
     
     // Render Discover section
     if ((isTopicView || isSearchView) && discoverVideos.length > 0) {
@@ -1145,13 +1184,22 @@ function renderFeed() {
         // Render ALL cached discover videos (infinite scroll handles batching)
         if (topicSearchLoading[queryTerm]) {
             // If currently streaming, render already-loaded ones instantly
-            discoverVideos.forEach(video => renderCard(video, grid));
+            const discoverFragment = document.createDocumentFragment();
+            discoverVideos.forEach(video => renderCard(video, discoverFragment));
+            grid.appendChild(discoverFragment);
         } else {
-            // Otherwise stagger them
-            discoverVideos.forEach((video, index) => {
+            // Otherwise render the first 18 instantly via fragment, and stagger the rest with a 10ms timeout
+            const instantBatch = discoverVideos.slice(0, 18);
+            const staggeredBatch = discoverVideos.slice(18);
+            
+            const discoverFragment = document.createDocumentFragment();
+            instantBatch.forEach(video => renderCard(video, discoverFragment));
+            grid.appendChild(discoverFragment);
+            
+            staggeredBatch.forEach((video, index) => {
                 const t = setTimeout(() => {
                     renderCard(video, grid);
-                }, index * 100);
+                }, index * 10);
                 renderTimeouts.push(t);
             });
         }
@@ -1198,6 +1246,10 @@ function closePlayer() {
 
 function triggerGlobalSearch(query) {
     if (!query) return;
+    
+    // Append to search history, keeping max 10
+    state.searchHistory = [query, ...state.searchHistory.filter(q => q.toLowerCase() !== query.toLowerCase())].slice(0, 10);
+    saveSearchHistory();
     
     // Switch navigation active states (clear active highlight on menu)
     document.querySelectorAll(".nav-item").forEach(btn => btn.classList.remove("active"));
@@ -1864,12 +1916,25 @@ function showToast(message, type) {
     }, 3000);
 }
 
-// Infinite scroll for search/topic views
+// Infinite scroll for search/topic/brainstorm views
 function setupInfiniteScroll() {
     const feedSection = document.querySelector(".feed-section");
     if (!feedSection) return;
     
     feedSection.addEventListener("scroll", () => {
+        // Handle AI brainstorm infinite scroll
+        if (state.currentView === "ai-brainstorm") {
+            if (state.brainstormLoading) return;
+            const scrollBottom = feedSection.scrollHeight - feedSection.scrollTop - feedSection.clientHeight;
+            if (scrollBottom > 300) return;
+            
+            // Check that we have initial topics before loading more on scroll
+            if (state.brainstormTopics.length > 0) {
+                generateBrainstormTopics(true); // pass true to append
+            }
+            return;
+        }
+
         // Only activate for topic/search views
         const isTopicView = state.currentView.startsWith("topic_");
         const isSearchView = state.currentView.startsWith("search_");
@@ -1923,3 +1988,289 @@ function setupInfiniteScroll() {
 
 // Initialize infinite scroll on load
 document.addEventListener("DOMContentLoaded", setupInfiniteScroll);
+// AI Topic Brainstorming Features
+let activeLlmModel = "default-model";
+
+const systemPrompt = `You are a creative topic brainstorming assistant for a YouTube feed curation dashboard. 
+Your goal is to brainstorm a list of 8-10 interesting, specific topic keywords or short phrases that the user might want to explore.
+
+To help the user discover new content and prevent feedback bubble overfitting, you MUST mix topics according to these rules:
+1. **Subcategories (3-4 topics)**: Take some of the user's liked topics and suggest more specific, niche subcategories (e.g. if they like "coding", recommend "systems programming" or "AST parsing").
+2. **Contrasting Alternatives (2-3 topics)**: Find areas that are the opposite or highly contrasting alternatives to the user's disliked topics. For example, if they dislike clickbait/gossip, suggest calm, academic, or high-educational topics.
+3. **Surprise Explorations (2-3 topics)**: Generate subjects that are completely uncorrelated to any topics on their liked or disliked lists to surprise them and break the bubble.
+
+Guidelines:
+- Generate exactly 8-10 diverse topics.
+- Keep them short (1-3 words maximum, e.g. "Docker Containers", "Quantum Computing").
+- Explain the reason for recommending each topic in a brief sentence, referencing the category mix rules (e.g., "Niche expansion based on coding", "Contrasting alternative to gossip", "Surprise exploration of new domains").
+- Do NOT suggest any topics that are on the user's disliked list.
+- Do NOT suggest any topics that are already in the list of currently displayed brainstormed topics.
+
+You MUST respond ONLY with a valid JSON array of objects. No markdown, no HTML, no explanation outside the JSON.
+Each object must have the following keys:
+- "phrase": The topic phrase (e.g. "Docker Containerization")
+- "reason": A short explanation of why this topic was suggested.
+
+Example response:
+[
+  {"phrase": "Docker Containers", "reason": "Niche expansion based on coding"},
+  {"phrase": "Quantum Physics", "reason": "Surprise exploration of new domains"}
+]`;
+
+async function fetchLlmModel() {
+    try {
+        const resp = await fetch("/vllm/v1/models");
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data && data.data && data.data.length > 0) {
+                activeLlmModel = data.data[0].id;
+                console.log("vLLM active model detected:", activeLlmModel);
+            }
+        }
+    } catch (err) {
+        console.warn("Failed to fetch active vLLM model, using default:", err);
+    }
+}
+
+async function generateBrainstormTopics(append) {
+    append = append || false;
+    if (state.brainstormLoading) return;
+    state.brainstormLoading = true;
+    
+    const grid = document.getElementById("brainstorm-grid");
+    let scrollLoader = null;
+    
+    const btnMore = document.getElementById("btn-brainstorm-more");
+    const spinner = btnMore?.querySelector(".brainstorm-spinner");
+    const btnText = btnMore?.querySelector(".btn-text");
+    
+    if (append && grid) {
+        // Show scroll loader at the bottom of the grid
+        scrollLoader = document.createElement("div");
+        scrollLoader.className = "infinite-scroll-loader";
+        scrollLoader.innerHTML = `<div class="loader-spinner"></div><p>Brainstorming more topics...</p>`;
+        grid.appendChild(scrollLoader);
+    } else {
+        if (btnMore) btnMore.disabled = true;
+        if (spinner) spinner.classList.remove("hidden");
+        if (btnText) btnText.textContent = "Brainstorming...";
+    }
+    
+    updateStatusText("Brainstorming topics with AI...");
+
+    // Construct user profile message
+    const liked = state.topics.filter(t => t.weight > 0).map(t => `${t.phrase} (weight: +${t.weight})`).join(", ");
+    const disliked = state.topics.filter(t => t.weight < 0).map(t => `${t.phrase} (weight: ${t.weight})`).join(", ");
+    const searches = state.searchHistory.join(", ");
+    const currentShown = state.brainstormTopics.map(t => t.phrase).join(", ");
+    
+    const userMessage = `User Profile:
+- Liked Topics: [${liked}]
+- Disliked Topics: [${disliked}]
+- Recent Searches: [${searches}]
+- Currently Shown Brainstormed Topics (Avoid duplicates): [${currentShown}]
+
+Please brainstorm 8-10 new topics that fit this profile. Return ONLY JSON.`;
+
+    try {
+        if (activeLlmModel === "default-model") {
+            await fetchLlmModel();
+        }
+        
+        // Target proxied vllm route
+        const response = await fetch("/vllm/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                model: activeLlmModel,
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: userMessage }
+                ],
+                temperature: 0.7,
+                max_tokens: 800
+            })
+        });
+        
+        if (!response.ok) throw new Error(`vLLM server returned status ${response.status}`);
+        
+        const data = await response.json();
+        const content = data.choices[0].message.content.trim();
+        
+        // Clean JSON formatting if LLM wrapped it in markdown code blocks
+        let cleanContent = content;
+        if (cleanContent.startsWith("```json")) {
+            cleanContent = cleanContent.substring(7);
+        } else if (cleanContent.startsWith("```")) {
+            cleanContent = cleanContent.substring(3);
+        }
+        if (cleanContent.endsWith("```")) {
+            cleanContent = cleanContent.substring(0, cleanContent.length - 3);
+        }
+        cleanContent = cleanContent.trim();
+        
+        const parsed = JSON.parse(cleanContent);
+        if (Array.isArray(parsed)) {
+            const newTopics = parsed.map(item => ({
+                phrase: item.phrase.trim(),
+                reason: item.reason.trim()
+            }));
+            
+            if (append) {
+                // Deduplicate new topics against current list just in case
+                const currentPhrases = new Set(state.brainstormTopics.map(t => t.phrase.toLowerCase()));
+                const filteredNew = newTopics.filter(t => !currentPhrases.has(t.phrase.toLowerCase()));
+                
+                state.brainstormTopics = [...state.brainstormTopics, ...filteredNew];
+            } else {
+                state.brainstormTopics = newTopics;
+            }
+            
+            localStorage.setItem("wallgarden_brainstorm_topics", JSON.stringify(state.brainstormTopics));
+        } else {
+            throw new Error("Invalid response format: expected a JSON array.");
+        }
+        showToast(append ? "💡 More topic ideas loaded!" : "💡 Fresh ideas brainstormed!", "success");
+    } catch (err) {
+        console.error("Brainstorm error:", err);
+        showToast("❌ Failed to brainstorm topics: " + err.message, "danger");
+    } finally {
+        if (scrollLoader) scrollLoader.remove();
+        state.brainstormLoading = false;
+        if (btnMore) btnMore.disabled = false;
+        if (spinner) spinner.classList.add("hidden");
+        if (btnText) btnText.textContent = "Brainstorm More";
+        updateStatusText("Ready");
+        
+        if (append) {
+            renderAppendedBrainstormTopics();
+        } else {
+            renderBrainstormView();
+        }
+    }
+}
+
+function renderBrainstormView() {
+    const grid = document.getElementById("brainstorm-grid");
+    if (!grid) return;
+    grid.innerHTML = "";
+    
+    // If empty and not currently loading, trigger automatic generation
+    if (state.brainstormTopics.length === 0 && !state.brainstormLoading) {
+        generateBrainstormTopics();
+        return;
+    }
+    
+    const fragment = document.createDocumentFragment();
+    
+    state.brainstormTopics.forEach((topic) => {
+        const card = document.createElement("div");
+        card.className = "brainstorm-card fade-in";
+        card.dataset.phrase = topic.phrase.toLowerCase().trim();
+        
+        card.innerHTML = `
+            <div class="brainstorm-topic-name">${escapeHTML(topic.phrase)}</div>
+            <div class="brainstorm-reason">${escapeHTML(topic.reason)}</div>
+            <div class="brainstorm-actions">
+                <button class="btn-vote upvote" title="Upvote Topic">👍 Upvote</button>
+                <button class="btn-vote downvote" title="Downvote Topic">👎 Downvote</button>
+            </div>
+        `;
+        
+        // Upvote click handler
+        card.querySelector(".upvote").addEventListener("click", () => {
+            voteTopic(topic.phrase, true, card);
+        });
+        
+        // Downvote click handler
+        card.querySelector(".downvote").addEventListener("click", () => {
+            voteTopic(topic.phrase, false, card);
+        });
+        
+        fragment.appendChild(card);
+    });
+    
+    grid.appendChild(fragment);
+}
+
+function renderAppendedBrainstormTopics() {
+    const grid = document.getElementById("brainstorm-grid");
+    if (!grid) return;
+    
+    // Find already rendered phrases
+    const renderedPhrases = new Set();
+    grid.querySelectorAll(".brainstorm-card").forEach(c => {
+        if (c.dataset.phrase) {
+            renderedPhrases.add(c.dataset.phrase);
+        }
+    });
+    
+    const fragment = document.createDocumentFragment();
+    
+    state.brainstormTopics.forEach((topic) => {
+        const cleanPhrase = topic.phrase.toLowerCase().trim();
+        if (!renderedPhrases.has(cleanPhrase)) {
+            const card = document.createElement("div");
+            card.className = "brainstorm-card fade-in";
+            card.dataset.phrase = cleanPhrase;
+            
+            card.innerHTML = `
+                <div class="brainstorm-topic-name">${escapeHTML(topic.phrase)}</div>
+                <div class="brainstorm-reason">${escapeHTML(topic.reason)}</div>
+                <div class="brainstorm-actions">
+                    <button class="btn-vote upvote" title="Upvote Topic">👍 Upvote</button>
+                    <button class="btn-vote downvote" title="Downvote Topic">👎 Downvote</button>
+                </div>
+            `;
+            
+            // Upvote click handler
+            card.querySelector(".upvote").addEventListener("click", () => {
+                voteTopic(topic.phrase, true, card);
+            });
+            
+            // Downvote click handler
+            card.querySelector(".downvote").addEventListener("click", () => {
+                voteTopic(topic.phrase, false, card);
+            });
+            
+            fragment.appendChild(card);
+        }
+    });
+    
+    grid.appendChild(fragment);
+}
+
+function voteTopic(phrase, isUpvote, cardElement) {
+    const cleanPhrase = phrase.toLowerCase().trim();
+    
+    // Save to state.topics
+    const weight = isUpvote ? 5 : -10;
+    const existingIdx = state.topics.findIndex(t => t.phrase === cleanPhrase);
+    if (existingIdx !== -1) {
+        state.topics[existingIdx].weight = weight;
+    } else {
+        state.topics.push({ phrase: cleanPhrase, weight });
+    }
+    saveTopics();
+    renderSidebarTopics();
+    
+    // Remove from in-memory brainstorm list
+    state.brainstormTopics = state.brainstormTopics.filter(t => t.phrase.toLowerCase().trim() !== cleanPhrase);
+    localStorage.setItem("wallgarden_brainstorm_topics", JSON.stringify(state.brainstormTopics));
+    
+    // Perform card exit animation
+    const animClass = isUpvote ? "fade-out-upvote" : "fade-out-downvote";
+    cardElement.classList.add(animClass);
+    
+    showToast(isUpvote ? `👍 Added topic "${phrase}"` : `👎 Muted topic "${phrase}"`, isUpvote ? "success" : "danger");
+    
+    setTimeout(() => {
+        cardElement.remove();
+        // If all cards voted, brainstorm more automatically
+        if (state.brainstormTopics.length === 0) {
+            generateBrainstormTopics();
+        }
+    }, 400);
+}

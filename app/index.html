@@ -27,6 +27,10 @@
                     <span class="nav-icon">⭐</span>
                     <span class="nav-label">High Priority</span>
                 </button>
+                <button class="nav-item" data-view="ai-brainstorm">
+                    <span class="nav-icon">💡</span>
+                    <span class="nav-label">AI Brainstorm</span>
+                </button>
                 
                 <div class="nav-divider">Topics</div>
                 <div id="dynamic-topic-tabs" class="topic-tabs-container">
@@ -81,6 +85,21 @@
                 <div id="video-grid" class="video-grid">
                     <!-- Cards injected dynamically -->
                 </div>
+
+                <!-- AI Topic Brainstorming View -->
+                <div id="ai-brainstorm-container" class="ai-brainstorm-container hidden">
+                    <div class="brainstorm-intro">
+                        <p>Generate fresh content ideas tailored to your preferences. The AI learns from your upvotes/downvotes and search history.</p>
+                        <button id="btn-brainstorm-more" class="btn btn-primary">
+                            <span class="btn-text">Brainstorm More</span>
+                            <span class="brainstorm-spinner hidden">🔄</span>
+                        </button>
+                    </div>
+                    <div id="brainstorm-grid" class="brainstorm-grid">
+                        <!-- Brainstormed topic cards injected dynamically -->
+                    </div>
+                </div>
+
                 <div id="empty-state" class="empty-state hidden">
                     <div class="empty-icon">🌾</div>
                     <h3>No videos found</h3>
