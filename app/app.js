@@ -920,7 +920,7 @@ function renderCard(video, targetContainer) {
                 <div class="play-icon-circle">▶</div>
             </div>
             <div class="score-badge ${scoreClass}">★ ${video.score}</div>
-            ${video.isDiscover ? `<div class="search-badge">🔍 Search</div>` : (categoryText ? `<div class="category-badge">${categoryText}</div>` : "")}
+            ${video.isDiscover && video.discoveryTopic ? `<div class="category-badge" style="background:var(--accent);color:var(--bg)">✨ ${capitalizePhrase(video.discoveryTopic)}</div>` : (video.isDiscover ? `<div class="search-badge">🔍 Search</div>` : (categoryText ? `<div class="category-badge">${categoryText}</div>` : ""))}
             <button class="card-action-btn" title="Actions">⋮</button>
         </div>
         <div class="card-details">
@@ -2107,7 +2107,7 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
         
         // Target proxied vllm route
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 90000);
+        const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minutes for slower LLMs
         const response = await fetch("/vllm/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -2477,19 +2477,19 @@ async function fetchVideosForTopic(topic) {
 async function fillSmartFeedPreloadBuffer() {
     if (state.smartFeedPreloadLoading) return;
     
-    const targetPreloadCount = 10;
+    // We keep a larger buffer (e.g. 50) so we can randomly mix topics in loadNextSmartFeedBatch
+    const targetPreloadCount = 50;
     if (state.smartFeedPreloadedVideos.length >= targetPreloadCount) {
-        return; // Preload buffer is already full
+        return; // Preload buffer is full
     }
     
     // Check if we need to brainstorm more topics using LLM
-    // Total upcoming topics = queue length + preloaded buffer length
-    const totalUpcoming = state.smartFeedTopicsQueue.length + state.smartFeedPreloadedVideos.length;
+    const totalUpcoming = state.smartFeedTopicsQueue.length;
     const now = Date.now();
     const cooldownMs = 60000; // 60-second cooldown
     const isCooldownActive = state.lastBrainstormTime && (now - state.lastBrainstormTime < cooldownMs);
 
-    if (totalUpcoming < 12 && !state.brainstormLoading && !isCooldownActive) {
+    if (totalUpcoming < 5 && !state.brainstormLoading && !isCooldownActive) {
         console.log("[Smart Feed] Total upcoming topics low, triggering background LLM brainstorm...");
         generateBrainstormTopics(true).then(() => {
             fillSmartFeedPreloadBuffer();
@@ -2517,8 +2517,12 @@ async function fillSmartFeedPreloadBuffer() {
     try {
         const videos = await fetchVideosForTopic(topic);
         if (videos && videos.length > 0) {
-            state.smartFeedPreloadedVideos.push({ topic, videos });
-            console.log(`[Smart Feed Preload] Successfully preloaded topic "${topic}" with ${videos.length} videos. Buffer size: ${state.smartFeedPreloadedVideos.length}`);
+            videos.forEach(v => v._topic = topic);
+            state.smartFeedPreloadedVideos.push(...videos);
+            // Shuffle to mix topics seamlessly
+            state.smartFeedPreloadedVideos.sort(() => Math.random() - 0.5);
+            
+            console.log(`[Smart Feed Preload] Successfully preloaded topic "${topic}". Buffer size: ${state.smartFeedPreloadedVideos.length}`);
             
             // If the Smart Feed currently has no discovery videos rendered, and the user is waiting,
             // we should instantly render this newly loaded batch!
@@ -2552,15 +2556,21 @@ async function loadNextSmartFeedBatch() {
     
     // Check if we have preloaded content in the buffer
     if (state.smartFeedPreloadedVideos.length > 0) {
-        const item = state.smartFeedPreloadedVideos.shift();
-        const { topic, videos } = item;
+        // Take a batch of 12 mixed videos
+        const batchSize = Math.min(12, state.smartFeedPreloadedVideos.length);
+        const videosToRender = state.smartFeedPreloadedVideos.splice(0, batchSize);
         
         const existingIds = new Set(state.smartFeedVideos.map(v => v.id));
-        const deduplicated = videos.filter(v => !existingIds.has(v.id));
+        const deduplicated = videosToRender.filter(v => !existingIds.has(v.id));
         
         if (deduplicated.length > 0) {
             state.smartFeedVideos.push(...deduplicated);
-            appendSmartFeedSection(topic, deduplicated);
+            
+            const fragment = document.createDocumentFragment();
+            deduplicated.forEach(video => {
+                renderCard(video, fragment);
+            });
+            grid.appendChild(fragment);
         }
         
         state.smartFeedLoading = false;
@@ -2615,8 +2625,14 @@ async function loadNextSmartFeedBatch() {
         const deduplicated = videos.filter(v => !existingIds.has(v.id));
         
         if (deduplicated.length > 0) {
+            deduplicated.forEach(v => v._topic = topic);
             state.smartFeedVideos.push(...deduplicated);
-            appendSmartFeedSection(topic, deduplicated);
+            
+            const fragment = document.createDocumentFragment();
+            deduplicated.forEach(video => {
+                renderCard(video, fragment);
+            });
+            grid.appendChild(fragment);
         }
     } catch (err) {
         console.error(`[Smart Feed] Fallback fetch failed for "${topic}":`, err);
@@ -2629,58 +2645,6 @@ async function loadNextSmartFeedBatch() {
         
         fillSmartFeedPreloadBuffer();
     }
-}
-
-function appendSmartFeedSection(topic, videos) {
-    const grid = document.getElementById("video-grid");
-    if (!grid) return;
-    
-    const divider = document.createElement("div");
-    divider.className = "discover-section-header fade-in";
-    divider.style.gridColumn = "1 / -1";
-    divider.style.marginTop = "2.5rem";
-    divider.style.marginBottom = "1rem";
-    divider.style.display = "flex";
-    divider.style.alignItems = "center";
-    divider.style.justifyContent = "space-between";
-    divider.style.borderBottom = "1px solid var(--card-border)";
-    divider.style.paddingBottom = "0.5rem";
-    
-    const normalizedTopic = topic.trim().toLowerCase();
-    divider.setAttribute("data-discover-topic", normalizedTopic);
-    
-    divider.innerHTML = `
-        <h2 class="discover-section-title" style="font-size: 1.1rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
-            <span>🔍 Discover:</span>
-            <span class="discover-topic-text" style="color: var(--accent);">${escapeHTML(capitalizePhrase(topic))}</span>
-            <div class="discover-topic-actions">
-                <button class="discover-action-btn edit-btn" title="Edit Topic" data-topic="${escapeHTML(normalizedTopic)}">✏️</button>
-                <button class="discover-action-btn remove-btn" title="Remove Topic" data-topic="${escapeHTML(normalizedTopic)}">✕</button>
-            </div>
-        </h2>
-        <span class="discover-badge" style="font-size: 0.7rem; opacity: 0.6;">Smart Feed Suggestion</span>
-    `;
-    grid.appendChild(divider);
-    
-    // Bind listeners
-    divider.querySelector(".edit-btn").addEventListener("click", (e) => {
-        e.stopPropagation();
-        editDiscoverTopic(normalizedTopic);
-    });
-    divider.querySelector(".remove-btn").addEventListener("click", (e) => {
-        e.stopPropagation();
-        nukeDiscoverTopic(normalizedTopic);
-    });
-    
-    const fragment = document.createDocumentFragment();
-    videos.forEach(video => {
-        renderCard(video, fragment);
-        const card = fragment.lastElementChild;
-        if (card) {
-            card.setAttribute("data-discover-topic", normalizedTopic);
-        }
-    });
-    grid.appendChild(fragment);
 }
 
 // Mute and remove a discovery topic completely
