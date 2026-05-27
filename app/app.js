@@ -2000,6 +2000,7 @@ To help the user discover new content and prevent feedback bubble overfitting, y
 3. **Surprise Explorations (2-3 topics)**: Generate subjects that are completely uncorrelated to any topics on their liked or disliked lists to surprise them and break the bubble.
 
 Guidelines:
+- Keep your reasoning/thinking process extremely brief and concise (under 2-3 sentences if possible).
 - Generate exactly 8-10 diverse topics.
 - Keep them short (1-3 words maximum, e.g. "Docker Containers", "Quantum Computing").
 - Explain the reason for recommending each topic in a brief sentence, referencing the category mix rules (e.g., "Niche expansion based on coding", "Contrasting alternative to gossip", "Surprise exploration of new domains").
@@ -2090,14 +2091,32 @@ Please brainstorm 8-10 new topics that fit this profile. Return ONLY JSON.`;
                     { role: "user", content: userMessage }
                 ],
                 temperature: 0.7,
-                max_tokens: 800
+                max_tokens: 4096
             })
         });
         
         if (!response.ok) throw new Error(`vLLM server returned status ${response.status}`);
         
         const data = await response.json();
-        const content = data.choices[0].message.content.trim();
+        const message = data.choices?.[0]?.message;
+        if (!message) throw new Error("No message returned from vLLM server.");
+        
+        let content = message.content;
+        if (content === null || content === undefined) {
+            // Check if JSON array was returned inside reasoning block due to model cutoff or formatting
+            if (message.reasoning) {
+                const jsonMatch = message.reasoning.match(/\[\s*\{[\s\S]*\}\s*\]/);
+                if (jsonMatch) {
+                    content = jsonMatch[0];
+                }
+            }
+        }
+        
+        if (!content) {
+            throw new Error("vLLM server returned empty content. Try again.");
+        }
+        
+        content = content.trim();
         
         // Clean JSON formatting if LLM wrapped it in markdown code blocks
         let cleanContent = content;

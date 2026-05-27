@@ -14,7 +14,7 @@
     --score-mid: #60A5FA;
     --score-low: #F87171;
 
-    --font-stack: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    --font-stack: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 }
 
 * {
@@ -100,27 +100,26 @@ body {
     align-items: center;
     gap: 0.85rem;
     padding: 0.75rem 1rem;
-    border-radius: 10px;
+    border-radius: 4px;
     font-family: var(--font-stack);
     font-size: 0.95rem;
     font-weight: 500;
     cursor: pointer;
     text-align: left;
-    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: all 0.2s ease;
 }
 
 .nav-item:hover {
     background: rgba(255, 255, 255, 0.04);
     color: var(--text-primary);
-    transform: translateX(4px);
 }
 
 .nav-item.active {
-    background: rgba(74, 222, 128, 0.08);
+    background: rgba(74, 222, 128, 0.06);
     color: var(--accent);
-    border-left: 3px solid var(--accent);
-    border-radius: 4px 10px 10px 4px;
-    padding-left: calc(1rem - 3px);
+    font-weight: 600;
+    border-radius: 4px;
+    padding-left: 1rem;
 }
 
 .nav-icon {
@@ -150,7 +149,7 @@ body {
     border: 1px solid var(--card-border);
     color: var(--text-secondary);
     padding: 0.75rem;
-    border-radius: 10px;
+    border-radius: 4px;
     font-family: var(--font-stack);
     font-size: 0.9rem;
     font-weight: 500;
@@ -162,7 +161,7 @@ body {
 
 .btn-sidebar:hover {
     background: rgba(255, 255, 255, 0.08);
-    border-color: var(--accent);
+    border-color: rgba(255, 255, 255, 0.2);
     color: var(--text-primary);
 }
 
@@ -207,7 +206,7 @@ body {
     align-items: center;
     background: rgba(0, 0, 0, 0.35);
     border: 1px solid var(--card-border);
-    border-radius: 8px;
+    border-radius: 4px;
     padding: 0 0.75rem;
     width: 320px;
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -304,7 +303,7 @@ body {
 .video-card {
     background: var(--card-bg);
     border: 1px solid var(--card-border);
-    border-radius: 16px;
+    border-radius: 6px;
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -474,15 +473,15 @@ body {
     align-items: center;
     justify-content: center;
     gap: 0.5rem;
-    border: none;
+    border: 1px solid transparent;
     outline: none;
     font-family: var(--font-stack);
     font-size: 0.9rem;
     font-weight: 600;
     padding: 0.65rem 1.25rem;
-    border-radius: 8px;
+    border-radius: 4px;
     cursor: pointer;
-    transition: all 0.25s ease;
+    transition: all 0.2s ease;
 }
 
 .btn-primary {
@@ -492,18 +491,18 @@ body {
 
 .btn-primary:hover {
     background: #6EE7A0;
-    box-shadow: 0 4px 15px var(--accent-glow);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 .btn-secondary {
-    background: rgba(255, 255, 255, 0.05);
+    background: rgba(255, 255, 255, 0.04);
     border: 1px solid var(--card-border);
     color: var(--text-primary);
 }
 
 .btn-secondary:hover {
-    background: rgba(255, 255, 255, 0.1);
-    border-color: var(--accent);
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.2);
 }
 
 .btn-danger {
@@ -513,13 +512,13 @@ body {
 
 .btn-danger:hover {
     background: #F87171;
-    box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 .btn-sm {
     padding: 0.4rem 0.8rem;
     font-size: 0.8rem;
-    border-radius: 6px;
+    border-radius: 4px;
 }
 
 .btn-icon-only {
@@ -562,13 +561,13 @@ body {
     position: absolute;
     top: 2rem;
     right: 2rem;
-    background: rgba(255, 255, 255, 0.06);
+    background: rgba(255, 255, 255, 0.05);
     border: 1px solid var(--card-border);
-    color: var(--text-primary);
-    width: 48px;
-    height: 48px;
-    border-radius: 50%;
-    font-size: 1.25rem;
+    color: var(--text-secondary);
+    width: 40px;
+    height: 40px;
+    border-radius: 4px;
+    font-size: 1rem;
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -577,9 +576,9 @@ body {
 }
 
 .modal-close:hover {
-    background: var(--accent);
-    color: #000;
-    transform: rotate(90deg);
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.2);
+    color: var(--text-primary);
 }
 
 /* Player Modal Overlay */
@@ -595,7 +594,7 @@ body {
     position: relative;
     padding-bottom: 56.25%; /* 16:9 */
     height: 0;
-    border-radius: 20px;
+    border-radius: 6px;
     overflow: hidden;
     border: 1px solid var(--card-border);
     box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8);
@@ -625,7 +624,7 @@ body {
     height: 80vh;
     background: var(--bg-secondary);
     border: 1px solid var(--card-border);
-    border-radius: 24px;
+    border-radius: 8px;
     display: flex;
     flex-direction: column;
     box-shadow: 0 25px 60px rgba(0, 0, 0, 0.6);
@@ -668,39 +667,34 @@ body {
 /* Tabs Bar */
 .settings-tabs {
     display: flex;
+    gap: 0.25rem;
     border-bottom: 1px solid var(--card-border);
-    background: rgba(0, 0, 0, 0.2);
-    padding: 0 1rem;
+    background: rgba(0, 0, 0, 0.15);
+    padding: 0.5rem 1rem;
 }
 
 .tab-btn {
     background: transparent;
     border: none;
     outline: none;
-    color: var(--text-muted);
+    color: var(--text-secondary);
     font-family: var(--font-stack);
-    font-size: 0.9rem;
+    font-size: 0.85rem;
     font-weight: 600;
-    padding: 1rem 1.25rem;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
     cursor: pointer;
-    position: relative;
+    transition: all 0.2s ease;
 }
 
 .tab-btn:hover {
+    background: rgba(255, 255, 255, 0.04);
     color: var(--text-primary);
 }
 
 .tab-btn.active {
+    background: rgba(74, 222, 128, 0.08);
     color: var(--accent);
-}
-
-.tab-btn.active::after {
-    content: '';
-    position: absolute;
-    bottom: -1px; left: 0; right: 0;
-    height: 2px;
-    background: var(--accent);
-    box-shadow: 0 0 10px var(--accent);
 }
 
 /* Tab Panel Content */
@@ -747,7 +741,7 @@ body {
     flex: 1;
     background: rgba(0, 0, 0, 0.3);
     border: 1px solid var(--card-border);
-    border-radius: 8px;
+    border-radius: 4px;
     color: var(--text-primary);
     padding: 0.75rem;
     font-family: var(--font-stack);
@@ -769,7 +763,7 @@ body {
 .opml-import-area {
     background: rgba(255, 255, 255, 0.02);
     border: 1px dashed var(--card-border);
-    border-radius: 12px;
+    border-radius: 6px;
     padding: 1.5rem;
     margin-bottom: 2rem;
 }
@@ -788,7 +782,7 @@ body {
 .file-drop-zone {
     border: 1px dashed var(--card-border);
     background: rgba(0, 0, 0, 0.2);
-    border-radius: 8px;
+    border-radius: 4px;
     padding: 1.5rem;
     text-align: center;
     cursor: pointer;
@@ -824,7 +818,7 @@ body {
     max-height: 250px;
     overflow-y: auto;
     border: 1px solid var(--card-border);
-    border-radius: 10px;
+    border-radius: 6px;
     padding: 0.5rem;
     background: rgba(0, 0, 0, 0.1);
 }
@@ -835,7 +829,7 @@ body {
     align-items: center;
     background: rgba(255, 255, 255, 0.02);
     padding: 0.6rem 0.85rem;
-    border-radius: 6px;
+    border-radius: 4px;
     border: 1px solid transparent;
 }
 
@@ -881,7 +875,7 @@ body {
 .topic-inputs-row select {
     background: rgba(0, 0, 0, 0.3);
     border: 1px solid var(--card-border);
-    border-radius: 8px;
+    border-radius: 4px;
     color: var(--text-primary);
     padding: 0.75rem;
     font-family: var(--font-stack);
@@ -896,7 +890,7 @@ body {
     overflow-y: auto;
     background: rgba(0, 0, 0, 0.1);
     border: 1px solid var(--card-border);
-    border-radius: 10px;
+    border-radius: 6px;
     padding: 0.5rem;
 }
 
@@ -906,7 +900,7 @@ body {
     align-items: center;
     background: rgba(255, 255, 255, 0.02);
     padding: 0.65rem 1rem;
-    border-radius: 6px;
+    border-radius: 4px;
     border: 1px solid transparent;
 }
 
@@ -974,7 +968,7 @@ body {
 
 ::-webkit-scrollbar-thumb {
     background: var(--card-border);
-    border-radius: 10px;
+    border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -985,7 +979,7 @@ body {
 .search-results-container {
     background: rgba(0, 0, 0, 0.25);
     border: 1px solid var(--card-border);
-    border-radius: 12px;
+    border-radius: 6px;
     padding: 1rem;
     margin-top: 1rem;
     margin-bottom: 1.5rem;
@@ -1041,7 +1035,7 @@ body {
     align-items: center;
     background: rgba(255, 255, 255, 0.02);
     padding: 0.5rem 0.75rem;
-    border-radius: 6px;
+    border-radius: 4px;
     border: 1px solid transparent;
 }
 
@@ -1082,7 +1076,6 @@ body {
 
 .btn-add-search-result:hover {
     background: #6EE7A0;
-    box-shadow: 0 2px 8px var(--accent-glow);
 }
 
 .btn-add-search-result:disabled {
@@ -1271,7 +1264,7 @@ body {
     background: rgba(10, 10, 10, 0.7);
     backdrop-filter: blur(4px);
     border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 6px;
+    border-radius: 4px;
     color: #A0A0A0;
     font-size: 1rem;
     cursor: pointer;
@@ -1300,7 +1293,7 @@ body {
     right: 0.5rem;
     background: #1A1A1A;
     border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
+    border-radius: 4px;
     overflow: hidden;
     z-index: 10;
     min-width: 180px;
@@ -1362,7 +1355,7 @@ body {
     border: 1px solid rgba(255, 255, 255, 0.1);
     color: var(--text-primary);
     padding: 0.65rem 1.25rem;
-    border-radius: 8px;
+    border-radius: 4px;
     font-family: var(--font-stack);
     font-size: 0.85rem;
     font-weight: 500;
@@ -1471,7 +1464,7 @@ body {
     border: 1px solid var(--card-border);
     backdrop-filter: blur(12px);
     padding: 1.25rem 1.75rem;
-    border-radius: 16px;
+    border-radius: 6px;
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -1496,7 +1489,7 @@ body {
     background: rgba(26, 26, 26, 0.6);
     border: 1px solid var(--card-border);
     backdrop-filter: blur(12px);
-    border-radius: 16px;
+    border-radius: 6px;
     padding: 1.5rem;
     display: flex;
     flex-direction: column;
@@ -1553,7 +1546,7 @@ body {
     border: 1px solid var(--card-border);
     color: var(--text-secondary);
     padding: 0.5rem 1rem;
-    border-radius: 8px;
+    border-radius: 4px;
     font-family: var(--font-stack);
     font-size: 0.85rem;
     font-weight: 600;
@@ -1565,14 +1558,12 @@ body {
     background: rgba(74, 222, 128, 0.1);
     border-color: var(--accent);
     color: var(--accent);
-    box-shadow: 0 0 8px rgba(74, 222, 128, 0.15);
 }
 
 .btn-vote.downvote:hover {
     background: rgba(248, 113, 113, 0.1);
     border-color: #F87171;
     color: #F87171;
-    box-shadow: 0 0 8px rgba(248, 113, 113, 0.15);
 }
 
 /* Animations */
