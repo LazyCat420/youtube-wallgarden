@@ -1016,18 +1016,21 @@ function renderFeed() {
     allVideos.slice(0, 120).forEach(video => renderCard(video, grid));
     
     // Render Discover section
-    if (isTopicView && discoverVideos.length > 0) {
+    if ((isTopicView || isSearchView) && discoverVideos.length > 0) {
         const divider = document.createElement("div");
         divider.className = "discover-section-header";
+        const titleText = isTopicView 
+            ? `🔍 Discover More on "${capitalizePhrase(activeTopic)}"`
+            : `🔍 Public Search Results for "${capitalizePhrase(searchQuery)}"`;
         divider.innerHTML = `
-            <h2 class="discover-section-title">🔍 Discover More on "${capitalizePhrase(activeTopic)}"</h2>
+            <h2 class="discover-section-title">${titleText}</h2>
             <span class="discover-badge">YouTube Public Search</span>
         `;
         grid.appendChild(divider);
         
         // Render Discover videos (capped at 30)
         const discoverSlice = discoverVideos.slice(0, 30);
-        if (topicSearchLoading[activeTopic]) {
+        if (topicSearchLoading[queryTerm]) {
             // If currently streaming, render already-loaded ones instantly (no timeout) to avoid resetting animations
             discoverSlice.forEach(video => renderCard(video, grid));
         } else {
@@ -1346,9 +1349,10 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
 
                                 sessionTopicSearchCache[topicPhrase].push(video);
 
-                                // Append directly if the user is still looking at this topic
+                                // Append directly if the user is still looking at this topic or search
                                 const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
-                                if (currentActiveTopic === topicPhrase) {
+                                const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
+                                if (currentActiveTopic === topicPhrase || currentActiveSearch === topicPhrase) {
                                     appendStreamedDiscoverVideo(video, topicPhrase);
                                 }
                             } catch (e) {
@@ -1364,7 +1368,8 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
                 
                 // Do a final sort/render to keep it fully aligned and clean
                 const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
-                if (currentActiveTopic === topicPhrase) {
+                const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
+                if (currentActiveTopic === topicPhrase || currentActiveSearch === topicPhrase) {
                     renderFeed();
                 }
             } else {
@@ -1566,8 +1571,12 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         if (!divider) {
             divider = document.createElement("div");
             divider.className = "discover-section-header";
+            const isSearch = state.currentView.startsWith("search_");
+            const titleText = isSearch
+                ? `🔍 Public Search Results for "${capitalizePhrase(topicPhrase)}"`
+                : `🔍 Discover More on "${capitalizePhrase(topicPhrase)}"`;
             divider.innerHTML = `
-                <h2 class="discover-section-title">🔍 Discover More on "${capitalizePhrase(topicPhrase)}"</h2>
+                <h2 class="discover-section-title">${titleText}</h2>
                 <span class="discover-badge">YouTube Public Search</span>
             `;
             grid.appendChild(divider);
