@@ -639,8 +639,12 @@ async function syncFeeds() {
         return;
     }
 
-    // Clear session topic search cache on sync to fetch fresh results next time
-    sessionTopicSearchCache = {};
+    // Clear session topic search cache on sync to fetch fresh results next time, but preserve currently loading ones
+    for (const key in sessionTopicSearchCache) {
+        if (!topicSearchLoading[key]) {
+            delete sessionTopicSearchCache[key];
+        }
+    }
 
     const btnSync = document.getElementById("btn-sync-now");
     btnSync.classList.add("spinning");
@@ -892,7 +896,7 @@ function renderFeed() {
     
     // Topic/Search Discovery Logic
     let discoverVideos = [];
-    const queryTerm = isTopicView ? activeTopic : searchQuery;
+    const queryTerm = (isTopicView ? activeTopic : searchQuery).toLowerCase();
     if (isTopicView || isSearchView) {
         // Trigger background search if not cached yet
         if (sessionTopicSearchCache[queryTerm] === undefined && !topicSearchLoading[queryTerm]) {
@@ -1286,8 +1290,9 @@ function updateStatusText(text) {
 
 // Fetch general YouTube search results for a topic in the background (CORS bypassed)
 async function fetchTopicSearchDiscovery(topicPhrase) {
-    if (topicSearchLoading[topicPhrase]) return;
-    topicSearchLoading[topicPhrase] = true;
+    const cacheKey = topicPhrase.toLowerCase();
+    if (topicSearchLoading[cacheKey]) return;
+    topicSearchLoading[cacheKey] = true;
     
     updateStatusText(`Searching YouTube for "${topicPhrase}"...`);
     
@@ -1312,7 +1317,7 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
                 })
             });
             if (resp.ok) {
-                sessionTopicSearchCache[topicPhrase] = [];
+                sessionTopicSearchCache[cacheKey] = [];
                 success = true;
 
                 const reader = resp.body.getReader();
@@ -1347,12 +1352,15 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
                                     isDiscover: true
                                 };
 
-                                sessionTopicSearchCache[topicPhrase].push(video);
+                                if (!sessionTopicSearchCache[cacheKey]) {
+                                    sessionTopicSearchCache[cacheKey] = [];
+                                }
+                                sessionTopicSearchCache[cacheKey].push(video);
 
                                 // Append directly if the user is still looking at this topic or search
                                 const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
                                 const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
-                                if (currentActiveTopic === topicPhrase || currentActiveSearch === topicPhrase) {
+                                if (currentActiveTopic === cacheKey || currentActiveSearch === cacheKey) {
                                     appendStreamedDiscoverVideo(video, topicPhrase);
                                 }
                             } catch (e) {
@@ -1364,12 +1372,12 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
 
                 // Stream ended, update status
                 updateStatusText("Ready");
-                topicSearchLoading[topicPhrase] = false;
+                topicSearchLoading[cacheKey] = false;
                 
                 // Do a final sort/render to keep it fully aligned and clean
                 const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
                 const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
-                if (currentActiveTopic === topicPhrase || currentActiveSearch === topicPhrase) {
+                if (currentActiveTopic === cacheKey || currentActiveSearch === cacheKey) {
                     renderFeed();
                 }
             } else {
@@ -1494,9 +1502,9 @@ async function fetchTopicSearchDiscovery(topicPhrase) {
         }
     }
 
-    sessionTopicSearchCache[topicPhrase] = videos;
+    sessionTopicSearchCache[cacheKey] = videos;
     updateStatusText("Ready");
-    topicSearchLoading[topicPhrase] = false;
+    topicSearchLoading[cacheKey] = false;
     renderFeed();
 }
 
