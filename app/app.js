@@ -2205,11 +2205,41 @@ function parseLlmJsonResponse(content) {
 // AI Topic Brainstorming Features
 let activeLlmModel = "default-model";
 
-const systemPrompt = `/no_think
-You are a topic brainstorming assistant. Given the user's current topics, suggest 5 new related topics.
-Output ONLY a valid JSON object. No explanation, no preamble, no markdown.
-Schema: {"topics":[{"phrase":"1-3 word topic","category":"similar","reason":"why","associated_with":"existing topic"}]}
-Example output: {"topics":[{"phrase":"container orchestration","category":"sub_category","reason":"relates to docker","associated_with":"docker"}]}`;
+// Tool definition for structured topic generation (agentic harness)
+const TOPIC_TOOL_DEFINITION = {
+    type: "function",
+    function: {
+        name: "suggest_topics",
+        description: "Suggest new topics related to the user's interest graph. Each topic should be 1-3 words.",
+        parameters: {
+            type: "object",
+            properties: {
+                topics: {
+                    type: "array",
+                    items: {
+                        type: "object",
+                        properties: {
+                            phrase: { type: "string", description: "1-3 word topic name, e.g. 'container orchestration'" },
+                            category: { type: "string", enum: ["sub_category", "similar", "interesting_tangent", "unrelated_but_interesting"] },
+                            reason: { type: "string", description: "Short explanation of why this topic is suggested" },
+                            associated_with: { type: "string", description: "Existing topic this connects to" }
+                        },
+                        required: ["phrase", "category", "reason", "associated_with"]
+                    },
+                    minItems: 5,
+                    maxItems: 5
+                }
+            },
+            required: ["topics"]
+        }
+    }
+};
+
+const BRAINSTORM_SYSTEM_PROMPT = `/no_think
+You are a topic brainstorming assistant. Call the suggest_topics tool with 5 new topics related to the user's interests.`;
+
+const SIMILAR_SYSTEM_PROMPT = `/no_think
+You are a search query assistant. Call the suggest_topics tool with 5 topics related to the user's search query.`;
 
 async function fetchLlmModel() {
     try {
@@ -2226,6 +2256,52 @@ async function fetchLlmModel() {
     }
 }
 
+// Extract topics from a vLLM response — supports tool_calls (preferred) and text fallback
+function extractTopicsFromLlmResponse(message) {
+    // 1. Try tool_calls first (structured output from agentic harness)
+    if (message.tool_calls && message.tool_calls.length > 0) {
+        for (const tc of message.tool_calls) {
+            try {
+                const args = typeof tc.function.arguments === "string"
+                    ? JSON.parse(tc.function.arguments)
+                    : tc.function.arguments;
+                if (args && Array.isArray(args.topics)) {
+                    console.log("[Smart Feed] Extracted topics via tool_calls:", args.topics.length);
+                    return args.topics;
+                }
+            } catch (e) {
+                console.warn("[Smart Feed] Failed to parse tool_call arguments:", e, tc.function?.arguments);
+            }
+        }
+    }
+    
+    // 2. Fallback to text content parsing
+    let content = message.content;
+    if (content === null || content === undefined || (typeof content === "string" && content.trim() === "")) {
+        const reasoning = message.reasoning || message.reasoning_content;
+        if (reasoning) content = reasoning;
+    }
+    
+    if (!content) {
+        console.warn("[Smart Feed DEBUG] No content in message:", JSON.stringify(message).substring(0, 500));
+        return [];
+    }
+    
+    console.log("[Smart Feed DEBUG] Raw vLLM content (first 500 chars):", content.substring(0, 500));
+    
+    const parsed = parseLlmJsonResponse(content);
+    if (!parsed) {
+        console.error("[Smart Feed DEBUG] JSON parsing failed entirely. Full content:", content);
+        return [];
+    }
+    
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && Array.isArray(parsed.topics)) return parsed.topics;
+    
+    console.warn("[Smart Feed DEBUG] Parsed object has no topics array:", parsed);
+    return [];
+}
+
 async function generateBrainstormTopics(append, numRequests = 1) {
     append = append || false;
     if (state.brainstormLoading) return;
@@ -2234,21 +2310,19 @@ async function generateBrainstormTopics(append, numRequests = 1) {
     
     console.log(`[Smart Feed] Background LLM brainstorming started (firing ${numRequests} parallel requests)...`);
     
-    // Construct user profile message
-    const liked = state.topics.filter(t => t.weight > 0).map(t => `${t.phrase} (weight: ${t.weight})`).join(", ");
-    const disliked = state.topics.filter(t => t.weight < 0).map(t => `${t.phrase} (weight: ${t.weight})`).join(", ");
-    const searches = state.searchHistory.join(", ");
-    const currentQueue = state.smartFeedTopicsQueue.join(", ");
-    const usedTopics = state.smartFeedUsedTopics.join(", ");
+    // Truncated context: top 15 highest-weight topics, last 20 used
+    const likedAll = state.topics.filter(t => t.weight > 0).sort((a, b) => b.weight - a.weight);
+    const liked = likedAll.slice(0, 15).map(t => t.phrase).join(", ");
+    const disliked = state.topics.filter(t => t.weight < 0).slice(0, 10).map(t => t.phrase).join(", ");
+    const searches = state.searchHistory.slice(-10).join(", ");
+    const recentUsed = state.smartFeedUsedTopics.slice(-20).join(", ");
     
-    const userMessage = `Current Conceptual Node Graph:
-- Existing Topic Nodes: [${liked}]
-- Disliked/Excluded Nodes: [${disliked}]
-- Exploration History: [${searches}]
-- Currently Queued Nodes (Do not duplicate): [${currentQueue}]
-- Already Visited/Used Nodes (Do not duplicate): [${usedTopics}]
+    const userMessage = `My interests: [${liked}]
+Disliked: [${disliked}]
+Recent searches: [${searches}]
+Recently used (avoid these): [${recentUsed}]
 
-Please brainstorm 5 new nodes that connect to or expand from the existing nodes in the graph, without duplicating any.`;
+Suggest 5 new topics.`;
 
     const MAX_RETRIES = 2;
     let attempt = 0;
@@ -2276,17 +2350,22 @@ Please brainstorm 5 new nodes that connect to or expand from the existing nodes 
                     body: JSON.stringify({
                         model: activeLlmModel,
                         messages: [
-                            { role: "system", content: systemPrompt },
+                            { role: "system", content: BRAINSTORM_SYSTEM_PROMPT },
                             { role: "user", content: userMessage }
                         ],
-                        temperature: 0.1 + (attempt * 0.1),
+                        tools: [TOPIC_TOOL_DEFINITION],
+                        tool_choice: { type: "function", function: { name: "suggest_topics" } },
+                        temperature: 0.1 + (attempt * 0.15),
                         max_tokens: 1500,
                         chat_template_kwargs: { "enable_thinking": false }
                     }),
                     signal: controller.signal
                 }).then(async (res) => {
                     clearTimeout(timeoutId);
-                    if (!res.ok) throw new Error(`vLLM server returned status ${res.status}`);
+                    if (!res.ok) {
+                        const body = await res.text().catch(() => "");
+                        throw new Error(`vLLM returned ${res.status}: ${body.substring(0, 200)}`);
+                    }
                     return res.json();
                 });
                 fetchPromises.push(req);
@@ -2302,27 +2381,12 @@ Please brainstorm 5 new nodes that connect to or expand from the existing nodes 
                 
                 const data = result.value;
                 const message = data.choices?.[0]?.message;
-                if (!message) continue;
-                
-                let content = message.content;
-                if (content === null || content === undefined || content.trim() === "") {
-                    const reasoning = message.reasoning || message.reasoning_content;
-                    if (reasoning) {
-                        content = reasoning;
-                    }
+                if (!message) {
+                    console.warn("[Smart Feed DEBUG] No message in response:", JSON.stringify(data).substring(0, 300));
+                    continue;
                 }
                 
-                if (!content) continue;
-                
-                const parsed = parseLlmJsonResponse(content);
-                if (!parsed) continue;
-                
-                let topicsArray = [];
-                if (Array.isArray(parsed)) {
-                    topicsArray = parsed;
-                } else if (parsed && Array.isArray(parsed.topics)) {
-                    topicsArray = parsed.topics;
-                }
+                const topicsArray = extractTopicsFromLlmResponse(message);
                 
                 topicsArray.forEach(item => {
                     const phrase = (item.phrase || item.topic || item.keyword || "")?.trim().toLowerCase();
@@ -2371,25 +2435,17 @@ async function generateSimilarTopicsFromSearch(searchQuery) {
     if (!searchQuery) return;
     console.log(`[Smart Feed] Background similar topics generation started for query: "${searchQuery}"`);
     
-    const liked = state.topics.filter(t => t.weight > 0).map(t => `${t.phrase} (weight: ${t.weight})`).join(", ");
-    const disliked = state.topics.filter(t => t.weight < 0).map(t => `${t.phrase} (weight: ${t.weight})`).join(", ");
-    const currentQueue = state.smartFeedTopicsQueue.join(", ");
-    const usedTopics = state.smartFeedUsedTopics.join(", ");
+    // Truncated context: top 15 liked, last 20 used
+    const liked = state.topics.filter(t => t.weight > 0).sort((a, b) => b.weight - a.weight).slice(0, 15).map(t => t.phrase).join(", ");
+    const disliked = state.topics.filter(t => t.weight < 0).slice(0, 10).map(t => t.phrase).join(", ");
+    const recentUsed = state.smartFeedUsedTopics.slice(-20).join(", ");
     
-    const systemPromptSimilar = `/no_think
-You are a search query assistant. Given a search query, suggest 5 related topics.
-Output ONLY a valid JSON object. No explanation, no preamble, no markdown.
-Schema: {"topics":[{"phrase":"1-3 word topic","category":"similar","reason":"why","associated_with":"search query"}]}
-Example output: {"topics":[{"phrase":"kubernetes pods","category":"sub_category","reason":"relates to containers","associated_with":"docker"}]}`;
+    const userMessage = `Search query: "${searchQuery}"
+My interests: [${liked}]
+Disliked: [${disliked}]
+Recently used (avoid these): [${recentUsed}]
 
-    const userMessage = `Current Conceptual Node Graph:
-- Searched Node: "${searchQuery}"
-- Liked Nodes: [${liked}]
-- Disliked/Excluded Nodes: [${disliked}]
-- Currently Queued Nodes (Do not duplicate): [${currentQueue}]
-- Already Visited/Used Nodes (Do not duplicate): [${usedTopics}]
-
-Please brainstorm 5 new nodes that connect to or expand from "${searchQuery}" in the graph, without duplicating any.`;
+Suggest 5 topics related to "${searchQuery}".`;
 
     const MAX_RETRIES = 2;
     let attempt = 0;
@@ -2416,10 +2472,12 @@ Please brainstorm 5 new nodes that connect to or expand from "${searchQuery}" in
                 body: JSON.stringify({
                     model: activeLlmModel,
                     messages: [
-                        { role: "system", content: systemPromptSimilar },
+                        { role: "system", content: SIMILAR_SYSTEM_PROMPT },
                         { role: "user", content: userMessage }
                     ],
-                    temperature: 0.1 + (attempt * 0.1),
+                    tools: [TOPIC_TOOL_DEFINITION],
+                    tool_choice: { type: "function", function: { name: "suggest_topics" } },
+                    temperature: 0.1 + (attempt * 0.15),
                     max_tokens: 1500,
                     chat_template_kwargs: { "enable_thinking": false }
                 }),
@@ -2427,49 +2485,29 @@ Please brainstorm 5 new nodes that connect to or expand from "${searchQuery}" in
             });
             clearTimeout(timeoutId);
             
-            if (!response.ok) throw new Error(`vLLM server returned status ${response.status}`);
+            if (!response.ok) {
+                const body = await response.text().catch(() => "");
+                throw new Error(`vLLM returned ${response.status}: ${body.substring(0, 200)}`);
+            }
             
             const data = await response.json();
             const message = data.choices?.[0]?.message;
-            if (!message) throw new Error("No message returned from vLLM server.");
-            
-            let content = message.content;
-            if (content === null || content === undefined || content.trim() === "") {
-                const reasoning = message.reasoning || message.reasoning_content;
-                if (reasoning) {
-                    content = reasoning;
-                }
+            if (!message) {
+                console.warn("[Smart Feed DEBUG] No message in similar response:", JSON.stringify(data).substring(0, 300));
+                throw new Error("No message returned from vLLM server.");
             }
             
-            if (!content) {
-                throw new Error("vLLM server returned empty content. Try again.");
-            }
-            
-            const parsed = parseLlmJsonResponse(content);
-            if (!parsed) {
-                throw new Error("Failed to parse JSON response from vLLM.");
-            }
-            
-            let topicsArray = [];
-            if (Array.isArray(parsed)) {
-                topicsArray = parsed;
-            } else if (parsed && Array.isArray(parsed.topics)) {
-                topicsArray = parsed.topics;
-            } else {
-                throw new Error("Invalid response format: expected a JSON array or object with topics array.");
-            }
+            const topicsArray = extractTopicsFromLlmResponse(message);
             
             topicsArray.forEach(item => {
                 const phrase = (item.phrase || item.topic || item.keyword || "")?.trim().toLowerCase();
                 if (!phrase) return;
                 
-                // Add to state.topics with default positive weight if not present
                 const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
                 if (!existsInTopics) {
                     state.topics.push({ phrase, weight: 5 });
                 }
                 
-                // Push to smartFeedTopicsQueue if not already in queue or used
                 const inQueue = state.smartFeedTopicsQueue.includes(phrase);
                 const inUsed = state.smartFeedUsedTopics.includes(phrase);
                 if (!inQueue && !inUsed) {
@@ -2484,7 +2522,6 @@ Please brainstorm 5 new nodes that connect to or expand from "${searchQuery}" in
                 console.log(`[Smart Feed] Successfully brainstormed and queued ${addedPhrases.length} similar topics for "${searchQuery}":`, addedPhrases);
                 showToast(`💡 Queued ${addedPhrases.length} topics similar to "${searchQuery}"`, "success");
                 
-                // Trigger filling preload buffer with newly queued topics
                 fillSmartFeedPreloadBuffer();
             } else {
                 console.warn(`[Smart Feed] Similar brainstorm returned no new topics on attempt ${attempt + 1}.`);
@@ -2497,49 +2534,92 @@ Please brainstorm 5 new nodes that connect to or expand from "${searchQuery}" in
     }
 }
 
+// Time-range buckets for video era variety
+const VIDEO_ERA_BUCKETS = ["before:2015", "before:2018", "before:2020", "after:2023", ""];
+
+function getRandomEraBucket() {
+    return VIDEO_ERA_BUCKETS[Math.floor(Math.random() * VIDEO_ERA_BUCKETS.length)];
+}
+
 async function fetchVideosForTopic(topic) {
     let videos = [];
     let success = false;
-    const fetchCount = 10;
+    const fetchCountPerRequest = 25;
     
     if (state.settings.useYtdlp) {
         try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 12000);
-            const resp = await fetch("/scraper/collect", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    source: "youtube",
-                    query: topic,
-                    limit: fetchCount,
-                    days_back: 0,
-                    require_transcript: false
-                }),
-                signal: controller.signal
-            });
-            clearTimeout(timeoutId);
-            if (resp.ok) {
-                const data = await resp.json();
-                if (data && Array.isArray(data.items)) {
-                    data.items.forEach(item => {
-                        videos.push({
-                            id: item.video_id,
-                            title: item.title,
-                            channelName: item.channel,
-                            channelId: "",
-                            publishedStr: item.published_at ? getRelativeTime(new Date(item.published_at).getTime()) : "Recently",
-                            published: item.published_at ? new Date(item.published_at).getTime() : Date.now(),
-                            duration: item.duration_secs,
-                            viewCount: item.view_count,
-                            isDiscover: true,
-                            discoveryTopic: topic
-                        });
+            // Parallel split-fetch: one current era + one random era bucket
+            const eraBucket = getRandomEraBucket();
+            const currentQuery = topic;
+            const eraQuery = eraBucket ? `${topic} ${eraBucket}` : topic;
+            
+            console.log(`[Smart Feed Fetch] Parallel fetch for "${topic}" — current era + era bucket: "${eraBucket || 'none'}"`);
+            
+            const fetchOne = async (query, label) => {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 15000);
+                try {
+                    const resp = await fetch("/scraper/collect", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            source: "youtube",
+                            query: query,
+                            limit: fetchCountPerRequest,
+                            days_back: 0,
+                            require_transcript: false
+                        }),
+                        signal: controller.signal
                     });
-                    success = true;
+                    clearTimeout(timeoutId);
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        if (data && Array.isArray(data.items)) {
+                            console.log(`[Smart Feed Fetch] ${label} returned ${data.items.length} videos`);
+                            return data.items;
+                        }
+                    }
+                } catch (err) {
+                    clearTimeout(timeoutId);
+                    console.warn(`[Smart Feed Fetch] ${label} request failed:`, err.message);
                 }
+                return [];
+            };
+            
+            // Fire both in parallel
+            const [currentItems, eraItems] = await Promise.all([
+                fetchOne(currentQuery, "current-era"),
+                currentQuery !== eraQuery ? fetchOne(eraQuery, `era(${eraBucket})`) : Promise.resolve([])
+            ]);
+            
+            const allItems = [...currentItems, ...eraItems];
+            
+            // Deduplicate by video_id
+            const seenIds = new Set();
+            allItems.forEach(item => {
+                if (item.video_id && !seenIds.has(item.video_id)) {
+                    seenIds.add(item.video_id);
+                    videos.push({
+                        id: item.video_id,
+                        title: item.title,
+                        channelName: item.channel,
+                        channelId: "",
+                        publishedStr: item.published_at ? getRelativeTime(new Date(item.published_at).getTime()) : "Recently",
+                        published: item.published_at ? new Date(item.published_at).getTime() : Date.now(),
+                        duration: item.duration_secs,
+                        viewCount: item.view_count,
+                        isDiscover: true,
+                        discoveryTopic: topic
+                    });
+                }
+            });
+            
+            // Shuffle to mix eras together
+            videos.sort(() => Math.random() - 0.5);
+            
+            if (videos.length > 0) {
+                success = true;
+                console.log(`[Smart Feed Fetch] Total unique videos for "${topic}": ${videos.length}`);
             }
         } catch (err) {
             console.error(`[Smart Feed Fetch] Scraper fetch failed for "${topic}":`, err);
@@ -2604,11 +2684,11 @@ async function fetchVideosForTopic(topic) {
                                         isDiscover: true,
                                         discoveryTopic: topic
                                     });
-                                    if (videos.length >= fetchCount) break;
+                                    if (videos.length >= fetchCountPerRequest) break;
                                 }
                             }
                         }
-                        if (videos.length >= fetchCount) break;
+                        if (videos.length >= fetchCountPerRequest) break;
                     }
                     success = true;
                 }
@@ -2640,7 +2720,7 @@ async function fillSmartFeedPreloadBuffer() {
     if (state.smartFeedPreloadLoading) return;
     
     // We keep a larger buffer (e.g. 50) so we can randomly mix topics in loadNextSmartFeedBatch
-    const targetPreloadCount = 50;
+    const targetPreloadCount = 200;
     if (state.smartFeedPreloadedVideos.length >= targetPreloadCount) {
         return; // Preload buffer is full
     }
