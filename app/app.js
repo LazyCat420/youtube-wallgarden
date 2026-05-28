@@ -2154,20 +2154,28 @@ document.addEventListener("DOMContentLoaded", setupInfiniteScroll);
 function extractJsonFromText(text) {
     if (!text) return null;
     
-    // Try finding outer object { ... }
-    const objectMatch = text.match(/\{\s*"topics"[\s\S]*\}/) || text.match(/\{[\s\S]*\}/);
+    // Try finding outer object { "topics": [...] } — use non-greedy match
+    const objectMatch = text.match(/\{\s*"topics"\s*:\s*\[[\s\S]*?\]\s*\}/);
     if (objectMatch) {
         try {
             return JSON.parse(objectMatch[0]);
-        } catch (e) {}
+        } catch (e) { /* fall through */ }
+    }
+    
+    // Try finding any JSON object { ... }
+    const anyObjMatch = text.match(/\{[\s\S]*?\}/);
+    if (anyObjMatch) {
+        try {
+            return JSON.parse(anyObjMatch[0]);
+        } catch (e) { /* fall through */ }
     }
     
     // Try finding outer array [ ... ]
-    const arrayMatch = text.match(/\[\s*\{[\s\S]*\}\s*\]/);
+    const arrayMatch = text.match(/\[\s*\{[\s\S]*?\}\s*\]/);
     if (arrayMatch) {
         try {
             return JSON.parse(arrayMatch[0]);
-        } catch (e) {}
+        } catch (e) { /* fall through */ }
     }
     
     return null;
@@ -2197,20 +2205,11 @@ function parseLlmJsonResponse(content) {
 // AI Topic Brainstorming Features
 let activeLlmModel = "default-model";
 
-const systemPrompt = `You are a topic brainstorming assistant. You view topics as nodes in a conceptual graph.
-Suggest 5 new topics to expand the user's graph, avoiding repetition.
-
-Output a valid JSON object matching this schema:
-{
-  "topics": [
-    {
-      "phrase": "topic name (1-3 words maximum, e.g. 'Docker Containers')",
-      "category": "sub_category" | "similar" | "interesting_tangent" | "unrelated_but_interesting",
-      "reason": "short explanation of why this topic is suggested",
-      "associated_with": "existing topic name it connects to"
-    }
-  ]
-}`;
+const systemPrompt = `/no_think
+You are a topic brainstorming assistant. Given the user's current topics, suggest 5 new related topics.
+Output ONLY a valid JSON object. No explanation, no preamble, no markdown.
+Schema: {"topics":[{"phrase":"1-3 word topic","category":"similar","reason":"why","associated_with":"existing topic"}]}
+Example output: {"topics":[{"phrase":"container orchestration","category":"sub_category","reason":"relates to docker","associated_with":"docker"}]}`;
 
 async function fetchLlmModel() {
     try {
@@ -2269,7 +2268,7 @@ Please brainstorm 5 new nodes that connect to or expand from the existing nodes 
             const fetchPromises = [];
             for (let i = 0; i < numRequests; i++) {
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 180000);
+                const timeoutId = setTimeout(() => controller.abort(), 30000);
                 
                 const req = fetch("/vllm/v1/chat/completions", {
                     method: "POST",
@@ -2280,8 +2279,9 @@ Please brainstorm 5 new nodes that connect to or expand from the existing nodes 
                             { role: "system", content: systemPrompt },
                             { role: "user", content: userMessage }
                         ],
-                        temperature: 0.8 + (attempt * 0.1) + (i * 0.05), // Increase randomness on retries
-                        max_tokens: 3000
+                        temperature: 0.1 + (attempt * 0.1),
+                        max_tokens: 1500,
+                        chat_template_kwargs: { "enable_thinking": false }
                     }),
                     signal: controller.signal
                 }).then(async (res) => {
@@ -2376,20 +2376,11 @@ async function generateSimilarTopicsFromSearch(searchQuery) {
     const currentQueue = state.smartFeedTopicsQueue.join(", ");
     const usedTopics = state.smartFeedUsedTopics.join(", ");
     
-    const systemPromptSimilar = `You are a search query assistant. You view topics as nodes in a conceptual graph.
-Suggest 5 new topics that are closely related or logical next steps to the user's search query.
-
-Output a valid JSON object matching this schema:
-{
-  "topics": [
-    {
-      "phrase": "topic name (1-3 words maximum, e.g. 'Kubernetes')",
-      "category": "similar" | "sub_category" | "interesting_tangent" | "unrelated_but_interesting",
-      "reason": "short explanation of why this is related",
-      "associated_with": "search query"
-    }
-  ]
-}`;
+    const systemPromptSimilar = `/no_think
+You are a search query assistant. Given a search query, suggest 5 related topics.
+Output ONLY a valid JSON object. No explanation, no preamble, no markdown.
+Schema: {"topics":[{"phrase":"1-3 word topic","category":"similar","reason":"why","associated_with":"search query"}]}
+Example output: {"topics":[{"phrase":"kubernetes pods","category":"sub_category","reason":"relates to containers","associated_with":"docker"}]}`;
 
     const userMessage = `Current Conceptual Node Graph:
 - Searched Node: "${searchQuery}"
@@ -2416,7 +2407,7 @@ Please brainstorm 5 new nodes that connect to or expand from "${searchQuery}" in
             }
             
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 180000);
+            const timeoutId = setTimeout(() => controller.abort(), 30000);
             const response = await fetch("/vllm/v1/chat/completions", {
                 method: "POST",
                 headers: {
@@ -2428,8 +2419,9 @@ Please brainstorm 5 new nodes that connect to or expand from "${searchQuery}" in
                         { role: "system", content: systemPromptSimilar },
                         { role: "user", content: userMessage }
                     ],
-                    temperature: 0.7 + (attempt * 0.1),
-                    max_tokens: 3000
+                    temperature: 0.1 + (attempt * 0.1),
+                    max_tokens: 1500,
+                    chat_template_kwargs: { "enable_thinking": false }
                 }),
                 signal: controller.signal
             });
