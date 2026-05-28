@@ -2636,7 +2636,7 @@ async function fillSmartFeedPreloadBuffer() {
     const cooldownMs = 60000; // 60-second cooldown
     const isCooldownActive = state.lastBrainstormTime && (now - state.lastBrainstormTime < cooldownMs);
 
-    if (totalUpcoming < 15 && !state.brainstormLoading && !isCooldownActive) {
+    if (totalUpcoming < 30 && !state.brainstormLoading && !isCooldownActive) {
         console.log("[Smart Feed] Total upcoming topics low, triggering background LLM brainstorm...");
         generateBrainstormTopics(true, 3).then(() => {
             fillSmartFeedPreloadBuffer();
