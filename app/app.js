@@ -610,7 +610,7 @@ function setupEventListeners() {
         btnBrainstormMore.addEventListener("click", () => generateBrainstormTopics());
     }
 
-    // Topic Search in Settings
+    // Topic Search in Settings (LLM Preferences)
     const topicSearchInput = document.getElementById("input-topic-search");
     const clearTopicSearchBtn = document.getElementById("btn-clear-topic-search");
     if (topicSearchInput) {
@@ -622,7 +622,6 @@ function setupEventListeners() {
                 clearTopicSearchBtn.classList.add("hidden");
             }
             renderPreferencesLists(q);
-            renderTopicsList(q);
         });
     }
     if (clearTopicSearchBtn) {
@@ -630,6 +629,27 @@ function setupEventListeners() {
             topicSearchInput.value = "";
             clearTopicSearchBtn.classList.add("hidden");
             renderPreferencesLists();
+        });
+    }
+
+    // Legacy Topic Search
+    const legacyTopicSearchInput = document.getElementById("input-legacy-topic-search");
+    const clearLegacyTopicSearchBtn = document.getElementById("btn-clear-legacy-topic-search");
+    if (legacyTopicSearchInput) {
+        legacyTopicSearchInput.addEventListener("input", () => {
+            const q = legacyTopicSearchInput.value.trim().toLowerCase();
+            if (q) {
+                clearLegacyTopicSearchBtn.classList.remove("hidden");
+            } else {
+                clearLegacyTopicSearchBtn.classList.add("hidden");
+            }
+            renderTopicsList(q);
+        });
+    }
+    if (clearLegacyTopicSearchBtn) {
+        clearLegacyTopicSearchBtn.addEventListener("click", () => {
+            legacyTopicSearchInput.value = "";
+            clearLegacyTopicSearchBtn.classList.add("hidden");
             renderTopicsList();
         });
     }
@@ -1953,17 +1973,47 @@ function renderTopicsList(filterQuery) {
         
         row.innerHTML = `
             <span class="topic-phrase">${displayText}</span>
-            <div class="topic-controls">
+            <div class="topic-controls" style="display: flex; gap: 0.5rem; align-items: center;">
                 <span class="topic-badge-weight ${badgeClass}">${sign}${topic.weight}</span>
-                <button class="btn-remove" data-phrase="${escapeHTML(topic.phrase)}">✕</button>
+                <button class="btn-like-legacy" data-phrase="${escapeHTML(topic.phrase)}" title="Move to Liked Topics" style="background: transparent; border: none; cursor: pointer; font-size: 1.1rem; padding: 0;">👍</button>
+                <button class="btn-remove btn-remove-legacy" data-phrase="${escapeHTML(topic.phrase)}" title="Remove & Move to Disliked Topics">✕</button>
             </div>
         `;
         
-        row.querySelector(".btn-remove").addEventListener("click", (e) => {
+        row.querySelector(".btn-like-legacy").addEventListener("click", (e) => {
             const phrase = e.target.dataset.phrase;
             state.topics = state.topics.filter(t => t.phrase !== phrase);
             saveTopics();
-            renderTopicsList(q);
+            
+            const normalized = phrase.trim().toLowerCase();
+            if (!state.likedTopics.includes(normalized)) {
+                state.likedTopics.push(normalized);
+                saveLikedTopics();
+            }
+            // Ensure it's not in disliked
+            state.dislikedTopics = state.dislikedTopics.filter(t => t !== normalized);
+            saveDislikedTopics();
+            
+            renderPreferencesLists(document.getElementById("input-topic-search")?.value || "");
+            renderTopicsList(document.getElementById("input-legacy-topic-search")?.value || "");
+        });
+
+        row.querySelector(".btn-remove-legacy").addEventListener("click", (e) => {
+            const phrase = e.target.dataset.phrase;
+            state.topics = state.topics.filter(t => t.phrase !== phrase);
+            saveTopics();
+            
+            const normalized = phrase.trim().toLowerCase();
+            if (!state.dislikedTopics.includes(normalized)) {
+                state.dislikedTopics.push(normalized);
+                saveDislikedTopics();
+            }
+            // Ensure it's not in liked
+            state.likedTopics = state.likedTopics.filter(t => t !== normalized);
+            saveLikedTopics();
+            
+            renderPreferencesLists(document.getElementById("input-topic-search")?.value || "");
+            renderTopicsList(document.getElementById("input-legacy-topic-search")?.value || "");
         });
         list.appendChild(row);
     });

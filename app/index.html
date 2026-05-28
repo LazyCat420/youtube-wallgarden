@@ -320,7 +320,14 @@
                         </div>
                     </div>
 
-                    <h3>Legacy Topic Weightings</h3>
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
+                        <h3 style="margin: 0;">Legacy Topic Weightings</h3>
+                    </div>
+                    <div class="topic-search-bar" style="margin-bottom: 1rem;">
+                        <span class="topic-search-icon">🔍</span>
+                        <input type="text" id="input-legacy-topic-search" placeholder="Search legacy topics to merge or remove...">
+                        <button id="btn-clear-legacy-topic-search" class="btn-clear-topic-search hidden" title="Clear search" type="button">✕</button>
+                    </div>
                     <div id="topics-list" class="topics-list">
                         <!-- Topics injected here -->
                     </div>
