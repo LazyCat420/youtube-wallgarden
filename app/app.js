@@ -138,9 +138,14 @@ function loadState() {
     const rawBrainstorm = localStorage.getItem("wallgarden_brainstorm_topics");
     const rawVideoRatings = localStorage.getItem("wallgarden_video_ratings");
 
+    const rawLiked = localStorage.getItem("wallgarden_liked_topics");
+    const rawDisliked = localStorage.getItem("wallgarden_disliked_topics");
+
     state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
     state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
     state.blockedChannels = rawBlocked ? JSON.parse(rawBlocked) : [];
+    state.likedTopics = rawLiked ? JSON.parse(rawLiked) : [];
+    state.dislikedTopics = rawDisliked ? JSON.parse(rawDisliked) : [];
     state.settings = rawSettings ? JSON.parse(rawSettings) : { useYtdlp: true, muteShorts: false };
     state.searchHistory = rawSearchHistory ? JSON.parse(rawSearchHistory) : [];
     state.brainstormTopics = rawBrainstorm ? JSON.parse(rawBrainstorm) : [];
@@ -206,6 +211,14 @@ function saveTopics() {
     localStorage.setItem("wallgarden_topics", JSON.stringify(state.topics));
 }
 
+function saveLikedTopics() {
+    localStorage.setItem("wallgarden_liked_topics", JSON.stringify(state.likedTopics));
+}
+
+function saveDislikedTopics() {
+    localStorage.setItem("wallgarden_disliked_topics", JSON.stringify(state.dislikedTopics));
+}
+
 function saveCache() {
     localStorage.setItem("wallgarden_cache", JSON.stringify(state.cache));
 }
@@ -261,6 +274,7 @@ function setupEventListeners() {
         renderChannelsList();
         renderTopicsList();
         renderBlockedList();
+        renderPreferencesLists();
         document.getElementById("search-results-container").classList.add("hidden");
         settingsModal.classList.remove("hidden");
     });
@@ -343,6 +357,27 @@ function setupEventListeners() {
     fileInput.addEventListener("change", (e) => {
         if (e.target.files.length) {
             handleOPMLFile(e.target.files[0]);
+        }
+    });
+
+    // LLM Topic Preferences
+    document.getElementById("btn-add-liked-topic").addEventListener("click", () => {
+        const phrase = document.getElementById("input-liked-topic").value.trim().toLowerCase();
+        if (phrase && !state.likedTopics.includes(phrase)) {
+            state.likedTopics.push(phrase);
+            saveLikedTopics();
+            document.getElementById("input-liked-topic").value = "";
+            renderPreferencesLists();
+        }
+    });
+
+    document.getElementById("btn-add-disliked-topic").addEventListener("click", () => {
+        const phrase = document.getElementById("input-disliked-topic").value.trim().toLowerCase();
+        if (phrase && !state.dislikedTopics.includes(phrase)) {
+            state.dislikedTopics.push(phrase);
+            saveDislikedTopics();
+            document.getElementById("input-disliked-topic").value = "";
+            renderPreferencesLists();
         }
     });
 
@@ -889,6 +924,16 @@ function getScoreAndMatches(video) {
         matches.push("punctuation");
     }
     
+    // Explicit Topic Preferences Penalty
+    if (state.dislikedTopics && state.dislikedTopics.length > 0) {
+        state.dislikedTopics.forEach(dt => {
+            if (title.includes(dt.toLowerCase()) || matches.includes(dt.toLowerCase())) {
+                score -= 15;
+                matches.push(`disliked:${dt}`);
+            }
+        });
+    }
+    
     // Explicit user rating override
     if (state.videoRatings && state.videoRatings[video.id] !== undefined) {
         score = state.videoRatings[video.id];
@@ -922,7 +967,8 @@ function renderCard(video, targetContainer) {
     
     // Check if channel is already subscribed
     const isSubscribed = state.channels.some(ch => 
-        ch.name.toLowerCase() === video.channelName.toLowerCase() || ch.id === video.channelId
+        (ch.id && video.channelId && ch.id === video.channelId) || 
+        (ch.name && video.channelName && ch.name.toLowerCase() === video.channelName.toLowerCase())
     );
     
     card.innerHTML = `
@@ -1393,6 +1439,43 @@ function renderChannelsList() {
     });
     
     document.getElementById("subscribed-count").textContent = state.channels.length;
+}
+
+function renderPreferencesLists() {
+    const renderList = (containerId, topicsArray, deleteCallback) => {
+        const container = document.getElementById(containerId);
+        container.innerHTML = "";
+        if (topicsArray.length === 0) {
+            container.innerHTML = `<span style="color:var(--text-muted);font-size:0.85rem;">No topics added.</span>`;
+            return;
+        }
+        topicsArray.forEach(topic => {
+            const row = document.createElement("div");
+            row.className = "topic-row";
+            row.style.marginBottom = "0.25rem";
+            row.style.background = "rgba(255,255,255,0.05)";
+            row.innerHTML = `
+                <span class="topic-phrase" style="font-size:0.85rem;">${escapeHTML(topic)}</span>
+                <button class="btn-remove" data-phrase="${escapeHTML(topic)}">✕</button>
+            `;
+            row.querySelector(".btn-remove").addEventListener("click", (e) => {
+                deleteCallback(e.target.dataset.phrase);
+            });
+            container.appendChild(row);
+        });
+    };
+
+    renderList("liked-topics-list", state.likedTopics, (phrase) => {
+        state.likedTopics = state.likedTopics.filter(t => t !== phrase);
+        saveLikedTopics();
+        renderPreferencesLists();
+    });
+
+    renderList("disliked-topics-list", state.dislikedTopics, (phrase) => {
+        state.dislikedTopics = state.dislikedTopics.filter(t => t !== phrase);
+        saveDislikedTopics();
+        renderPreferencesLists();
+    });
 }
 
 function renderTopicsList() {
@@ -2107,17 +2190,17 @@ async function fetchLlmModel() {
     }
 }
 
-async function generateBrainstormTopics(append) {
+async function generateBrainstormTopics(append, numRequests = 1) {
     append = append || false;
     if (state.brainstormLoading) return;
     state.brainstormLoading = true;
     state.lastBrainstormAttempt = Date.now();
     
-    console.log("[Smart Feed] Background LLM brainstorming started...");
+    console.log(`[Smart Feed] Background LLM brainstorming started (firing ${numRequests} parallel requests)...`);
     
-    // Construct user profile message
-    const liked = state.topics.filter(t => t.weight > 0).map(t => `${t.phrase} (weight: +${t.weight})`).join(", ");
-    const disliked = state.topics.filter(t => t.weight < 0).map(t => `${t.phrase} (weight: ${t.weight})`).join(", ");
+    // Construct user profile message using explicit topic preferences
+    const liked = (state.likedTopics || []).join(", ");
+    const disliked = (state.dislikedTopics || []).join(", ");
     const searches = state.searchHistory.join(", ");
     const currentQueue = state.smartFeedTopicsQueue.join(", ");
     const usedTopics = state.smartFeedUsedTopics.join(", ");
@@ -2136,91 +2219,96 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
             await fetchLlmModel();
         }
         
-        // Target proxied vllm route
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minutes for slower LLMs
-        const response = await fetch("/vllm/v1/chat/completions", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                model: activeLlmModel,
-                messages: [
-                    { role: "system", content: systemPrompt },
-                    { role: "user", content: userMessage }
-                ],
-                temperature: 0.7,
-                max_tokens: 3000
-            }),
-            signal: controller.signal
-        });
-        clearTimeout(timeoutId);
+        const fetchPromises = [];
+        for (let i = 0; i < numRequests; i++) {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 180000);
+            
+            const req = fetch("/vllm/v1/chat/completions", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    model: activeLlmModel,
+                    messages: [
+                        { role: "system", content: systemPrompt },
+                        { role: "user", content: userMessage }
+                    ],
+                    temperature: 0.8 + (i * 0.1), // slightly vary temp for diverse batches
+                    max_tokens: 3000
+                }),
+                signal: controller.signal
+            }).then(async (res) => {
+                clearTimeout(timeoutId);
+                if (!res.ok) throw new Error(`vLLM server returned status ${res.status}`);
+                return res.json();
+            });
+            fetchPromises.push(req);
+        }
         
-        if (!response.ok) throw new Error(`vLLM server returned status ${response.status}`);
+        const results = await Promise.allSettled(fetchPromises);
         
-        const data = await response.json();
-        const message = data.choices?.[0]?.message;
-        if (!message) throw new Error("No message returned from vLLM server.");
+        let allAddedPhrases = [];
         
-        let content = message.content;
-        if (content === null || content === undefined || content.trim() === "") {
-            if (message.reasoning) {
-                const jsonMatch = message.reasoning.match(/\[\s*\{[\s\S]*\}\s*\]/);
-                if (jsonMatch) {
-                    content = jsonMatch[0];
+        for (const result of results) {
+            if (result.status === "rejected") {
+                console.error("[Smart Feed] Batch request failed:", result.reason);
+                continue;
+            }
+            
+            const data = result.value;
+            const message = data.choices?.[0]?.message;
+            if (!message) continue;
+            
+            let content = message.content;
+            if (content === null || content === undefined || content.trim() === "") {
+                if (message.reasoning) {
+                    const jsonMatch = message.reasoning.match(/\[\s*\{[\s\S]*\}\s*\]/);
+                    if (jsonMatch) {
+                        content = jsonMatch[0];
+                    }
                 }
+            }
+            
+            if (!content) continue;
+            
+            content = content.trim();
+            let cleanContent = content;
+            if (cleanContent.startsWith("```json")) cleanContent = cleanContent.substring(7);
+            else if (cleanContent.startsWith("```")) cleanContent = cleanContent.substring(3);
+            if (cleanContent.endsWith("```")) cleanContent = cleanContent.substring(0, cleanContent.length - 3);
+            cleanContent = cleanContent.trim();
+            
+            const jsonMatch = cleanContent.match(/\[\s*\{[\s\S]*\}\s*\]/);
+            const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanContent);
+            
+            if (Array.isArray(parsed)) {
+                parsed.forEach(item => {
+                    const phrase = item.phrase?.trim().toLowerCase();
+                    if (!phrase) return;
+                    
+                    const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
+                    if (!existsInTopics) {
+                        state.topics.push({ phrase, weight: 5 });
+                    }
+                    
+                    const inQueue = state.smartFeedTopicsQueue.includes(phrase);
+                    const inUsed = state.smartFeedUsedTopics.includes(phrase);
+                    if (!inQueue && !inUsed) {
+                        state.smartFeedTopicsQueue.push(phrase);
+                        allAddedPhrases.push(phrase);
+                    }
+                });
             }
         }
         
-        if (!content) {
-            throw new Error("vLLM server returned empty content. Try again.");
-        }
-        
-        content = content.trim();
-        
-        let cleanContent = content;
-        if (cleanContent.startsWith("```json")) {
-            cleanContent = cleanContent.substring(7);
-        } else if (cleanContent.startsWith("```")) {
-            cleanContent = cleanContent.substring(3);
-        }
-        if (cleanContent.endsWith("```")) {
-            cleanContent = cleanContent.substring(0, cleanContent.length - 3);
-        }
-        cleanContent = cleanContent.trim();
-        
-        // Extract JSON array from the response content to avoid parsing extra reasoning text
-        const jsonMatch = cleanContent.match(/\[\s*\{[\s\S]*\}\s*\]/);
-        const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanContent);
-        if (Array.isArray(parsed)) {
-            const addedPhrases = [];
-            parsed.forEach(item => {
-                const phrase = item.phrase.trim().toLowerCase();
-                if (!phrase) return;
-                
-                // Add to state.topics with default positive weight if not present
-                const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
-                if (!existsInTopics) {
-                    state.topics.push({ phrase, weight: 5 });
-                }
-                
-                // Push to smartFeedTopicsQueue if not already in queue or used
-                const inQueue = state.smartFeedTopicsQueue.includes(phrase);
-                const inUsed = state.smartFeedUsedTopics.includes(phrase);
-                if (!inQueue && !inUsed) {
-                    state.smartFeedTopicsQueue.push(phrase);
-                    addedPhrases.push(phrase);
-                }
-            });
-            
+        if (allAddedPhrases.length > 0) {
             saveTopics();
-            console.log("[Smart Feed] Successfully brainstormed and queued new topics:", addedPhrases);
-            if (addedPhrases.length > 0 && !append) {
-                showToast(`💡 Queued topics: ${addedPhrases.join(", ")}`, "success");
+            console.log("[Smart Feed] Successfully brainstormed and queued new topics:", allAddedPhrases);
+            if (!append) {
+                renderFeed();
             }
         } else {
-            throw new Error("Invalid response format: expected a JSON array.");
+            console.warn("[Smart Feed] Brainstorming returned no new topics across all batches.");
         }
     } catch (err) {
         console.error("Brainstorm error:", err);
@@ -2265,6 +2353,7 @@ Example response:
 
     const userMessage = `The user just searched for the topic: "${searchQuery}".
 User Profile:
+- Liked Topics: [${liked}]
 - Disliked Topics: [${disliked}]
 - Currently Queued Topics (Avoid duplicates): [${currentQueue}]
 - Already Used Topics (Avoid duplicates): [${usedTopics}]
@@ -2520,9 +2609,9 @@ async function fillSmartFeedPreloadBuffer() {
     const cooldownMs = 60000; // 60-second cooldown
     const isCooldownActive = state.lastBrainstormTime && (now - state.lastBrainstormTime < cooldownMs);
 
-    if (totalUpcoming < 5 && !state.brainstormLoading && !isCooldownActive) {
+    if (totalUpcoming < 15 && !state.brainstormLoading && !isCooldownActive) {
         console.log("[Smart Feed] Total upcoming topics low, triggering background LLM brainstorm...");
-        generateBrainstormTopics(true).then(() => {
+        generateBrainstormTopics(true, 3).then(() => {
             fillSmartFeedPreloadBuffer();
         });
     }

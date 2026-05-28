@@ -261,7 +261,38 @@
                         </div>
                     </div>
 
-                    <h3>Topic Weightings</h3>
+                    <div class="topic-editor-container" style="margin-bottom: 2rem;">
+                        <h3>LLM Topic Preferences</h3>
+                        <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">Direct the AI brainstormer. Liked topics guide generation, Disliked topics are strictly avoided and downranked in the feed.</p>
+                        
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                            <!-- Liked Topics -->
+                            <div class="preferences-box">
+                                <h4 style="color: var(--accent); margin-top: 0;">👍 Liked Topics</h4>
+                                <div class="input-inline" style="margin-bottom: 0.5rem;">
+                                    <input type="text" id="input-liked-topic" placeholder="e.g. machine learning">
+                                    <button id="btn-add-liked-topic" class="btn btn-secondary btn-sm">+</button>
+                                </div>
+                                <div id="liked-topics-list" class="topics-list" style="min-height: 80px; padding: 0.5rem; background: rgba(0,0,0,0.2); border-radius: 4px;">
+                                    <!-- Populated dynamically -->
+                                </div>
+                            </div>
+
+                            <!-- Disliked Topics -->
+                            <div class="preferences-box">
+                                <h4 style="color: var(--danger); margin-top: 0;">👎 Disliked Topics</h4>
+                                <div class="input-inline" style="margin-bottom: 0.5rem;">
+                                    <input type="text" id="input-disliked-topic" placeholder="e.g. drama, vlog">
+                                    <button id="btn-add-disliked-topic" class="btn btn-secondary btn-sm">+</button>
+                                </div>
+                                <div id="disliked-topics-list" class="topics-list" style="min-height: 80px; padding: 0.5rem; background: rgba(0,0,0,0.2); border-radius: 4px;">
+                                    <!-- Populated dynamically -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <h3>Legacy Topic Weightings</h3>
                     <div id="topics-list" class="topics-list">
                         <!-- Topics injected here -->
                     </div>
