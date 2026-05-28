@@ -42,6 +42,7 @@ let state = {
     brainstormLoading: false,
     lastBrainstormTime: 0,
     lastBrainstormAttempt: 0,
+    videoRatings: {}, // explicit ratings set by user
     settings: {
         useYtdlp: true,
         muteShorts: false
@@ -135,6 +136,7 @@ function loadState() {
     const rawSettings = localStorage.getItem("wallgarden_settings");
     const rawSearchHistory = localStorage.getItem("wallgarden_search_history");
     const rawBrainstorm = localStorage.getItem("wallgarden_brainstorm_topics");
+    const rawVideoRatings = localStorage.getItem("wallgarden_video_ratings");
 
     state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
     state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
@@ -142,6 +144,7 @@ function loadState() {
     state.settings = rawSettings ? JSON.parse(rawSettings) : { useYtdlp: true, muteShorts: false };
     state.searchHistory = rawSearchHistory ? JSON.parse(rawSearchHistory) : [];
     state.brainstormTopics = rawBrainstorm ? JSON.parse(rawBrainstorm) : [];
+    state.videoRatings = rawVideoRatings ? JSON.parse(rawVideoRatings) : {};
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
@@ -205,6 +208,10 @@ function saveTopics() {
 
 function saveCache() {
     localStorage.setItem("wallgarden_cache", JSON.stringify(state.cache));
+}
+
+function saveVideoRatings() {
+    localStorage.setItem("wallgarden_video_ratings", JSON.stringify(state.videoRatings));
 }
 
 function saveSearchHistory() {
@@ -882,6 +889,11 @@ function getScoreAndMatches(video) {
         matches.push("punctuation");
     }
     
+    // Explicit user rating override
+    if (state.videoRatings && state.videoRatings[video.id] !== undefined) {
+        score = state.videoRatings[video.id];
+    }
+    
     return { score, matches };
 }
 
@@ -944,10 +956,34 @@ function renderCard(video, targetContainer) {
         const dropdown = document.createElement("div");
         dropdown.className = "card-action-dropdown";
         dropdown.innerHTML = `
+            <div style="display: flex; gap: 0.5rem; justify-content: space-around; padding: 0.5rem; border-bottom: 1px solid var(--card-border); margin-bottom: 0.25rem;">
+                <button class="rate-btn" data-rating="5" title="Love it" style="padding: 0.25rem 0.5rem; border-radius: 4px; background: rgba(46, 204, 113, 0.2); color: #2ecc71;">⭐ 5</button>
+                <button class="rate-btn" data-rating="3" title="Okay" style="padding: 0.25rem 0.5rem; border-radius: 4px; background: rgba(241, 196, 15, 0.2); color: #f1c40f;">⭐ 3</button>
+                <button class="rate-btn" data-rating="0" title="Neutral" style="padding: 0.25rem 0.5rem; border-radius: 4px; background: rgba(149, 165, 166, 0.2); color: #95a5a6;">⭐ 0</button>
+                <button class="rate-btn danger" data-rating="-5" title="Dislike" style="padding: 0.25rem 0.5rem; border-radius: 4px; background: rgba(231, 76, 60, 0.2); color: #e74c3c;">👎 -5</button>
+            </div>
             <button class="danger" data-action="block">🚫 Block Channel</button>
             <button data-action="subscribe" ${isSubscribed ? 'disabled' : ''}>➕ ${isSubscribed ? 'Already Subscribed' : 'Subscribe to Channel'}</button>
             <button data-action="hide">🔇 Hide Video</button>
         `;
+        
+        dropdown.querySelectorAll(".rate-btn").forEach(btn => {
+            btn.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                const rating = parseInt(ev.target.dataset.rating, 10);
+                state.videoRatings[video.id] = rating;
+                saveVideoRatings();
+                
+                // Update badge visually
+                const badge = card.querySelector(".score-badge");
+                if (badge) {
+                    badge.textContent = `★ ${rating}`;
+                    badge.className = "score-badge " + (rating >= 5 ? "high" : rating < 0 ? "low" : "mid");
+                }
+                dropdown.remove();
+                showToast(`⭐ Rated ${rating} stars`, rating > 0 ? "success" : "info");
+            });
+        });
         
         dropdown.querySelector('[data-action="block"]').addEventListener("click", (ev) => {
             ev.stopPropagation();
@@ -1083,16 +1119,11 @@ function renderFeed() {
         }
         
         if (state.smartFeedVideos.length > 0) {
-            const groups = {};
-            state.smartFeedVideos.forEach(v => {
-                const topic = v.discoveryTopic || "discovery";
-                if (!groups[topic]) groups[topic] = [];
-                groups[topic].push(v);
+            const fragment = document.createDocumentFragment();
+            state.smartFeedVideos.forEach(video => {
+                renderCard(video, fragment);
             });
-            
-            for (const topic in groups) {
-                appendSmartFeedSection(topic, groups[topic]);
-            }
+            grid.appendChild(fragment);
         } else {
             loadNextSmartFeedBatch();
         }
@@ -2221,7 +2252,7 @@ Guidelines:
 - Do NOT suggest any topics that are on the user's disliked list.
 - Do NOT suggest any topics that are already in the list of currently displayed brainstormed topics.
 
-You MUST respond ONLY with a valid JSON array of objects. No markdown, no HTML, no explanation outside the JSON.
+You MUST respond ONLY with a valid JSON array of objects. No markdown, no HTML, no explanation outside the JSON. Keep any internal reasoning or thinking process extremely brief (under 50 words).
 Each object must have the following keys:
 - "phrase": The topic phrase (e.g. "Docker Containerization")
 - "reason": A short explanation of why this topic is similar or related to the search query.
@@ -2246,7 +2277,7 @@ Please brainstorm 10-20 new topics that are similar, related, or logical next st
         }
         
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout for more topics
+        const timeoutId = setTimeout(() => controller.abort(), 180000);
         const response = await fetch("/vllm/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -2259,7 +2290,7 @@ Please brainstorm 10-20 new topics that are similar, related, or logical next st
                     { role: "user", content: userMessage }
                 ],
                 temperature: 0.7,
-                max_tokens: 1500
+                max_tokens: 3000
             }),
             signal: controller.signal
         });
@@ -2272,7 +2303,7 @@ Please brainstorm 10-20 new topics that are similar, related, or logical next st
         if (!message) throw new Error("No message returned from vLLM server.");
         
         let content = message.content;
-        if (content === null || content === undefined) {
+        if (content === null || content === undefined || content.trim() === "") {
             if (message.reasoning) {
                 const jsonMatch = message.reasoning.match(/\[\s*\{[\s\S]*\}\s*\]/);
                 if (jsonMatch) {
