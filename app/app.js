@@ -2152,12 +2152,12 @@ const systemPrompt = `You are a creative topic brainstorming assistant for a You
 Your goal is to brainstorm a list of 5 interesting, specific topic keywords or short phrases that the user might want to explore.
 
 To help the user discover new content and prevent feedback bubble overfitting, you MUST mix topics according to these rules:
-1. **Subcategories**: Take some of the user's liked topics and suggest more specific, niche subcategories (e.g. if they like "coding", recommend "systems programming" or "AST parsing").
-2. **Contrasting Alternatives**: Find areas that are the opposite or highly contrasting alternatives to the user's disliked topics.
+1. **Subcategories**: Take some of the user's liked topics (if any) and suggest more specific, niche subcategories. If the liked topics list is empty, suggest a subcategory of a popular general topic.
+2. **Contrasting Alternatives**: Find areas that are the opposite or highly contrasting alternatives to the user's disliked topics (if any). If the disliked topics list is empty, suggest a highly academic or intellectual topic.
 3. **Surprise Explorations**: Generate subjects that are completely uncorrelated to any topics on their liked or disliked lists to surprise them and break the bubble.
 
 Guidelines:
-- Keep your reasoning/thinking process extremely brief and concise.
+- CRITICAL: Skip step-by-step reasoning! Do NOT write a long thinking process or analyze the exclusion list. Your thinking process must be under 3 sentences.
 - Generate exactly 5 diverse topics.
 - Keep them short (1-3 words maximum, e.g. "Docker Containers", "Quantum Computing").
 - Do NOT suggest any topics that are on the user's disliked list.
@@ -2346,6 +2346,7 @@ async function generateSimilarTopicsFromSearch(searchQuery) {
 Your goal is to brainstorm a list of 10 to 20 interesting, specific topic keywords or short phrases that are closely related, similar, or logical next steps/expansions to the search query topic provided by the user.
 
 Guidelines:
+- CRITICAL: Skip step-by-step reasoning! Do NOT write a long thinking process. Your thinking process must be under 3 sentences.
 - Generate between 10 and 20 diverse, highly relevant topics.
 - Keep them short (1-3 words maximum, e.g. "Quantum Computing", "Deep Learning").
 - Do NOT suggest any topics that are on the user's disliked list.

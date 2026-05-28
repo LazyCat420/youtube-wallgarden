@@ -1,0 +1,155 @@
+Thinking Process:
+
+1.  **Analyze the Request:**
+    *   **Role:** Creative topic brainstorming assistant for a YouTube feed curation dashboard.
+    *   **Goal:** Brainstorm 5 interesting, specific topic keywords/phrases.
+    *   **Constraints:**
+        *   Mix topics according to rules (Subcategories, Contrasting Alternatives, Surprise Explorations).
+        *   Since Liked/Disliked/Recent Searches are empty, I need to follow the fallback rules (subcategory of popular general topic, highly academic/intellectual topic, surprise exploration).
+        *   CRITICAL: Do NOT suggest topics in "Already Used Topics" list.
+        *   Output Format: ONLY valid JSON array of objects. No markdown, no HTML, no extra text.
+        *   JSON Structure: `{"phrase": "...", "category": "...", "reason": "..."}`
+        *   Category options: `["similar", "interesting_tangent", "unrelated_but_interesting", "sub_category"]`
+        *   Phrase length: 1-3 words max.
+        *   Reason: Short explanation.
+    *   **Input Data:**
+        *   Liked Topics: []
+        *   Disliked Topics: []
+        *   Recent Searches: []
+        *   Already Used Topics: [gardening, coding, programming, llm, physics, quant equations, bbq, rust programming, prompt engineering, meditation, academic research, pottery, webassembly, permaculture design, history lectures, synthesizer music, urban planning, biocontrol agents, hydroponic systems, abstract art, deep sea diving, blacksmithing, javascript, math, science]
+
+2.  **Analyze Constraints & Exclusions:**
+    *   Must avoid: gardening, coding, programming, llm, physics, quant equations, bbq, rust programming, prompt engineering, meditation, academic research, pottery, webassembly, permaculture design, history lectures, synthesizer music, urban planning, biocontrol agents, hydroponic systems, abstract art, deep sea diving, blacksmithing, javascript, math, science.
+    *   This is a very extensive exclusion list covering tech (coding, llm, rust, js, webassembly), science/math (physics, quant equations, math, science), crafts (pottery, blacksmithing, gardening/permaculture/hydroponics), art (abstract art), leisure (bbq, meditation, deep sea diving), and academia (academic research, history lectures).
+    *   I need to find topics that are distinct from these but still interesting for a YouTube feed.
+
+3.  **Brainstorming Topics:**
+    *   *Rule 1 (Subcategories):* Since liked topics are empty, suggest a subcategory of a popular general topic. I need a popular topic NOT in the exclusion list.
+        *   Excluded: coding, programming, physics, math, science, history.
+        *   Potential: Cooking (BBQ excluded, but maybe general cooking?), Travel, DIY (pottery/blacksmithing excluded), Music (synthesizer excluded).
+        *   Let's try "Culinary Techniques" (BBQ is excluded, but general cooking isn't). Or "Street Photography" (Abstract art excluded, but photography isn't).
+        *   Let's go with "Sourdough Baking" (BBQ excluded, but baking is distinct). Or "Film Noir" (History lectures excluded, but film art is okay).
+        *   Actually, "Mechanical Keyboard Building" -> "Keyboard Enthusiast" (Coding/Programming excluded, but hardware is okay).
+        *   Let's pick "Home Brewing" (BBQ excluded, but brewing is different).
+        *   Better: "Indoor Plant Care" (Gardening/Hydroponics/Permaculture/Biocontrol excluded). Maybe "Fungi Cultivation" (Gardening excluded).
+        *   Let's try "Astronomy Observation" (Physics/Science excluded). Too close?
+        *   Let's try "Urban Sketching" (Abstract Art/Urban Planning excluded).
+        *   Let's try "Sustainable Fashion" (Gardening/Permaculture excluded).
+        *   Let's try "Vintage Car Restoration" (Blacksmithing/Coding excluded).
+        *   Let's try "Astrophotography" (Physics excluded, but photography is distinct).
+        *   Let's try "Coffee Brewing" (BBQ excluded).
+        *   Let's pick "Mechanical Engineering" (Physics/Quant excluded, but engineering is distinct).
+        *   Actually, looking at the list, "Music" has "synthesizer music". Maybe "Vocal Training".
+        *   "Film Photography" (Abstract art excluded).
+        *   "Space Exploration News" (Physics/Science excluded).
+        *   Let's go with "Mechanical Keyboard Assembly" (Hardware focus, distinct from Coding/Programming).
+        *   Wait, "coding, programming, rust, webassembly, javascript, llm, prompt engineering" covers tech heavily.
+        *   "Gardening, permaculture, hydroponic, biocontrol" covers nature heavily.
+        *   "Physics, quant equations, math, science" covers science heavily.
+        *   "Pottery, blacksmithing, abstract art" covers art/craft heavily.
+        *   "Urban planning, history lectures" covers social/study.
+        *   "Meditation, deep sea diving, bbq" covers leisure.
+        *   I need topics outside these clusters.
+        *   Idea 1: "Esports Commentary" (Gaming related, not coding).
+        *   Idea 2: "Stand-Up Comedy Analysis" (Entertainment).
+        *   Idea 3: "Archaeological Excavations" (History/Science overlap, but specific).
+        *   Idea 4: "Wildlife Photography" (Nature, distinct from gardening).
+        *   Idea 5: "Molecular Gastronomy" (Cooking distinct from BBQ).
+
+    *   *Rule 2 (Contrasting Alternatives):* If disliked is empty, suggest highly academic or intellectual topic.
+        *   Academic topics often overlap with "academic research" or "physics/math".
+        *   Maybe "Classical Literature Analysis".
+        *   Maybe "Philosophy of Mind".
+        *   Let's try "Existential Philosophy".
+        *   Wait, "academic research" is excluded. Maybe "Classical Music History".
+        *   Let's go with "Stoic Philosophy".
+
+    *   *Rule 3 (Surprise Explorations):* Uncorrelated topics.
+        *   "Competitive Juggling"
+        *   "Urban Beekeeping" (Gardening excluded).
+        *   "Lockpicking"
+        *   "Origami" (Pottery excluded).
+        *   "Escape Room Design"
+        *   "Astrology Charts" (Science excluded).
+        *   Let's try "Competitive Rock Climbing".
+
+    *   *Refining based on exclusions:*
+        1.  **Mechanical Keyboard Assembly**: Hardware/Craft. "Coding/Programming" excluded. "Blacksmithing" is craft. Distinct enough? Yes, electronics vs metal.
+        2.  **Stoic Philosophy**: Intellectual/Academic alternative. "Academic research" excluded. Philosophy is distinct.
+        3.  **Street Photography**: Art. "Abstract art" excluded. Photography is distinct.
+        4.  **Home Brewing**: Culinary. "BBQ" excluded. Brewing is distinct.
+        5.  **Astronomy News**: Science adjacent. "Science/Physics" excluded. "News" angle makes it different. Maybe too close to "Science".
+        6.  **Vintage Watch Restoration**: Craft/Engineering. "Blacksmithing" excluded. "Webassembly" excluded.
+        7.  **Urban Beekeeping**: Too close to "Gardening/Hydroponics".
+        8.  **Competitive Gaming**: "Deep sea diving" leisure.
+        9.  **Minimalist Architecture**: "Urban planning" excluded.
+        10. **Knife Making**: "Blacksmithing" excluded. Too close.
+        11. **Paper Craft**: "Pottery" excluded.
+        12. **Genealogy Research**: "History lectures" excluded. "Academic research" excluded.
+        13. **Podcast Production**: "Synthesizer music" excluded. Audio production distinct.
+        14. **Sourdough Baking**: "BBQ" excluded. Cooking distinct.
+        15. **Martial Arts Training**: "Meditation" excluded. Physical activity distinct.
+
+    *   *Selection:*
+        1.  **Subcategory**: "Mechanical Keyboard Assembly" (Tech adjacent but distinct from coding/programming). Or better: "Film Photography" (Art adjacent but distinct from abstract art). Let's go with "Film Photography" as a subcategory of Arts/Crafts.
+        2.  **Contrasting Alternative**: "Stoic Philosophy" (Intellectual, contrasting empty liked list).
+        3.  **Surprise**: "Competitive Juggling" (Uncorrelated).
+        4.  **Subcategory**: "Sourdough Baking" (Food, distinct from BBQ).
+        5.  **Surprise**: "Lockpicking" (Skill based, distinct from all).
+
+    *   *Check Exclusions:*
+        *   Film Photography: Not in list.
+        *   Stoic Philosophy: Not in list.
+        *   Competitive Juggling: Not in list.
+        *   Sourdough Baking: Not in list (BBQ is).
+        *   Lockpicking: Not in list.
+
+    *   *Check Categories:*
+        *   Need to mix: Subcategories, Contrasting, Surprise.
+        *   1. Film Photography -> "interesting_tangent" (Arts).
+        *   2. Stoic Philosophy -> "similar" (Intellectual/Academic alternative). Wait, rule says "If disliked topics list is empty, suggest a highly academic or intellectual topic." Category could be "interesting_tangent". Let's use "interesting_tangent" for intellectual.
+        *   3. Competitive Juggling -> "unrelated_but_interesting".
+        *   4. Sourdough Baking -> "sub_category" (Cooking).
+        *   5. Lockpicking -> "unrelated_but_interesting".
+
+    *   *Wait, need to ensure 5 diverse topics.*
+    *   Let's refine categories to match the prompt's instruction logic exactly.
+    *   Rule 1 (Subcategories): "Take some of the user's liked topics... If empty, suggest a subcategory of a popular general topic." -> I'll pick one "sub_category".
+    *   Rule 2 (Contrasting): "If empty, suggest a highly academic or intellectual topic." -> I'll pick one "interesting_tangent" or "similar". Let's call it "interesting_tangent".
+    *   Rule 3 (Surprise): "Generate subjects that are completely uncorrelated..." -> I'll pick two "unrelated_but_interesting".
+    *   Remaining: 2 more diverse topics. I can use "interesting_tangent" again or "sub_category". Let's balance.
+    *   Actually, the prompt says "mix topics according to these rules". I should aim for a mix.
+    *   Plan:
+        1.  Sub_category (Popular general topic sub)
+        2.  Interesting_tangent (Intellectual/Contrasting)
+        3.  Unrelated_but_interesting (Surprise)
+        4.  Sub_category (Another popular topic sub)
+        5.  Unrelated_but_interesting (Surprise)
+
+    *   *Topic Check:*
+        1.  "Sourdough Baking" (Sub_category - Food)
+        2.  "Existentialism" (Interesting_tangent - Intellectual)
+        3.  "Competitive Juggling" (Unrelated - Skill)
+        4.  "Street Photography" (Sub_category - Art, distinct from Abstract Art)
+        5.  "Urban Beekeeping" -> Wait, "Gardening/Permaculture/Hydroponics" excluded. Beekeeping is close. Let's swap for "Lockpicking".
+        5.  "Lockpicking" (Unrelated - Skill)
+
+    *   *Final Check against Exclusions:*
+        *   Sourdough Baking: OK.
+        *   Existentialism: OK.
+        *   Competitive Juggling: OK.
+        *   Street Photography: OK.
+        *   Lockpicking: OK.
+        *   Wait, "Lockpicking" might be too niche? No, it's a YouTube topic.
+        *   Check "Already Used Topics": gardening, coding, programming, llm, physics, quant equations, bbq, rust programming, prompt engineering, meditation, academic research, pottery, webassembly, permaculture design, history lectures, synthesizer music, urban planning, biocontrol agents, hydroponic systems, abstract art, deep sea diving, blacksmithing, javascript, math, science.
+        *   None of my selected topics are in this list.
+
+    *   *Formatting:* JSON array only. No markdown ticks.
+
+    *   *JSON Construction:*
+        *   Keys: "phrase", "category", "reason".
+        *   Values: Short strings.
+
+    *   *Reasoning:*
+        1.  Sourdough Baking: "Subcategory of cooking distinct from BBQ".
+        2.  Existentialism: "Intellectual topic contrasting empty
