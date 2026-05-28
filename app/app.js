@@ -2199,8 +2199,8 @@ async function generateBrainstormTopics(append, numRequests = 1) {
     console.log(`[Smart Feed] Background LLM brainstorming started (firing ${numRequests} parallel requests)...`);
     
     // Construct user profile message
-    const liked = (state.likedTopics || []).join(", ");
-    const disliked = (state.dislikedTopics || []).join(", ");
+    const liked = state.topics.filter(t => t.weight > 0).map(t => `${t.phrase} (weight: ${t.weight})`).join(", ");
+    const disliked = state.topics.filter(t => t.weight < 0).map(t => `${t.phrase} (weight: ${t.weight})`).join(", ");
     const searches = state.searchHistory.join(", ");
     const currentQueue = state.smartFeedTopicsQueue.join(", ");
     const usedTopics = state.smartFeedUsedTopics.join(", ");
@@ -2338,6 +2338,7 @@ async function generateSimilarTopicsFromSearch(searchQuery) {
     if (!searchQuery) return;
     console.log(`[Smart Feed] Background similar topics generation started for query: "${searchQuery}"`);
     
+    const liked = state.topics.filter(t => t.weight > 0).map(t => `${t.phrase} (weight: ${t.weight})`).join(", ");
     const disliked = state.topics.filter(t => t.weight < 0).map(t => `${t.phrase} (weight: ${t.weight})`).join(", ");
     const currentQueue = state.smartFeedTopicsQueue.join(", ");
     const usedTopics = state.smartFeedUsedTopics.join(", ");
