@@ -75,6 +75,18 @@ function clearRenderTimeouts() {
     renderTimeouts = [];
 }
 
+function getWeightedRandomTopics(topics) {
+    const positiveTopics = topics.filter(t => t.weight > 0);
+    // Sort using weighted random sampling without replacement (A-Res algorithm)
+    return positiveTopics
+        .map(t => ({
+            phrase: t.phrase.toLowerCase(),
+            sortKey: Math.pow(Math.random(), 1 / t.weight)
+        }))
+        .sort((a, b) => b.sortKey - a.sortKey)
+        .map(t => t.phrase);
+}
+
 function initSmartFeed() {
     state.smartFeedVideos = [];
     state.smartFeedUsedTopics = [];
@@ -84,13 +96,10 @@ function initSmartFeed() {
     state.smartFeedPreloadedVideos = [];
     state.smartFeedPreloadLoading = false;
     
-    // Get positive topics (weight > 0) sorted by weight descending
-    const positiveTopics = state.topics
-        .filter(t => t.weight > 0)
-        .sort((a, b) => b.weight - a.weight)
-        .map(t => t.phrase.toLowerCase());
+    // Get positive topics randomized by weight
+    const randomizedTopics = getWeightedRandomTopics(state.topics);
     
-    state.smartFeedTopicsQueue = [...positiveTopics];
+    state.smartFeedTopicsQueue = [...randomizedTopics];
     if (state.smartFeedTopicsQueue.length === 0) {
         state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
     }
@@ -2746,10 +2755,8 @@ async function fillSmartFeedPreloadBuffer() {
     
     if (state.smartFeedTopicsQueue.length === 0) {
         console.log("[Smart Feed] Queue is empty! Repopulating from positive topics...");
-        const positiveTopics = state.topics
-            .filter(t => t.weight > 0)
-            .map(t => t.phrase.toLowerCase());
-        state.smartFeedTopicsQueue = [...positiveTopics];
+        const randomizedTopics = getWeightedRandomTopics(state.topics);
+        state.smartFeedTopicsQueue = [...randomizedTopics];
         if (state.smartFeedTopicsQueue.length === 0) {
             state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
         }
@@ -2846,11 +2853,9 @@ async function loadNextSmartFeedBatch() {
     
     if (state.smartFeedTopicsQueue.length === 0) {
         console.log("[Smart Feed] Queue is empty! Generating more topics first...");
-        const positiveTopics = state.topics
-            .filter(t => t.weight > 0)
-            .map(t => t.phrase.toLowerCase());
+        const randomizedTopics = getWeightedRandomTopics(state.topics);
         
-        state.smartFeedTopicsQueue = [...positiveTopics];
+        state.smartFeedTopicsQueue = [...randomizedTopics];
         if (state.smartFeedTopicsQueue.length === 0) {
             state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
         }
