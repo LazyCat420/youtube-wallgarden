@@ -264,6 +264,13 @@ function setupEventListeners() {
             state.discoverBatchIndex = 0;
             state.discoverMaxReached = false;
             document.getElementById("current-view-title").textContent = btn.querySelector(".nav-label").textContent;
+            
+            if (state.currentView === "smart-feed") {
+                state.smartFeedVideos = [];
+                state.smartFeedPreloadedVideos = [];
+                initSmartFeed(); // Repopulates and randomizes topics queue
+            }
+            
             renderFeed();
         });
     });
@@ -560,6 +567,24 @@ async function resolveAndAddChannel(query) {
     let channelId = "";
     let channelName = "";
 
+    // Case 0: Reddit Subreddit
+    if (query.startsWith("r/") || query.startsWith("reddit.com/r/") || query.startsWith("https://www.reddit.com/r/")) {
+        const match = query.match(/r\/([a-zA-Z0-9_]+)/);
+        if (match && match[1]) {
+            const subreddit = match[1].toLowerCase();
+            channelId = `reddit:r/${subreddit}`;
+            channelName = `r/${subreddit}`;
+            
+            if (state.channels.some(c => c.id === channelId)) {
+                throw new Error("Subreddit is already in your subscription list!");
+            }
+            state.channels.push({ name: channelName, id: channelId });
+            saveChannels();
+            syncFeeds();
+            return;
+        }
+    }
+
     // Case 1: UC... style direct Channel ID
     if (/^UC[A-Za-z0-9_-]{22}$/.test(query)) {
         channelId = query;
@@ -769,8 +794,46 @@ async function syncFeeds() {
             let videos = [];
             let success = false;
 
-            // Try RSS first if use-ytdlp setting is not active
-            if (!state.settings.useYtdlp) {
+            // Check if it's a Reddit feed
+            if (channel.id.startsWith("reddit:")) {
+                try {
+                    const subreddit = channel.id.split(":")[1].replace("r/", "");
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 8000);
+                    const response = await fetch(`/reddit/r/${subreddit}/hot/.rss`, { signal: controller.signal });
+                    clearTimeout(timeoutId);
+                    if (response.ok) {
+                        const xmlText = await response.text();
+                        const parser = new DOMParser();
+                        const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+                        
+                        const entries = xmlDoc.querySelectorAll("entry");
+                        entries.forEach(entry => {
+                            const title = entry.querySelector("title")?.textContent || "";
+                            const content = entry.querySelector("content")?.textContent || entry.querySelector("summary")?.textContent || "";
+                            const publishedStr = entry.querySelector("published")?.textContent || entry.querySelector("updated")?.textContent || "";
+                            
+                            const ytMatch = content.match(/href="https:\/\/(?:www\.)?youtube\.com\/watch\?v=([^"&?]+)/) || 
+                                            content.match(/href="https:\/\/youtu\.be\/([^"&?]+)/);
+                            
+                            if (ytMatch && ytMatch[1]) {
+                                videos.push({
+                                    id: ytMatch[1],
+                                    title: title,
+                                    channelName: channel.name,
+                                    channelId: channel.id,
+                                    published: new Date(publishedStr).getTime()
+                                });
+                            }
+                        });
+                        success = true;
+                    }
+                } catch (err) {
+                    console.error(`Reddit sync failed for ${channel.name}:`, err);
+                }
+            }
+            // Try RSS first if useYtdlp setting is not active
+            else if (!state.settings.useYtdlp) {
                 try {
                     const controller = new AbortController();
                     const timeoutId = setTimeout(() => controller.abort(), 8000);
@@ -812,7 +875,7 @@ async function syncFeeds() {
             }
 
             // Fallback to Scraper Service (yt-dlp) if RSS failed or useYtdlp is true
-            if (!success) {
+            if (!success && !channel.id.startsWith("reddit:")) {
                 try {
                     console.log(`Syncing channel ${channel.name} (${channel.id}) via scraper-service...`);
                     const controller = new AbortController();
@@ -1099,6 +1162,8 @@ function renderFeed() {
     const grid = document.getElementById("video-grid");
     const shortsShelf = document.getElementById("shorts-shelf");
     const shortsGrid = document.getElementById("shorts-grid");
+    const redditShelf = document.getElementById("reddit-shelf");
+    const redditGrid = document.getElementById("reddit-grid");
     const emptyState = document.getElementById("empty-state");
     const brainstormContainer = document.getElementById("ai-brainstorm-container");
     
@@ -1108,19 +1173,27 @@ function renderFeed() {
     grid.innerHTML = "";
     shortsGrid.innerHTML = "";
     shortsShelf.classList.add("hidden");
+    if (redditGrid) redditGrid.innerHTML = "";
+    if (redditShelf) redditShelf.classList.add("hidden");
     
     // Handle Smart Feed
     if (state.currentView === "smart-feed") {
         let subVideos = [];
+        let redditVideos = [];
         Object.values(state.cache.videos).forEach(channelVideos => {
             channelVideos.forEach(v => {
                 const evaluation = getScoreAndMatches(v);
-                subVideos.push({
+                const enriched = {
                     ...v,
                     score: evaluation.score,
                     matchedTopics: evaluation.matches,
                     isDiscover: false
-                });
+                };
+                if (v.channelId && v.channelId.startsWith("reddit:")) {
+                    redditVideos.push(enriched);
+                } else {
+                    subVideos.push(enriched);
+                }
             });
         });
         
@@ -1152,23 +1225,59 @@ function renderFeed() {
             subShorts.slice(0, 10).forEach(short => renderCard(short, shortsFragment));
             shortsGrid.appendChild(shortsFragment);
         }
+
+        if (redditVideos.length > 0 && redditShelf && redditGrid) {
+            redditShelf.classList.remove("hidden");
+            const redditFragment = document.createDocumentFragment();
+            redditVideos.sort((a, b) => b.published - a.published).slice(0, 15).forEach(vid => renderCard(vid, redditFragment));
+            redditGrid.appendChild(redditFragment);
+        }
         
         if (initialSubVideos.length > 0) {
-            const subHeader = document.createElement("div");
-            subHeader.className = "discover-section-header";
-            subHeader.style.gridColumn = "1 / -1";
-            subHeader.style.marginBottom = "1rem";
-            subHeader.innerHTML = `
-                <h2 class="discover-section-title" style="font-size: 1.15rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
-                    <span>🌿 Subscribed Feeds</span>
-                </h2>
-                <span class="discover-badge" style="font-size: 0.7rem; opacity: 0.6;">Your Subscriptions</span>
+            const detailsElement = document.createElement("details");
+            detailsElement.className = "subscriptions-collapsible";
+            detailsElement.style.gridColumn = "1 / -1";
+            detailsElement.open = true;
+            
+            const summaryElement = document.createElement("summary");
+            summaryElement.className = "discover-section-header";
+            summaryElement.style.cursor = "pointer";
+            summaryElement.style.outline = "none";
+            summaryElement.style.marginBottom = "1rem";
+            summaryElement.style.display = "flex";
+            summaryElement.style.alignItems = "center";
+            summaryElement.style.listStyle = "none";
+            
+            summaryElement.innerHTML = `
+                <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span class="collapse-icon" style="font-size: 0.9rem; transition: transform 0.2s;">▼</span>
+                        <h2 class="discover-section-title" style="font-size: 1.15rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
+                            <span>🌿 Subscribed Feeds</span>
+                        </h2>
+                        <span class="discover-badge" style="font-size: 0.7rem; opacity: 0.6;">Your Subscriptions</span>
+                    </div>
+                    <span style="font-size: 0.8rem; color: var(--text-muted);">Click to toggle</span>
+                </div>
             `;
-            grid.appendChild(subHeader);
+            
+            summaryElement.addEventListener("click", () => {
+                const icon = summaryElement.querySelector(".collapse-icon");
+                icon.style.transform = detailsElement.open ? "rotate(-90deg)" : "rotate(0deg)";
+            });
+
+            detailsElement.appendChild(summaryElement);
+            
+            const subGrid = document.createElement("div");
+            subGrid.className = "video-grid";
+            subGrid.style.marginBottom = "2rem";
             
             const feedFragment = document.createDocumentFragment();
             initialSubVideos.forEach(video => renderCard(video, feedFragment));
-            grid.appendChild(feedFragment);
+            subGrid.appendChild(feedFragment);
+            
+            detailsElement.appendChild(subGrid);
+            grid.appendChild(detailsElement);
         }
         
         if (state.smartFeedVideos.length > 0) {
