@@ -1085,6 +1085,69 @@ body {
     box-shadow: none;
 }
 
+/* ── Subscriptions Collapsible Section ── */
+.subscriptions-collapsible {
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    background: rgba(255, 255, 255, 0.015);
+    margin-bottom: 0.5rem;
+    transition: background 0.2s ease;
+}
+
+.subscriptions-collapsible[open] {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.subscriptions-collapsible summary {
+    list-style: none;
+}
+
+.subscriptions-collapsible summary::-webkit-details-marker {
+    display: none;
+}
+
+.subscriptions-collapsible summary::marker {
+    display: none;
+    content: "";
+}
+
+.subscriptions-collapsible summary:hover {
+    opacity: 0.85;
+}
+
+/* ── Suggestions Section Header ── */
+.suggestions-section-header {
+    grid-column: 1 / -1;
+    margin-top: 1.5rem;
+    margin-bottom: 1rem;
+    padding: 0.75rem 0;
+    border-top: 2px solid transparent;
+    border-image: linear-gradient(to right, #A78BFA, #38BDF8, var(--accent)) 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.suggestions-badge {
+    background: rgba(167, 139, 250, 0.1);
+    color: #A78BFA;
+    border: 1px solid rgba(167, 139, 250, 0.4);
+    font-size: 0.7rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+#suggestions-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1.5rem;
+    grid-column: 1 / -1;
+}
+
 /* Mixed Topics Styles */
 .discover-section-header {
     grid-column: 1 / -1;

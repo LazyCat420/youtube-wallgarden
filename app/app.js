@@ -1280,12 +1280,34 @@ function renderFeed() {
             grid.appendChild(detailsElement);
         }
         
+        // ── Suggestions Section (AI-driven discover feed) ──
+        const suggestionsHeader = document.createElement("div");
+        suggestionsHeader.className = "suggestions-section-header";
+        suggestionsHeader.style.gridColumn = "1 / -1";
+        suggestionsHeader.innerHTML = `
+            <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <h2 class="discover-section-title" style="font-size: 1.15rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
+                        <span>✨ Suggestions</span>
+                    </h2>
+                    <span class="suggestions-badge">AI Discovery</span>
+                </div>
+                <span style="font-size: 0.8rem; color: var(--text-muted);">Based on your topics & interests</span>
+            </div>
+        `;
+        grid.appendChild(suggestionsHeader);
+        
+        const suggestionsGrid = document.createElement("div");
+        suggestionsGrid.id = "suggestions-grid";
+        suggestionsGrid.className = "video-grid";
+        grid.appendChild(suggestionsGrid);
+        
         if (state.smartFeedVideos.length > 0) {
             const fragment = document.createDocumentFragment();
             state.smartFeedVideos.forEach(video => {
                 renderCard(video, fragment);
             });
-            grid.appendChild(fragment);
+            suggestionsGrid.appendChild(fragment);
         } else {
             loadNextSmartFeedBatch();
         }
@@ -2915,8 +2937,9 @@ async function loadNextSmartFeedBatch() {
     if (state.smartFeedLoading) return;
     state.smartFeedLoading = true;
     
-    const grid = document.getElementById("video-grid");
-    if (!grid) {
+    // Target the dedicated suggestions grid, fall back to video-grid
+    const suggestionsGrid = document.getElementById("suggestions-grid") || document.getElementById("video-grid");
+    if (!suggestionsGrid) {
         state.smartFeedLoading = false;
         return;
     }
@@ -2937,7 +2960,7 @@ async function loadNextSmartFeedBatch() {
             deduplicated.forEach(video => {
                 renderCard(video, fragment);
             });
-            grid.appendChild(fragment);
+            suggestionsGrid.appendChild(fragment);
         }
         
         state.smartFeedLoading = false;
@@ -2949,7 +2972,7 @@ async function loadNextSmartFeedBatch() {
     }
     
     // Fallback if buffer is empty
-    let loader = grid.querySelector(".smart-feed-loader");
+    let loader = suggestionsGrid.querySelector(".smart-feed-loader");
     if (!loader) {
         loader = document.createElement("div");
         loader.className = "smart-feed-loader infinite-scroll-loader";
@@ -2957,7 +2980,7 @@ async function loadNextSmartFeedBatch() {
         loader.style.gridColumn = "1 / -1";
         loader.style.textAlign = "center";
         loader.style.padding = "2rem";
-        grid.appendChild(loader);
+        suggestionsGrid.appendChild(loader);
     }
     
     if (state.smartFeedTopicsQueue.length === 0) {
@@ -2974,7 +2997,7 @@ async function loadNextSmartFeedBatch() {
     
     const topic = state.smartFeedTopicsQueue.shift();
     if (!topic) {
-        const updatedLoader = grid.querySelector(".smart-feed-loader");
+        const updatedLoader = suggestionsGrid.querySelector(".smart-feed-loader");
         if (updatedLoader) updatedLoader.remove();
         state.smartFeedLoading = false;
         return;
@@ -2997,12 +3020,12 @@ async function loadNextSmartFeedBatch() {
             deduplicated.forEach(video => {
                 renderCard(video, fragment);
             });
-            grid.appendChild(fragment);
+            suggestionsGrid.appendChild(fragment);
         }
     } catch (err) {
         console.error(`[Smart Feed] Fallback fetch failed for "${topic}":`, err);
     } finally {
-        const updatedLoader = grid.querySelector(".smart-feed-loader");
+        const updatedLoader = suggestionsGrid.querySelector(".smart-feed-loader");
         if (updatedLoader) updatedLoader.remove();
         
         state.smartFeedLoading = false;
