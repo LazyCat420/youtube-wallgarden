@@ -121,7 +121,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // Unconditionally run background brainstorm topics on load to populate the feed and hit vLLM
     setTimeout(() => {
         console.log("[Smart Feed] Launch brainstorm started...");
-        generateBrainstormTopics(true, 3); // Appends new topics with 3 parallel requests
+        generateBrainstormTopics(true, 1); // Appends new topics with 1 request
     }, 1000);
 });
 
@@ -2197,34 +2197,17 @@ function parseLlmJsonResponse(content) {
 // AI Topic Brainstorming Features
 let activeLlmModel = "default-model";
 
-const systemPrompt = `You are a semantic topic brainstorming assistant. You view the user's topics as nodes in a conceptual graph and suggest new connections and branches to expand their feed, avoiding repetition.
+const systemPrompt = `You are a topic brainstorming assistant. You view topics as nodes in a conceptual graph.
+Suggest 5 new topics to expand the user's graph, avoiding repetition.
 
-Your goal is to brainstorm a list of 5 interesting, specific topic keywords or short phrases that build off and extend the user's topic graph.
-
-Guidelines:
-- CRITICAL: Skip step-by-step reasoning! Do NOT write a long thinking process. Keep thinking extremely brief.
-- Generate exactly 5 new topics.
-- Keep topics short (1-3 words maximum, e.g. "Docker Containers", "Quantum Computing").
-- Do NOT suggest any topics that are on the user's disliked list.
-- MUST NOT suggest duplicates or topics already used/queued.
-- For each new topic, specify which existing topic node it connects to/builds off of ("associated_with").
-
-You MUST respond ONLY with a JSON object containing a "topics" array. No markdown, no HTML, no explanation outside the JSON.
-
-Expected JSON schema:
+Output a valid JSON object matching this schema:
 {
   "topics": [
     {
-      "phrase": "Docker Containers",
-      "category": "sub_category",
-      "reason": "Niche expansion based on virtualization",
-      "associated_with": "coding"
-    },
-    {
-      "phrase": "Quantum Physics",
-      "category": "unrelated_but_interesting",
-      "reason": "Surprise exploration of new domains to break feedback loop",
-      "associated_with": "physics"
+      "phrase": "topic name (1-3 words maximum, e.g. 'Docker Containers')",
+      "category": "sub_category" | "similar" | "interesting_tangent" | "unrelated_but_interesting",
+      "reason": "short explanation of why this topic is suggested",
+      "associated_with": "existing topic name it connects to"
     }
   ]
 }`;
@@ -2259,14 +2242,14 @@ async function generateBrainstormTopics(append, numRequests = 1) {
     const currentQueue = state.smartFeedTopicsQueue.join(", ");
     const usedTopics = state.smartFeedUsedTopics.join(", ");
     
-    const userMessage = `User Profile:
-- Liked Topics: [${liked}]
-- Disliked Topics: [${disliked}]
-- Recent Searches: [${searches}]
-- Currently Queued Topics (Avoid duplicates): [${currentQueue}]
-- Already Used Topics (Avoid duplicates): [${usedTopics}]
+    const userMessage = `Current Conceptual Node Graph:
+- Existing Topic Nodes: [${liked}]
+- Disliked/Excluded Nodes: [${disliked}]
+- Exploration History: [${searches}]
+- Currently Queued Nodes (Do not duplicate): [${currentQueue}]
+- Already Visited/Used Nodes (Do not duplicate): [${usedTopics}]
 
-Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
+Please brainstorm 5 new nodes that connect to or expand from the existing nodes in the graph, without duplicating any.`;
 
     const MAX_RETRIES = 2;
     let attempt = 0;
@@ -2297,7 +2280,6 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
                             { role: "system", content: systemPrompt },
                             { role: "user", content: userMessage }
                         ],
-                        response_format: { type: "json_object" },
                         temperature: 0.8 + (attempt * 0.1) + (i * 0.05), // Increase randomness on retries
                         max_tokens: 3000
                     }),
@@ -2394,46 +2376,29 @@ async function generateSimilarTopicsFromSearch(searchQuery) {
     const currentQueue = state.smartFeedTopicsQueue.join(", ");
     const usedTopics = state.smartFeedUsedTopics.join(", ");
     
-    const systemPromptSimilar = `You are a semantic topic brainstorming assistant. You view topics as nodes in a conceptual graph and suggest connections and branches to expand the user's search query into new related nodes.
+    const systemPromptSimilar = `You are a search query assistant. You view topics as nodes in a conceptual graph.
+Suggest 5 new topics that are closely related or logical next steps to the user's search query.
 
-Your goal is to brainstorm 5 to 7 interesting, specific topic keywords or short phrases that are closely related, similar, or logical next steps/expansions of the searched topic.
-
-Guidelines:
-- CRITICAL: Skip step-by-step reasoning! Do NOT write a long thinking process. Keep thinking extremely brief.
-- Generate between 5 and 7 diverse, highly relevant topics.
-- Keep topics short (1-3 words maximum, e.g. "Quantum Computing", "Deep Learning").
-- Do NOT suggest any topics that are on the user's disliked list.
-- MUST NOT suggest duplicates or topics already used/queued.
-- For each new topic, specify the searched topic node it connects to/builds off of ("associated_with").
-
-You MUST respond ONLY with a JSON object containing a "topics" array. No markdown, no HTML, no explanation outside the JSON.
-
-Expected JSON schema:
+Output a valid JSON object matching this schema:
 {
   "topics": [
     {
-      "phrase": "Docker Containers",
-      "category": "similar",
-      "reason": "Related topic on virtualization",
-      "associated_with": "devops"
-    },
-    {
-      "phrase": "Kubernetes Orchestration",
-      "category": "sub_category",
-      "reason": "Next logical step in container scheduling",
-      "associated_with": "docker containers"
+      "phrase": "topic name (1-3 words maximum, e.g. 'Kubernetes')",
+      "category": "similar" | "sub_category" | "interesting_tangent" | "unrelated_but_interesting",
+      "reason": "short explanation of why this is related",
+      "associated_with": "search query"
     }
   ]
 }`;
 
-    const userMessage = `The user just searched for the topic: "${searchQuery}".
-User Profile:
-- Liked Topics: [${liked}]
-- Disliked Topics: [${disliked}]
-- Currently Queued Topics (Avoid duplicates): [${currentQueue}]
-- Already Used Topics (Avoid duplicates): [${usedTopics}]
+    const userMessage = `Current Conceptual Node Graph:
+- Searched Node: "${searchQuery}"
+- Liked Nodes: [${liked}]
+- Disliked/Excluded Nodes: [${disliked}]
+- Currently Queued Nodes (Do not duplicate): [${currentQueue}]
+- Already Visited/Used Nodes (Do not duplicate): [${usedTopics}]
 
-Please brainstorm 5-7 new topics that are similar, related, or logical next steps/expansions to the searched topic "${searchQuery}" and fit the user's profile. Return ONLY JSON.`;
+Please brainstorm 5 new nodes that connect to or expand from "${searchQuery}" in the graph, without duplicating any.`;
 
     const MAX_RETRIES = 2;
     let attempt = 0;
@@ -2463,7 +2428,6 @@ Please brainstorm 5-7 new topics that are similar, related, or logical next step
                         { role: "system", content: systemPromptSimilar },
                         { role: "user", content: userMessage }
                     ],
-                    response_format: { type: "json_object" },
                     temperature: 0.7 + (attempt * 0.1),
                     max_tokens: 3000
                 }),
@@ -2678,6 +2642,8 @@ async function fetchVideosForTopic(topic) {
     return [];
 }
 
+let smartFeedPreloadTimeout = null;
+
 async function fillSmartFeedPreloadBuffer() {
     if (state.smartFeedPreloadLoading) return;
     
@@ -2685,6 +2651,12 @@ async function fillSmartFeedPreloadBuffer() {
     const targetPreloadCount = 50;
     if (state.smartFeedPreloadedVideos.length >= targetPreloadCount) {
         return; // Preload buffer is full
+    }
+    
+    // Clear any pending timeout to prevent duplicate schedules
+    if (smartFeedPreloadTimeout) {
+        clearTimeout(smartFeedPreloadTimeout);
+        smartFeedPreloadTimeout = null;
     }
     
     // Check if we need to brainstorm more topics using LLM
@@ -2695,7 +2667,7 @@ async function fillSmartFeedPreloadBuffer() {
 
     if (totalUpcoming < 50 && !state.brainstormLoading && !isCooldownActive) {
         console.log("[Smart Feed] Total upcoming topics low, triggering background LLM brainstorm...");
-        generateBrainstormTopics(true, 3).then(() => {
+        generateBrainstormTopics(true, 1).then(() => {
             fillSmartFeedPreloadBuffer();
         });
     }
@@ -2742,9 +2714,12 @@ async function fillSmartFeedPreloadBuffer() {
         state.smartFeedPreloadLoading = false;
         
         // Cooldown delay of 1.5 seconds between fetches to protect from rate-limiting
-        setTimeout(() => {
-            fillSmartFeedPreloadBuffer();
-        }, 1500);
+        // Only schedule if we are still below target preload count
+        if (state.smartFeedPreloadedVideos.length < targetPreloadCount) {
+            smartFeedPreloadTimeout = setTimeout(() => {
+                fillSmartFeedPreloadBuffer();
+            }, 1500);
+        }
     }
 }
 
