@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="app.css?v=20260528-v8">
+    <link rel="stylesheet" href="app.css?v=20260528-v9">
 </head>
 <body>
     <div class="app-layout">
@@ -22,6 +22,11 @@
                 <button class="nav-item active" data-view="smart-feed">
                     <span class="nav-icon">🌿</span>
                     <span class="nav-label">Smart Feed</span>
+                </button>
+                <button class="nav-item" data-view="subscriptions">
+                    <span class="nav-icon">📺</span>
+                    <span class="nav-label">Subscriptions</span>
+                    <span class="nav-count" id="nav-sub-count">0</span>
                 </button>
             </nav>
 
@@ -38,21 +43,28 @@
         <!-- Main Dashboard View -->
         <main class="main-content">
             <header class="main-header">
-                <div class="header-title-area">
-                    <h1 id="current-view-title">Smart Feed</h1>
-                    <p id="dashboard-status-text" class="status-subtitle">Loading feeds...</p>
+                <div class="header-top-row">
+                    <div class="header-title-area">
+                        <h1 id="current-view-title">Smart Feed</h1>
+                        <p id="dashboard-status-text" class="status-subtitle">Loading feeds...</p>
+                    </div>
+                    <div class="header-actions">
+                        <button id="btn-sync-now" class="btn btn-primary btn-icon-only" title="Sync RSS Feeds">
+                            <span class="btn-text">Sync Feeds</span>
+                            <span class="sync-spinner">🔄</span>
+                        </button>
+                    </div>
                 </div>
-                <div class="header-actions">
+                <div class="header-search-row">
                     <form id="search-form" class="header-search-bar" action="" onsubmit="return false;">
                         <span class="search-icon">🔍</span>
                         <input type="text" id="input-search-videos" placeholder="Search feed or query YouTube...">
                         <button id="btn-clear-search" class="btn-clear-search hidden" title="Clear search" type="button">✕</button>
                         <button id="btn-submit-search" class="btn-submit-search" title="Search YouTube" type="submit">➤</button>
                     </form>
-                    <button id="btn-sync-now" class="btn btn-primary btn-icon-only" title="Sync RSS Feeds">
-                        <span class="btn-text">Sync Feeds</span>
-                        <span class="sync-spinner">🔄</span>
-                    </button>
+                    <div id="search-suggestions" class="search-suggestions">
+                        <!-- Suggestion pills populated dynamically -->
+                    </div>
                 </div>
             </header>
 
@@ -326,6 +338,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=20260528-v8"></script>
+    <script src="app.js?v=20260528-v9"></script>
 </body>
 </html>

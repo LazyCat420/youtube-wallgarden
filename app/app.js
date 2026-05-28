@@ -115,6 +115,8 @@ document.addEventListener("DOMContentLoaded", () => {
     setupEventListeners();
     initSmartFeed();
     fetchLlmModel();
+    updateSubCount();
+    renderSearchSuggestions();
     
     // Render cached feed immediately so the UI is active and loads discovery videos
     renderFeed();
@@ -133,6 +135,55 @@ document.addEventListener("DOMContentLoaded", () => {
         generateBrainstormTopics(true, 1); // Appends new topics with 1 request
     }, 1000);
 });
+
+// Update subscription count badge in sidebar
+function updateSubCount() {
+    const el = document.getElementById("nav-sub-count");
+    if (el) el.textContent = state.channels.length;
+}
+
+// Render suggestion pills under the search bar
+function renderSearchSuggestions() {
+    const container = document.getElementById("search-suggestions");
+    if (!container) return;
+    container.innerHTML = "";
+    
+    const suggestions = new Set();
+    
+    // 1. Positive-weight topics
+    state.topics
+        .filter(t => t.weight > 0)
+        .sort((a, b) => b.weight - a.weight)
+        .forEach(t => suggestions.add(t.phrase.toLowerCase()));
+    
+    // 2. Liked topics
+    if (state.likedTopics) {
+        state.likedTopics.forEach(t => suggestions.add(t.toLowerCase()));
+    }
+    
+    // 3. Recent search history (last 5)
+    if (state.searchHistory) {
+        state.searchHistory.slice(0, 5).forEach(q => suggestions.add(q.toLowerCase()));
+    }
+    
+    // Limit to 12 pills
+    const pills = [...suggestions].slice(0, 12);
+    
+    pills.forEach(topic => {
+        const pill = document.createElement("button");
+        pill.className = "suggestion-pill";
+        pill.type = "button";
+        pill.textContent = topic.split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+        pill.addEventListener("click", () => {
+            const searchInput = document.getElementById("input-search-videos");
+            if (searchInput) searchInput.value = topic;
+            state.discoverBatchIndex = 0;
+            state.discoverMaxReached = false;
+            triggerGlobalSearch(topic);
+        });
+        container.appendChild(pill);
+    });
+}
 
 // Load variables from Local Storage
 function loadState() {
@@ -296,6 +347,8 @@ function setupEventListeners() {
         settingsModal.classList.add("hidden");
         document.getElementById("search-results-container").classList.add("hidden");
         initSmartFeed(); // Reinitialize topic queue with updated weights
+        updateSubCount();
+        renderSearchSuggestions();
         renderFeed();
     });
 
@@ -1079,7 +1132,7 @@ function renderCard(video, targetContainer) {
                 <button class="rate-btn danger" data-rating="-5" title="Dislike" style="padding: 0.25rem 0.5rem; border-radius: 4px; background: rgba(231, 76, 60, 0.2); color: #e74c3c;">👎 -5</button>
             </div>
             <button class="danger" data-action="block">🚫 Block Channel</button>
-            <button data-action="subscribe" ${isSubscribed ? 'disabled' : ''}>➕ ${isSubscribed ? 'Already Subscribed' : 'Subscribe to Channel'}</button>
+            <button data-action="subscribe">${isSubscribed ? '➖ Unsubscribe' : '➕ Subscribe to Channel'}</button>
             <button data-action="hide">🔇 Hide Video</button>
         `;
         
@@ -1123,13 +1176,27 @@ function renderCard(video, targetContainer) {
         
         dropdown.querySelector('[data-action="subscribe"]').addEventListener("click", (ev) => {
             ev.stopPropagation();
-            if (isSubscribed) return;
             const channelName = video.channelName;
             const channelId = video.channelId || "";
-            state.channels.push({ name: channelName, id: channelId });
-            saveChannels();
-            dropdown.remove();
-            showToast(`✅ Subscribed to ${channelName}`, "success");
+            
+            if (isSubscribed) {
+                // Unsubscribe
+                state.channels = state.channels.filter(ch => 
+                    !(ch.id && video.channelId && ch.id === video.channelId) &&
+                    !(ch.name && video.channelName && ch.name.toLowerCase() === video.channelName.toLowerCase())
+                );
+                saveChannels();
+                updateSubCount();
+                dropdown.remove();
+                showToast(`➖ Unsubscribed from ${channelName}`, "info");
+            } else {
+                // Subscribe
+                state.channels.push({ name: channelName, id: channelId });
+                saveChannels();
+                updateSubCount();
+                dropdown.remove();
+                showToast(`✅ Subscribed to ${channelName}`, "success");
+            }
             renderChannelsList();
         });
         
@@ -1175,6 +1242,143 @@ function renderFeed() {
     shortsShelf.classList.add("hidden");
     if (redditGrid) redditGrid.innerHTML = "";
     if (redditShelf) redditShelf.classList.add("hidden");
+    
+    // Handle Subscriptions Management View
+    if (state.currentView === "subscriptions") {
+        emptyState.classList.add("hidden");
+        if (shortsShelf) shortsShelf.classList.add("hidden");
+        
+        if (state.channels.length === 0) {
+            emptyState.classList.remove("hidden");
+            const emptyIcon = emptyState.querySelector(".empty-icon");
+            const emptyH3 = emptyState.querySelector("h3");
+            const emptyP = emptyState.querySelector("p");
+            if (emptyIcon) emptyIcon.textContent = "📺";
+            if (emptyH3) emptyH3.textContent = "No subscriptions yet";
+            if (emptyP) emptyP.textContent = "Add channels via Settings or subscribe from video cards.";
+            return;
+        }
+        
+        const channelGrid = document.createElement("div");
+        channelGrid.className = "channel-card-grid";
+        channelGrid.style.gridColumn = "1 / -1";
+        
+        state.channels.forEach((channel, idx) => {
+            const cachedVideos = state.cache.videos[channel.id] || [];
+            const card = document.createElement("div");
+            card.className = "channel-card fade-in";
+            
+            card.innerHTML = `
+                <div class="channel-card-name">${escapeHTML(channel.name)}</div>
+                <div class="channel-card-id">${channel.id}</div>
+                <div class="channel-card-meta">${cachedVideos.length} video${cachedVideos.length !== 1 ? 's' : ''} cached</div>
+                <div class="channel-card-actions">
+                    <button class="btn btn-primary btn-sm btn-view-channel">View Videos</button>
+                    <button class="btn btn-danger btn-sm btn-unsub-channel">Unsubscribe</button>
+                </div>
+            `;
+            
+            // Click card to view channel videos
+            card.querySelector(".btn-view-channel").addEventListener("click", (e) => {
+                e.stopPropagation();
+                state.currentView = "channel_" + channel.id;
+                document.getElementById("current-view-title").textContent = channel.name;
+                renderFeed();
+            });
+            
+            // Click card body to view channel
+            card.addEventListener("click", (e) => {
+                if (e.target.closest(".channel-card-actions")) return;
+                state.currentView = "channel_" + channel.id;
+                document.getElementById("current-view-title").textContent = channel.name;
+                renderFeed();
+            });
+            
+            // Unsubscribe
+            card.querySelector(".btn-unsub-channel").addEventListener("click", (e) => {
+                e.stopPropagation();
+                state.channels.splice(idx, 1);
+                saveChannels();
+                updateSubCount();
+                showToast(`➖ Unsubscribed from ${channel.name}`, "info");
+                renderFeed();
+            });
+            
+            channelGrid.appendChild(card);
+        });
+        
+        grid.appendChild(channelGrid);
+        return;
+    }
+    
+    // Handle Channel Detail View
+    if (state.currentView.startsWith("channel_")) {
+        emptyState.classList.add("hidden");
+        const channelId = state.currentView.substring(8);
+        const channelVideos = state.cache.videos[channelId] || [];
+        const channel = state.channels.find(ch => ch.id === channelId);
+        
+        // Back button
+        const backRow = document.createElement("div");
+        backRow.style.gridColumn = "1 / -1";
+        backRow.style.marginBottom = "1rem";
+        const backBtn = document.createElement("button");
+        backBtn.className = "btn btn-secondary btn-sm";
+        backBtn.innerHTML = "← Back to Subscriptions";
+        backBtn.addEventListener("click", () => {
+            state.currentView = "subscriptions";
+            document.getElementById("current-view-title").textContent = "Subscriptions";
+            document.querySelectorAll(".nav-item").forEach(btn => {
+                if (btn.dataset.view === "subscriptions") btn.classList.add("active");
+                else btn.classList.remove("active");
+            });
+            renderFeed();
+        });
+        backRow.appendChild(backBtn);
+        grid.appendChild(backRow);
+        
+        if (channelVideos.length === 0) {
+            emptyState.classList.remove("hidden");
+            const emptyH3 = emptyState.querySelector("h3");
+            const emptyP = emptyState.querySelector("p");
+            if (emptyH3) emptyH3.textContent = "No cached videos";
+            if (emptyP) emptyP.textContent = "Try syncing feeds to load videos for this channel.";
+            return;
+        }
+        
+        let scored = channelVideos.map(v => {
+            const evaluation = getScoreAndMatches(v);
+            return {
+                ...v,
+                score: evaluation.score,
+                matchedTopics: evaluation.matches,
+                isDiscover: false
+            };
+        });
+        
+        // Separate shorts
+        let shorts = [];
+        if (state.settings.muteShorts) {
+            scored = scored.filter(v => !isShortVideo(v));
+        } else {
+            shorts = scored.filter(isShortVideo);
+            scored = scored.filter(v => !isShortVideo(v));
+        }
+        
+        scored.sort((a, b) => b.published - a.published);
+        
+        if (shorts.length > 0) {
+            shortsShelf.classList.remove("hidden");
+            const shortsFragment = document.createDocumentFragment();
+            shorts.slice(0, 10).forEach(s => renderCard(s, shortsFragment));
+            shortsGrid.appendChild(shortsFragment);
+        }
+        
+        const fragment = document.createDocumentFragment();
+        scored.forEach(video => renderCard(video, fragment));
+        grid.appendChild(fragment);
+        return;
+    }
     
     // Handle Smart Feed
     if (state.currentView === "smart-feed") {
