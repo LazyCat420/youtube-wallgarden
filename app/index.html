@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="app.css?v=20260528-v9">
+    <link rel="stylesheet" href="app.css?v=20260528-v10">
 </head>
 <body>
     <div class="app-layout">
@@ -243,6 +243,11 @@
 
                 <!-- Topics Tab Content -->
                 <div id="tab-topics" class="tab-content">
+                    <div class="topic-search-bar">
+                        <span class="topic-search-icon">🔍</span>
+                        <input type="text" id="input-topic-search" placeholder="Search topics...">
+                        <button id="btn-clear-topic-search" class="btn-clear-topic-search hidden" title="Clear search" type="button">✕</button>
+                    </div>
                     <div class="topic-editor-container">
                         <div class="input-group">
                             <label>Add/Edit Topic Keyphrase & Weight</label>
@@ -338,6 +343,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=20260528-v9"></script>
+    <script src="app.js?v=20260528-v10"></script>
 </body>
 </html>

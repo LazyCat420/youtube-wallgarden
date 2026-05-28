@@ -609,6 +609,30 @@ function setupEventListeners() {
     if (btnBrainstormMore) {
         btnBrainstormMore.addEventListener("click", () => generateBrainstormTopics());
     }
+
+    // Topic Search in Settings
+    const topicSearchInput = document.getElementById("input-topic-search");
+    const clearTopicSearchBtn = document.getElementById("btn-clear-topic-search");
+    if (topicSearchInput) {
+        topicSearchInput.addEventListener("input", () => {
+            const q = topicSearchInput.value.trim().toLowerCase();
+            if (q) {
+                clearTopicSearchBtn.classList.remove("hidden");
+            } else {
+                clearTopicSearchBtn.classList.add("hidden");
+            }
+            renderPreferencesLists(q);
+            renderTopicsList(q);
+        });
+    }
+    if (clearTopicSearchBtn) {
+        clearTopicSearchBtn.addEventListener("click", () => {
+            topicSearchInput.value = "";
+            clearTopicSearchBtn.classList.add("hidden");
+            renderPreferencesLists();
+            renderTopicsList();
+        });
+    }
 }
 
 function renderSidebarTopics() {
@@ -1124,19 +1148,22 @@ function renderCard(video, targetContainer) {
         
         const dropdown = document.createElement("div");
         dropdown.className = "card-action-dropdown";
+        // Determine the topic associated with this video
+        const videoTopic = video.discoveryTopic || (video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:")) : null) || "";
+        const currentRating = state.videoRatings[video.id];
+        
         dropdown.innerHTML = `
-            <div style="display: flex; gap: 0.5rem; justify-content: space-around; padding: 0.5rem; border-bottom: 1px solid var(--card-border); margin-bottom: 0.25rem;">
-                <button class="rate-btn" data-rating="5" title="Love it" style="padding: 0.25rem 0.5rem; border-radius: 4px; background: rgba(46, 204, 113, 0.2); color: #2ecc71;">⭐ 5</button>
-                <button class="rate-btn" data-rating="3" title="Okay" style="padding: 0.25rem 0.5rem; border-radius: 4px; background: rgba(241, 196, 15, 0.2); color: #f1c40f;">⭐ 3</button>
-                <button class="rate-btn" data-rating="0" title="Neutral" style="padding: 0.25rem 0.5rem; border-radius: 4px; background: rgba(149, 165, 166, 0.2); color: #95a5a6;">⭐ 0</button>
-                <button class="rate-btn danger" data-rating="-5" title="Dislike" style="padding: 0.25rem 0.5rem; border-radius: 4px; background: rgba(231, 76, 60, 0.2); color: #e74c3c;">👎 -5</button>
+            <div class="card-rating-row">
+                <button class="rate-thumb-btn thumb-up${currentRating === 5 ? ' active' : ''}" data-rating="5" title="Like">👍 Like</button>
+                <button class="rate-thumb-btn thumb-down${currentRating === -5 ? ' active' : ''}" data-rating="-5" title="Dislike">👎 Dislike</button>
             </div>
-            <button class="danger" data-action="block">🚫 Block Channel</button>
             <button data-action="subscribe">${isSubscribed ? '➖ Unsubscribe' : '➕ Subscribe to Channel'}</button>
+            <button class="danger" data-action="block">🚫 Block Channel</button>
+            <button data-action="remove-topic"${videoTopic ? '' : ' disabled'}>🗑️ Remove Topic${videoTopic ? ': ' + capitalizePhrase(videoTopic) : ''}</button>
             <button data-action="hide">🔇 Hide Video</button>
         `;
         
-        dropdown.querySelectorAll(".rate-btn").forEach(btn => {
+        dropdown.querySelectorAll(".rate-thumb-btn").forEach(btn => {
             btn.addEventListener("click", (ev) => {
                 ev.stopPropagation();
                 const rating = parseInt(ev.target.dataset.rating, 10);
@@ -1146,11 +1173,11 @@ function renderCard(video, targetContainer) {
                 // Update badge visually
                 const badge = card.querySelector(".score-badge");
                 if (badge) {
-                    badge.textContent = `★ ${rating}`;
-                    badge.className = "score-badge " + (rating >= 5 ? "high" : rating < 0 ? "low" : "mid");
+                    badge.textContent = rating > 0 ? '👍' : '👎';
+                    badge.className = "score-badge " + (rating > 0 ? "high" : "low");
                 }
                 dropdown.remove();
-                showToast(`⭐ Rated ${rating} stars`, rating > 0 ? "success" : "info");
+                showToast(rating > 0 ? '👍 Liked' : '👎 Disliked', rating > 0 ? "success" : "info");
             });
         });
         
@@ -1198,6 +1225,42 @@ function renderCard(video, targetContainer) {
                 showToast(`✅ Subscribed to ${channelName}`, "success");
             }
             renderChannelsList();
+        });
+        
+        dropdown.querySelector('[data-action="remove-topic"]').addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            if (!videoTopic) return;
+            
+            const normalizedTopic = videoTopic.trim().toLowerCase();
+            
+            // Add to disliked topics if not already there
+            if (!state.dislikedTopics.includes(normalizedTopic)) {
+                state.dislikedTopics.push(normalizedTopic);
+                saveDislikedTopics();
+            }
+            
+            // Remove from liked topics if present
+            if (state.likedTopics.includes(normalizedTopic)) {
+                state.likedTopics = state.likedTopics.filter(t => t !== normalizedTopic);
+                saveLikedTopics();
+            }
+            
+            dropdown.remove();
+            showToast(`🗑️ Removed topic "${capitalizePhrase(videoTopic)}" and added to disliked`, "danger");
+            
+            // Fade out all cards with this topic
+            document.querySelectorAll(".video-card").forEach(c => {
+                const topicAttr = c.getAttribute('data-discover-topic');
+                const catBadge = c.querySelector('.category-badge');
+                const catText = catBadge ? catBadge.textContent.replace('✨ ', '').trim().toLowerCase() : '';
+                if ((topicAttr && topicAttr.toLowerCase() === normalizedTopic) || catText === normalizedTopic) {
+                    c.classList.add("fade-out-remove");
+                    setTimeout(() => c.remove(), 350);
+                }
+            });
+            
+            // Also nuke from smart feed state
+            nukeDiscoverTopic(videoTopic);
         });
         
         dropdown.querySelector('[data-action="hide"]').addEventListener("click", (ev) => {
@@ -1789,21 +1852,40 @@ function renderChannelsList() {
     document.getElementById("subscribed-count").textContent = state.channels.length;
 }
 
-function renderPreferencesLists() {
+function renderPreferencesLists(filterQuery) {
+    const q = (filterQuery || "").trim().toLowerCase();
+    
     const renderList = (containerId, topicsArray, deleteCallback) => {
         const container = document.getElementById(containerId);
         container.innerHTML = "";
-        if (topicsArray.length === 0) {
-            container.innerHTML = `<span style="color:var(--text-muted);font-size:0.85rem;">No topics added.</span>`;
+        
+        const filtered = q ? topicsArray.filter(t => t.toLowerCase().includes(q)) : topicsArray;
+        
+        if (filtered.length === 0) {
+            const msg = q ? `No topics matching "${escapeHTML(q)}".` : "No topics added.";
+            container.innerHTML = `<span style="color:var(--text-muted);font-size:0.85rem;">${msg}</span>`;
             return;
         }
-        topicsArray.forEach(topic => {
+        filtered.forEach(topic => {
             const row = document.createElement("div");
             row.className = "topic-row";
             row.style.marginBottom = "0.25rem";
             row.style.background = "rgba(255,255,255,0.05)";
+            
+            // Highlight matching text if searching
+            let displayText = escapeHTML(topic);
+            if (q) {
+                const idx = topic.toLowerCase().indexOf(q);
+                if (idx !== -1) {
+                    const before = escapeHTML(topic.slice(0, idx));
+                    const match = escapeHTML(topic.slice(idx, idx + q.length));
+                    const after = escapeHTML(topic.slice(idx + q.length));
+                    displayText = `${before}<span class="topic-search-highlight">${match}</span>${after}`;
+                }
+            }
+            
             row.innerHTML = `
-                <span class="topic-phrase" style="font-size:0.85rem;">${escapeHTML(topic)}</span>
+                <span class="topic-phrase" style="font-size:0.85rem;">${displayText}</span>
                 <button class="btn-remove" data-phrase="${escapeHTML(topic)}">✕</button>
             `;
             row.querySelector(".btn-remove").addEventListener("click", (e) => {
@@ -1816,22 +1898,39 @@ function renderPreferencesLists() {
     renderList("liked-topics-list", state.likedTopics, (phrase) => {
         state.likedTopics = state.likedTopics.filter(t => t !== phrase);
         saveLikedTopics();
-        renderPreferencesLists();
+        // Auto-move to disliked
+        const normalized = phrase.trim().toLowerCase();
+        if (!state.dislikedTopics.includes(normalized)) {
+            state.dislikedTopics.push(normalized);
+            saveDislikedTopics();
+        }
+        renderPreferencesLists(q);
     });
 
     renderList("disliked-topics-list", state.dislikedTopics, (phrase) => {
         state.dislikedTopics = state.dislikedTopics.filter(t => t !== phrase);
         saveDislikedTopics();
-        renderPreferencesLists();
+        renderPreferencesLists(q);
     });
 }
 
-function renderTopicsList() {
+function renderTopicsList(filterQuery) {
     const list = document.getElementById("topics-list");
     list.innerHTML = "";
+    const q = (filterQuery || "").trim().toLowerCase();
     
     // Sort topics by weight descending
-    const sortedTopics = [...state.topics].sort((a, b) => b.weight - a.weight);
+    let sortedTopics = [...state.topics].sort((a, b) => b.weight - a.weight);
+    
+    // Filter if search query provided
+    if (q) {
+        sortedTopics = sortedTopics.filter(t => t.phrase.toLowerCase().includes(q));
+    }
+    
+    if (sortedTopics.length === 0 && q) {
+        list.innerHTML = `<span style="color:var(--text-muted);font-size:0.85rem;">No legacy topics matching "${escapeHTML(q)}".</span>`;
+        return;
+    }
     
     sortedTopics.forEach(topic => {
         const row = document.createElement("div");
@@ -1840,8 +1939,20 @@ function renderTopicsList() {
         const badgeClass = topic.weight >= 0 ? "positive" : "negative";
         const sign = topic.weight >= 0 ? "+" : "";
         
+        // Highlight matching text if searching
+        let displayText = escapeHTML(topic.phrase);
+        if (q) {
+            const idx = topic.phrase.toLowerCase().indexOf(q);
+            if (idx !== -1) {
+                const before = escapeHTML(topic.phrase.slice(0, idx));
+                const match = escapeHTML(topic.phrase.slice(idx, idx + q.length));
+                const after = escapeHTML(topic.phrase.slice(idx + q.length));
+                displayText = `${before}<span class="topic-search-highlight">${match}</span>${after}`;
+            }
+        }
+        
         row.innerHTML = `
-            <span class="topic-phrase">${escapeHTML(topic.phrase)}</span>
+            <span class="topic-phrase">${displayText}</span>
             <div class="topic-controls">
                 <span class="topic-badge-weight ${badgeClass}">${sign}${topic.weight}</span>
                 <button class="btn-remove" data-phrase="${escapeHTML(topic.phrase)}">✕</button>
@@ -1852,7 +1963,7 @@ function renderTopicsList() {
             const phrase = e.target.dataset.phrase;
             state.topics = state.topics.filter(t => t.phrase !== phrase);
             saveTopics();
-            renderTopicsList();
+            renderTopicsList(q);
         });
         list.appendChild(row);
     });

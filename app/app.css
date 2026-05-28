@@ -1858,5 +1858,145 @@ body {
     animation: cardFadeOut 0.35s ease both;
 }
 
+/* ── Topic Search Bar in Settings ── */
+.topic-search-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 1.25rem;
+    transition: border-color 0.2s ease;
+}
 
+.topic-search-bar:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.topic-search-icon {
+    font-size: 0.85rem;
+    flex-shrink: 0;
+}
+
+.topic-search-bar input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text-primary);
+    font-family: var(--font-stack);
+    font-size: 0.85rem;
+}
+
+.topic-search-bar input::placeholder {
+    color: var(--text-muted);
+}
+
+.btn-clear-topic-search {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    cursor: pointer;
+    padding: 0.15rem 0.25rem;
+    line-height: 1;
+    transition: color 0.2s ease;
+}
+
+.btn-clear-topic-search:hover {
+    color: #F87171;
+}
+
+.btn-clear-topic-search.hidden {
+    display: none;
+}
+
+/* ── Thumbs Up/Down Rating Row ── */
+.card-rating-row {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.5rem 0.65rem;
+    border-bottom: 1px solid var(--card-border);
+    margin-bottom: 0.25rem;
+}
+
+.rate-thumb-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    padding: 0.4rem 0.5rem;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    font-family: var(--font-stack);
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.rate-thumb-btn.thumb-up {
+    background: rgba(74, 222, 128, 0.1);
+    color: #4ADE80;
+    border-color: rgba(74, 222, 128, 0.25);
+}
+
+.rate-thumb-btn.thumb-up:hover {
+    background: rgba(74, 222, 128, 0.25);
+    border-color: #4ADE80;
+    transform: scale(1.03);
+}
+
+.rate-thumb-btn.thumb-down {
+    background: rgba(248, 113, 113, 0.1);
+    color: #F87171;
+    border-color: rgba(248, 113, 113, 0.25);
+}
+
+.rate-thumb-btn.thumb-down:hover {
+    background: rgba(248, 113, 113, 0.25);
+    border-color: #F87171;
+    transform: scale(1.03);
+}
+
+.rate-thumb-btn.active {
+    box-shadow: 0 0 8px rgba(255, 255, 255, 0.1);
+}
+
+.rate-thumb-btn.thumb-up.active {
+    background: rgba(74, 222, 128, 0.35);
+    border-color: #4ADE80;
+}
+
+.rate-thumb-btn.thumb-down.active {
+    background: rgba(248, 113, 113, 0.35);
+    border-color: #F87171;
+}
+
+/* ── Remove Topic Button in Dropdown ── */
+.card-action-dropdown button[data-action="remove-topic"] {
+    color: var(--text-secondary);
+}
+
+.card-action-dropdown button[data-action="remove-topic"]:hover {
+    background: rgba(251, 191, 36, 0.1);
+    color: #FBBF24;
+}
+
+.card-action-dropdown button[data-action="remove-topic"]:disabled {
+    opacity: 0.3;
+    color: var(--text-muted);
+}
+
+/* ── Topic search highlight ── */
+.topic-search-highlight {
+    background: rgba(74, 222, 128, 0.2);
+    color: var(--accent);
+    border-radius: 2px;
+    padding: 0 1px;
+}
 
