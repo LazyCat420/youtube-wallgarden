@@ -118,13 +118,11 @@ document.addEventListener("DOMContentLoaded", () => {
         updateStatusText(`Loaded from cache (${Math.round(cacheAge/60)}m ago)`);
     }
 
-    // Pre-fetch brainstorm topics in background on load if queue is low
-    if (state.smartFeedTopicsQueue.length < 5 && !state.brainstormLoading) {
-        setTimeout(() => {
-            console.log("[Smart Feed] Pre-fetching brainstorm topics in background...");
-            generateBrainstormTopics(true); // Appends new topics
-        }, 1000);
-    }
+    // Unconditionally run background brainstorm topics on load to populate the feed and hit vLLM
+    setTimeout(() => {
+        console.log("[Smart Feed] Launch brainstorm started...");
+        generateBrainstormTopics(true, 3); // Appends new topics with 3 parallel requests
+    }, 1000);
 });
 
 // Load variables from Local Storage
@@ -1350,6 +1348,12 @@ function playVideo(video) {
     `;
     
     playerModal.classList.remove("hidden");
+
+    // Trigger background similar topic generation using video title
+    if (video.title) {
+        console.log(`[Smart Feed] Watching video, triggering background similar topics generation for: "${video.title}"`);
+        generateSimilarTopicsFromSearch(video.title);
+    }
 }
 
 function closePlayer() {
@@ -2145,35 +2149,85 @@ function setupInfiniteScroll() {
 
 // Initialize infinite scroll on load
 document.addEventListener("DOMContentLoaded", setupInfiniteScroll);
+
+// Robust JSON Parsing Utilities for LLM Responses
+function extractJsonFromText(text) {
+    if (!text) return null;
+    
+    // Try finding outer object { ... }
+    const objectMatch = text.match(/\{\s*"topics"[\s\S]*\}/) || text.match(/\{[\s\S]*\}/);
+    if (objectMatch) {
+        try {
+            return JSON.parse(objectMatch[0]);
+        } catch (e) {}
+    }
+    
+    // Try finding outer array [ ... ]
+    const arrayMatch = text.match(/\[\s*\{[\s\S]*\}\s*\]/);
+    if (arrayMatch) {
+        try {
+            return JSON.parse(arrayMatch[0]);
+        } catch (e) {}
+    }
+    
+    return null;
+}
+
+function parseLlmJsonResponse(content) {
+    if (!content) return null;
+    let clean = content.trim();
+    
+    // Remove markdown code blocks if present
+    if (clean.startsWith("```json")) clean = clean.substring(7);
+    else if (clean.startsWith("```")) clean = clean.substring(3);
+    if (clean.endsWith("```")) clean = clean.substring(0, clean.length - 3);
+    clean = clean.trim();
+    
+    try {
+        return JSON.parse(clean);
+    } catch (e) {
+        // Try extracting JSON substring
+        const parsed = extractJsonFromText(clean);
+        if (parsed) return parsed;
+        console.error("[JSON Parser] Failed all parsing attempts for content:", e);
+        return null;
+    }
+}
+
 // AI Topic Brainstorming Features
 let activeLlmModel = "default-model";
 
-const systemPrompt = `You are a creative topic brainstorming assistant for a YouTube feed curation dashboard. 
-Your goal is to brainstorm a list of 5 interesting, specific topic keywords or short phrases that the user might want to explore.
+const systemPrompt = `You are a semantic topic brainstorming assistant. You view the user's topics as nodes in a conceptual graph and suggest new connections and branches to expand their feed, avoiding repetition.
 
-To help the user discover new content and prevent feedback bubble overfitting, you MUST mix topics according to these rules:
-1. **Subcategories**: Take some of the user's liked topics (if any) and suggest more specific, niche subcategories. If the liked topics list is empty, suggest a subcategory of a popular general topic.
-2. **Contrasting Alternatives**: Find areas that are the opposite or highly contrasting alternatives to the user's disliked topics (if any). If the disliked topics list is empty, suggest a highly academic or intellectual topic.
-3. **Surprise Explorations**: Generate subjects that are completely uncorrelated to any topics on their liked or disliked lists to surprise them and break the bubble.
+Your goal is to brainstorm a list of 5 interesting, specific topic keywords or short phrases that build off and extend the user's topic graph.
 
 Guidelines:
-- CRITICAL: Skip step-by-step reasoning! Do NOT write a long thinking process or analyze the exclusion list. Your thinking process must be under 3 sentences.
-- Generate exactly 5 diverse topics.
-- Keep them short (1-3 words maximum, e.g. "Docker Containers", "Quantum Computing").
+- CRITICAL: Skip step-by-step reasoning! Do NOT write a long thinking process. Keep thinking extremely brief.
+- Generate exactly 5 new topics.
+- Keep topics short (1-3 words maximum, e.g. "Docker Containers", "Quantum Computing").
 - Do NOT suggest any topics that are on the user's disliked list.
-- CRITICAL: You will be given a list of "Already Used Topics". You MUST NOT suggest any topics that closely match or overlap with these.
+- MUST NOT suggest duplicates or topics already used/queued.
+- For each new topic, specify which existing topic node it connects to/builds off of ("associated_with").
 
-You MUST respond ONLY with a valid JSON array of objects. No markdown, no HTML, no explanation outside the JSON.
-Each object must have the following keys:
-- "phrase": The topic phrase (e.g. "Docker Containerization")
-- "category": Must be one of ["similar", "interesting_tangent", "unrelated_but_interesting", "sub_category"]
-- "reason": A short explanation of why this topic was suggested.
+You MUST respond ONLY with a JSON object containing a "topics" array. No markdown, no HTML, no explanation outside the JSON.
 
-Example response:
-[
-  {"phrase": "Docker Containers", "category": "sub_category", "reason": "Niche expansion based on coding"},
-  {"phrase": "Quantum Physics", "category": "unrelated_but_interesting", "reason": "Surprise exploration of new domains"}
-]`;
+Expected JSON schema:
+{
+  "topics": [
+    {
+      "phrase": "Docker Containers",
+      "category": "sub_category",
+      "reason": "Niche expansion based on virtualization",
+      "associated_with": "coding"
+    },
+    {
+      "phrase": "Quantum Physics",
+      "category": "unrelated_but_interesting",
+      "reason": "Surprise exploration of new domains to break feedback loop",
+      "associated_with": "physics"
+    }
+  ]
+}`;
 
 async function fetchLlmModel() {
     try {
@@ -2243,6 +2297,7 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
                             { role: "system", content: systemPrompt },
                             { role: "user", content: userMessage }
                         ],
+                        response_format: { type: "json_object" },
                         temperature: 0.8 + (attempt * 0.1) + (i * 0.05), // Increase randomness on retries
                         max_tokens: 3000
                     }),
@@ -2269,44 +2324,40 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
                 
                 let content = message.content;
                 if (content === null || content === undefined || content.trim() === "") {
-                    if (message.reasoning) {
-                        const jsonMatch = message.reasoning.match(/\[\s*\{[\s\S]*\}\s*\]/);
-                        if (jsonMatch) {
-                            content = jsonMatch[0];
-                        }
+                    const reasoning = message.reasoning || message.reasoning_content;
+                    if (reasoning) {
+                        content = reasoning;
                     }
                 }
                 
                 if (!content) continue;
                 
-                content = content.trim();
-                let cleanContent = content;
-                if (cleanContent.startsWith("```json")) cleanContent = cleanContent.substring(7);
-                else if (cleanContent.startsWith("```")) cleanContent = cleanContent.substring(3);
-                if (cleanContent.endsWith("```")) cleanContent = cleanContent.substring(0, cleanContent.length - 3);
-                cleanContent = cleanContent.trim();
+                const parsed = parseLlmJsonResponse(content);
+                if (!parsed) continue;
                 
-                const jsonMatch = cleanContent.match(/\[\s*\{[\s\S]*\}\s*\]/);
-                const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanContent);
-                
+                let topicsArray = [];
                 if (Array.isArray(parsed)) {
-                    parsed.forEach(item => {
-                        const phrase = item.phrase?.trim().toLowerCase();
-                        if (!phrase) return;
-                        
-                        const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
-                        if (!existsInTopics) {
-                            state.topics.push({ phrase, weight: 5 });
-                        }
-                        
-                        const inQueue = state.smartFeedTopicsQueue.includes(phrase);
-                        const inUsed = state.smartFeedUsedTopics.includes(phrase);
-                        if (!inQueue && !inUsed) {
-                            state.smartFeedTopicsQueue.push(phrase);
-                            allAddedPhrases.push(phrase);
-                        }
-                    });
+                    topicsArray = parsed;
+                } else if (parsed && Array.isArray(parsed.topics)) {
+                    topicsArray = parsed.topics;
                 }
+                
+                topicsArray.forEach(item => {
+                    const phrase = (item.phrase || item.topic || item.keyword || "")?.trim().toLowerCase();
+                    if (!phrase) return;
+                    
+                    const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
+                    if (!existsInTopics) {
+                        state.topics.push({ phrase, weight: 5 });
+                    }
+                    
+                    const inQueue = state.smartFeedTopicsQueue.includes(phrase);
+                    const inUsed = state.smartFeedUsedTopics.includes(phrase);
+                    if (!inQueue && !inUsed) {
+                        state.smartFeedTopicsQueue.push(phrase);
+                        allAddedPhrases.push(phrase);
+                    }
+                });
             }
             
             if (allAddedPhrases.length > 0) {
@@ -2343,27 +2394,37 @@ async function generateSimilarTopicsFromSearch(searchQuery) {
     const currentQueue = state.smartFeedTopicsQueue.join(", ");
     const usedTopics = state.smartFeedUsedTopics.join(", ");
     
-    const systemPromptSimilar = `You are a creative topic brainstorming assistant for a YouTube feed curation dashboard. 
-Your goal is to brainstorm a list of 10 to 20 interesting, specific topic keywords or short phrases that are closely related, similar, or logical next steps/expansions to the search query topic provided by the user.
+    const systemPromptSimilar = `You are a semantic topic brainstorming assistant. You view topics as nodes in a conceptual graph and suggest connections and branches to expand the user's search query into new related nodes.
+
+Your goal is to brainstorm 5 to 7 interesting, specific topic keywords or short phrases that are closely related, similar, or logical next steps/expansions of the searched topic.
 
 Guidelines:
-- CRITICAL: Skip step-by-step reasoning! Do NOT write a long thinking process. Your thinking process must be under 3 sentences.
-- Generate between 10 and 20 diverse, highly relevant topics.
-- Keep them short (1-3 words maximum, e.g. "Quantum Computing", "Deep Learning").
+- CRITICAL: Skip step-by-step reasoning! Do NOT write a long thinking process. Keep thinking extremely brief.
+- Generate between 5 and 7 diverse, highly relevant topics.
+- Keep topics short (1-3 words maximum, e.g. "Quantum Computing", "Deep Learning").
 - Do NOT suggest any topics that are on the user's disliked list.
-- CRITICAL: You will be given a list of "Already Used Topics". You MUST NOT suggest any topics that closely match or overlap with these.
+- MUST NOT suggest duplicates or topics already used/queued.
+- For each new topic, specify the searched topic node it connects to/builds off of ("associated_with").
 
-You MUST respond ONLY with a valid JSON array of objects. No markdown, no HTML, no explanation outside the JSON.
-Each object must have the following keys:
-- "phrase": The topic phrase (e.g. "Docker Containerization")
-- "category": Must be one of ["similar", "interesting_tangent", "unrelated_but_interesting", "sub_category"]
-- "reason": A short explanation of why this topic is similar or related to the search query.
+You MUST respond ONLY with a JSON object containing a "topics" array. No markdown, no HTML, no explanation outside the JSON.
 
-Example response:
-[
-  {"phrase": "Docker Containers", "category": "similar", "reason": "Related topic on virtualization"},
-  {"phrase": "Kubernetes Orchestration", "category": "sub_category", "reason": "Next step after containerization"}
-]`;
+Expected JSON schema:
+{
+  "topics": [
+    {
+      "phrase": "Docker Containers",
+      "category": "similar",
+      "reason": "Related topic on virtualization",
+      "associated_with": "devops"
+    },
+    {
+      "phrase": "Kubernetes Orchestration",
+      "category": "sub_category",
+      "reason": "Next logical step in container scheduling",
+      "associated_with": "docker containers"
+    }
+  ]
+}`;
 
     const userMessage = `The user just searched for the topic: "${searchQuery}".
 User Profile:
@@ -2372,7 +2433,7 @@ User Profile:
 - Currently Queued Topics (Avoid duplicates): [${currentQueue}]
 - Already Used Topics (Avoid duplicates): [${usedTopics}]
 
-Please brainstorm 10-20 new topics that are similar, related, or logical next steps/expansions to the searched topic "${searchQuery}" and fit the user's profile. Return ONLY JSON.`;
+Please brainstorm 5-7 new topics that are similar, related, or logical next steps/expansions to the searched topic "${searchQuery}" and fit the user's profile. Return ONLY JSON.`;
 
     const MAX_RETRIES = 2;
     let attempt = 0;
@@ -2402,6 +2463,7 @@ Please brainstorm 10-20 new topics that are similar, related, or logical next st
                         { role: "system", content: systemPromptSimilar },
                         { role: "user", content: userMessage }
                     ],
+                    response_format: { type: "json_object" },
                     temperature: 0.7 + (attempt * 0.1),
                     max_tokens: 3000
                 }),
@@ -2417,11 +2479,9 @@ Please brainstorm 10-20 new topics that are similar, related, or logical next st
             
             let content = message.content;
             if (content === null || content === undefined || content.trim() === "") {
-                if (message.reasoning) {
-                    const jsonMatch = message.reasoning.match(/\[\s*\{[\s\S]*\}\s*\]/);
-                    if (jsonMatch) {
-                        content = jsonMatch[0];
-                    }
+                const reasoning = message.reasoning || message.reasoning_content;
+                if (reasoning) {
+                    content = reasoning;
                 }
             }
             
@@ -2429,55 +2489,50 @@ Please brainstorm 10-20 new topics that are similar, related, or logical next st
                 throw new Error("vLLM server returned empty content. Try again.");
             }
             
-            content = content.trim();
-            
-            let cleanContent = content;
-            if (cleanContent.startsWith("```json")) {
-                cleanContent = cleanContent.substring(7);
-            } else if (cleanContent.startsWith("```")) {
-                cleanContent = cleanContent.substring(3);
+            const parsed = parseLlmJsonResponse(content);
+            if (!parsed) {
+                throw new Error("Failed to parse JSON response from vLLM.");
             }
-            if (cleanContent.endsWith("```")) {
-                cleanContent = cleanContent.substring(0, cleanContent.length - 3);
-            }
-            cleanContent = cleanContent.trim();
             
-            const jsonMatch = cleanContent.match(/\[\s*\{[\s\S]*\}\s*\]/);
-            const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanContent);
+            let topicsArray = [];
             if (Array.isArray(parsed)) {
-                parsed.forEach(item => {
-                    const phrase = item.phrase?.trim().toLowerCase();
-                    if (!phrase) return;
-                    
-                    // Add to state.topics with default positive weight if not present
-                    const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
-                    if (!existsInTopics) {
-                        state.topics.push({ phrase, weight: 5 });
-                    }
-                    
-                    // Push to smartFeedTopicsQueue if not already in queue or used
-                    const inQueue = state.smartFeedTopicsQueue.includes(phrase);
-                    const inUsed = state.smartFeedUsedTopics.includes(phrase);
-                    if (!inQueue && !inUsed) {
-                        state.smartFeedTopicsQueue.push(phrase);
-                        addedPhrases.push(phrase);
-                    }
-                });
-                
-                if (addedPhrases.length > 0) {
-                    success = true;
-                    saveTopics();
-                    console.log(`[Smart Feed] Successfully brainstormed and queued ${addedPhrases.length} similar topics for "${searchQuery}":`, addedPhrases);
-                    showToast(`💡 Queued ${addedPhrases.length} topics similar to "${searchQuery}"`, "success");
-                    
-                    // Trigger filling preload buffer with newly queued topics
-                    fillSmartFeedPreloadBuffer();
-                } else {
-                    console.warn(`[Smart Feed] Similar brainstorm returned no new topics on attempt ${attempt + 1}.`);
-                    attempt++;
-                }
+                topicsArray = parsed;
+            } else if (parsed && Array.isArray(parsed.topics)) {
+                topicsArray = parsed.topics;
             } else {
-                throw new Error("Invalid response format: expected a JSON array.");
+                throw new Error("Invalid response format: expected a JSON array or object with topics array.");
+            }
+            
+            topicsArray.forEach(item => {
+                const phrase = (item.phrase || item.topic || item.keyword || "")?.trim().toLowerCase();
+                if (!phrase) return;
+                
+                // Add to state.topics with default positive weight if not present
+                const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
+                if (!existsInTopics) {
+                    state.topics.push({ phrase, weight: 5 });
+                }
+                
+                // Push to smartFeedTopicsQueue if not already in queue or used
+                const inQueue = state.smartFeedTopicsQueue.includes(phrase);
+                const inUsed = state.smartFeedUsedTopics.includes(phrase);
+                if (!inQueue && !inUsed) {
+                    state.smartFeedTopicsQueue.push(phrase);
+                    addedPhrases.push(phrase);
+                }
+            });
+            
+            if (addedPhrases.length > 0) {
+                success = true;
+                saveTopics();
+                console.log(`[Smart Feed] Successfully brainstormed and queued ${addedPhrases.length} similar topics for "${searchQuery}":`, addedPhrases);
+                showToast(`💡 Queued ${addedPhrases.length} topics similar to "${searchQuery}"`, "success");
+                
+                // Trigger filling preload buffer with newly queued topics
+                fillSmartFeedPreloadBuffer();
+            } else {
+                console.warn(`[Smart Feed] Similar brainstorm returned no new topics on attempt ${attempt + 1}.`);
+                attempt++;
             }
         } catch (err) {
             console.error(`Similar search topics brainstorm error on attempt ${attempt + 1}:`, err);
@@ -2635,10 +2690,10 @@ async function fillSmartFeedPreloadBuffer() {
     // Check if we need to brainstorm more topics using LLM
     const totalUpcoming = state.smartFeedTopicsQueue.length;
     const now = Date.now();
-    const cooldownMs = 60000; // 60-second cooldown
+    const cooldownMs = 15000; // 15-second cooldown
     const isCooldownActive = state.lastBrainstormTime && (now - state.lastBrainstormTime < cooldownMs);
 
-    if (totalUpcoming < 30 && !state.brainstormLoading && !isCooldownActive) {
+    if (totalUpcoming < 50 && !state.brainstormLoading && !isCooldownActive) {
         console.log("[Smart Feed] Total upcoming topics low, triggering background LLM brainstorm...");
         generateBrainstormTopics(true, 3).then(() => {
             fillSmartFeedPreloadBuffer();
