@@ -2050,7 +2050,7 @@ Guidelines:
 - Do NOT suggest any topics that are on the user's disliked list.
 - Do NOT suggest any topics that are already in the list of currently displayed brainstormed topics.
 
-You MUST respond ONLY with a valid JSON array of objects. No markdown, no HTML, no explanation outside the JSON.
+You MUST respond ONLY with a valid JSON array of objects. No markdown, no HTML, no explanation outside the JSON. Keep any internal reasoning or thinking process extremely brief (under 50 words).
 Each object must have the following keys:
 - "phrase": The topic phrase (e.g. "Docker Containerization")
 - "reason": A short explanation of why this topic was suggested.
@@ -2120,7 +2120,7 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
                     { role: "user", content: userMessage }
                 ],
                 temperature: 0.7,
-                max_tokens: 1500
+                max_tokens: 3000
             }),
             signal: controller.signal
         });
@@ -2133,7 +2133,7 @@ Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
         if (!message) throw new Error("No message returned from vLLM server.");
         
         let content = message.content;
-        if (content === null || content === undefined) {
+        if (content === null || content === undefined || content.trim() === "") {
             if (message.reasoning) {
                 const jsonMatch = message.reasoning.match(/\[\s*\{[\s\S]*\}\s*\]/);
                 if (jsonMatch) {
