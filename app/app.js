@@ -2152,27 +2152,27 @@ const systemPrompt = `You are a creative topic brainstorming assistant for a You
 Your goal is to brainstorm a list of 5 interesting, specific topic keywords or short phrases that the user might want to explore.
 
 To help the user discover new content and prevent feedback bubble overfitting, you MUST mix topics according to these rules:
-1. **Subcategories (2 topics)**: Take some of the user's liked topics and suggest more specific, niche subcategories (e.g. if they like "coding", recommend "systems programming" or "AST parsing").
-2. **Contrasting Alternatives (1-2 topics)**: Find areas that are the opposite or highly contrasting alternatives to the user's disliked topics. For example, if they dislike clickbait/gossip, suggest calm, academic, or high-educational topics.
-3. **Surprise Explorations (1-2 topics)**: Generate subjects that are completely uncorrelated to any topics on their liked or disliked lists to surprise them and break the bubble.
+1. **Subcategories**: Take some of the user's liked topics and suggest more specific, niche subcategories (e.g. if they like "coding", recommend "systems programming" or "AST parsing").
+2. **Contrasting Alternatives**: Find areas that are the opposite or highly contrasting alternatives to the user's disliked topics.
+3. **Surprise Explorations**: Generate subjects that are completely uncorrelated to any topics on their liked or disliked lists to surprise them and break the bubble.
 
 Guidelines:
-- Keep your reasoning/thinking process extremely brief and concise (under 2-3 sentences if possible).
+- Keep your reasoning/thinking process extremely brief and concise.
 - Generate exactly 5 diverse topics.
 - Keep them short (1-3 words maximum, e.g. "Docker Containers", "Quantum Computing").
-- Explain the reason for recommending each topic in a brief sentence, referencing the category mix rules (e.g., "Niche expansion based on coding", "Contrasting alternative to gossip", "Surprise exploration of new domains").
 - Do NOT suggest any topics that are on the user's disliked list.
-- Do NOT suggest any topics that are already in the list of currently displayed brainstormed topics.
+- CRITICAL: You will be given a list of "Already Used Topics". You MUST NOT suggest any topics that closely match or overlap with these.
 
-You MUST respond ONLY with a valid JSON array of objects. No markdown, no HTML, no explanation outside the JSON. Keep any internal reasoning or thinking process extremely brief (under 50 words).
+You MUST respond ONLY with a valid JSON array of objects. No markdown, no HTML, no explanation outside the JSON.
 Each object must have the following keys:
 - "phrase": The topic phrase (e.g. "Docker Containerization")
+- "category": Must be one of ["similar", "interesting_tangent", "unrelated_but_interesting", "sub_category"]
 - "reason": A short explanation of why this topic was suggested.
 
 Example response:
 [
-  {"phrase": "Docker Containers", "reason": "Niche expansion based on coding"},
-  {"phrase": "Quantum Physics", "reason": "Surprise exploration of new domains"}
+  {"phrase": "Docker Containers", "category": "sub_category", "reason": "Niche expansion based on coding"},
+  {"phrase": "Quantum Physics", "category": "unrelated_but_interesting", "reason": "Surprise exploration of new domains"}
 ]`;
 
 async function fetchLlmModel() {
@@ -2198,7 +2198,7 @@ async function generateBrainstormTopics(append, numRequests = 1) {
     
     console.log(`[Smart Feed] Background LLM brainstorming started (firing ${numRequests} parallel requests)...`);
     
-    // Construct user profile message using explicit topic preferences
+    // Construct user profile message
     const liked = (state.likedTopics || []).join(", ");
     const disliked = (state.dislikedTopics || []).join(", ");
     const searches = state.searchHistory.join(", ");
@@ -2214,112 +2214,124 @@ async function generateBrainstormTopics(append, numRequests = 1) {
 
 Please brainstorm 5 new topics that fit this profile. Return ONLY JSON.`;
 
-    try {
-        if (activeLlmModel === "default-model") {
-            await fetchLlmModel();
-        }
-        
-        const fetchPromises = [];
-        for (let i = 0; i < numRequests; i++) {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 180000);
-            
-            const req = fetch("/vllm/v1/chat/completions", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    model: activeLlmModel,
-                    messages: [
-                        { role: "system", content: systemPrompt },
-                        { role: "user", content: userMessage }
-                    ],
-                    temperature: 0.8 + (i * 0.1), // slightly vary temp for diverse batches
-                    max_tokens: 3000
-                }),
-                signal: controller.signal
-            }).then(async (res) => {
-                clearTimeout(timeoutId);
-                if (!res.ok) throw new Error(`vLLM server returned status ${res.status}`);
-                return res.json();
-            });
-            fetchPromises.push(req);
-        }
-        
-        const results = await Promise.allSettled(fetchPromises);
-        
-        let allAddedPhrases = [];
-        
-        for (const result of results) {
-            if (result.status === "rejected") {
-                console.error("[Smart Feed] Batch request failed:", result.reason);
-                continue;
+    const MAX_RETRIES = 2;
+    let attempt = 0;
+    let allAddedPhrases = [];
+    let success = false;
+
+    while (attempt <= MAX_RETRIES && !success) {
+        try {
+            if (activeLlmModel === "default-model") {
+                await fetchLlmModel();
             }
             
-            const data = result.value;
-            const message = data.choices?.[0]?.message;
-            if (!message) continue;
+            if (attempt > 0) {
+                console.log(`[Smart Feed] Brainstorm attempt ${attempt + 1}/${MAX_RETRIES + 1} (increasing temperature)...`);
+            }
             
-            let content = message.content;
-            if (content === null || content === undefined || content.trim() === "") {
-                if (message.reasoning) {
-                    const jsonMatch = message.reasoning.match(/\[\s*\{[\s\S]*\}\s*\]/);
-                    if (jsonMatch) {
-                        content = jsonMatch[0];
+            const fetchPromises = [];
+            for (let i = 0; i < numRequests; i++) {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 180000);
+                
+                const req = fetch("/vllm/v1/chat/completions", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        model: activeLlmModel,
+                        messages: [
+                            { role: "system", content: systemPrompt },
+                            { role: "user", content: userMessage }
+                        ],
+                        temperature: 0.8 + (attempt * 0.1) + (i * 0.05), // Increase randomness on retries
+                        max_tokens: 3000
+                    }),
+                    signal: controller.signal
+                }).then(async (res) => {
+                    clearTimeout(timeoutId);
+                    if (!res.ok) throw new Error(`vLLM server returned status ${res.status}`);
+                    return res.json();
+                });
+                fetchPromises.push(req);
+            }
+            
+            const results = await Promise.allSettled(fetchPromises);
+            
+            for (const result of results) {
+                if (result.status === "rejected") {
+                    console.error("[Smart Feed] Batch request failed:", result.reason);
+                    continue;
+                }
+                
+                const data = result.value;
+                const message = data.choices?.[0]?.message;
+                if (!message) continue;
+                
+                let content = message.content;
+                if (content === null || content === undefined || content.trim() === "") {
+                    if (message.reasoning) {
+                        const jsonMatch = message.reasoning.match(/\[\s*\{[\s\S]*\}\s*\]/);
+                        if (jsonMatch) {
+                            content = jsonMatch[0];
+                        }
                     }
+                }
+                
+                if (!content) continue;
+                
+                content = content.trim();
+                let cleanContent = content;
+                if (cleanContent.startsWith("```json")) cleanContent = cleanContent.substring(7);
+                else if (cleanContent.startsWith("```")) cleanContent = cleanContent.substring(3);
+                if (cleanContent.endsWith("```")) cleanContent = cleanContent.substring(0, cleanContent.length - 3);
+                cleanContent = cleanContent.trim();
+                
+                const jsonMatch = cleanContent.match(/\[\s*\{[\s\S]*\}\s*\]/);
+                const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanContent);
+                
+                if (Array.isArray(parsed)) {
+                    parsed.forEach(item => {
+                        const phrase = item.phrase?.trim().toLowerCase();
+                        if (!phrase) return;
+                        
+                        const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
+                        if (!existsInTopics) {
+                            state.topics.push({ phrase, weight: 5 });
+                        }
+                        
+                        const inQueue = state.smartFeedTopicsQueue.includes(phrase);
+                        const inUsed = state.smartFeedUsedTopics.includes(phrase);
+                        if (!inQueue && !inUsed) {
+                            state.smartFeedTopicsQueue.push(phrase);
+                            allAddedPhrases.push(phrase);
+                        }
+                    });
                 }
             }
             
-            if (!content) continue;
-            
-            content = content.trim();
-            let cleanContent = content;
-            if (cleanContent.startsWith("```json")) cleanContent = cleanContent.substring(7);
-            else if (cleanContent.startsWith("```")) cleanContent = cleanContent.substring(3);
-            if (cleanContent.endsWith("```")) cleanContent = cleanContent.substring(0, cleanContent.length - 3);
-            cleanContent = cleanContent.trim();
-            
-            const jsonMatch = cleanContent.match(/\[\s*\{[\s\S]*\}\s*\]/);
-            const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanContent);
-            
-            if (Array.isArray(parsed)) {
-                parsed.forEach(item => {
-                    const phrase = item.phrase?.trim().toLowerCase();
-                    if (!phrase) return;
-                    
-                    const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
-                    if (!existsInTopics) {
-                        state.topics.push({ phrase, weight: 5 });
-                    }
-                    
-                    const inQueue = state.smartFeedTopicsQueue.includes(phrase);
-                    const inUsed = state.smartFeedUsedTopics.includes(phrase);
-                    if (!inQueue && !inUsed) {
-                        state.smartFeedTopicsQueue.push(phrase);
-                        allAddedPhrases.push(phrase);
-                    }
-                });
+            if (allAddedPhrases.length > 0) {
+                success = true;
+                saveTopics();
+                console.log("[Smart Feed] Successfully brainstormed and queued new topics:", allAddedPhrases);
+                if (!append) {
+                    renderFeed();
+                }
+            } else {
+                console.warn(`[Smart Feed] Brainstorming returned no new topics on attempt ${attempt + 1}.`);
+                attempt++;
+            }
+        } catch (err) {
+            console.error(`Brainstorm error on attempt ${attempt + 1}:`, err);
+            attempt++;
+            if (attempt > MAX_RETRIES && !append) {
+                showToast("❌ Failed to brainstorm topics: " + err.message, "danger");
             }
         }
-        
-        if (allAddedPhrases.length > 0) {
-            saveTopics();
-            console.log("[Smart Feed] Successfully brainstormed and queued new topics:", allAddedPhrases);
-            if (!append) {
-                renderFeed();
-            }
-        } else {
-            console.warn("[Smart Feed] Brainstorming returned no new topics across all batches.");
-        }
-    } catch (err) {
-        console.error("Brainstorm error:", err);
-        if (!append) {
-            showToast("❌ Failed to brainstorm topics: " + err.message, "danger");
-        }
-    } finally {
-        state.brainstormLoading = false;
-        state.lastBrainstormTime = Date.now();
-        updateStatusText("Ready");
     }
+    
+    state.brainstormLoading = false;
+    state.lastBrainstormTime = Date.now();
+    updateStatusText("Ready");
 }
 
 async function generateSimilarTopicsFromSearch(searchQuery) {
@@ -2336,19 +2348,19 @@ Your goal is to brainstorm a list of 10 to 20 interesting, specific topic keywor
 Guidelines:
 - Generate between 10 and 20 diverse, highly relevant topics.
 - Keep them short (1-3 words maximum, e.g. "Quantum Computing", "Deep Learning").
-- Explain the reason for recommending each topic in a brief sentence.
 - Do NOT suggest any topics that are on the user's disliked list.
-- Do NOT suggest any topics that are already in the list of currently displayed brainstormed topics.
+- CRITICAL: You will be given a list of "Already Used Topics". You MUST NOT suggest any topics that closely match or overlap with these.
 
-You MUST respond ONLY with a valid JSON array of objects. No markdown, no HTML, no explanation outside the JSON. Keep any internal reasoning or thinking process extremely brief (under 50 words).
+You MUST respond ONLY with a valid JSON array of objects. No markdown, no HTML, no explanation outside the JSON.
 Each object must have the following keys:
 - "phrase": The topic phrase (e.g. "Docker Containerization")
+- "category": Must be one of ["similar", "interesting_tangent", "unrelated_but_interesting", "sub_category"]
 - "reason": A short explanation of why this topic is similar or related to the search query.
 
 Example response:
 [
-  {"phrase": "Docker Containers", "reason": "Related topic on virtualization"},
-  {"phrase": "Kubernetes Orchestration", "reason": "Next step after containerization"}
+  {"phrase": "Docker Containers", "category": "similar", "reason": "Related topic on virtualization"},
+  {"phrase": "Kubernetes Orchestration", "category": "sub_category", "reason": "Next step after containerization"}
 ]`;
 
     const userMessage = `The user just searched for the topic: "${searchQuery}".
@@ -2360,100 +2372,115 @@ User Profile:
 
 Please brainstorm 10-20 new topics that are similar, related, or logical next steps/expansions to the searched topic "${searchQuery}" and fit the user's profile. Return ONLY JSON.`;
 
-    try {
-        if (activeLlmModel === "default-model") {
-            await fetchLlmModel();
-        }
-        
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 180000);
-        const response = await fetch("/vllm/v1/chat/completions", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                model: activeLlmModel,
-                messages: [
-                    { role: "system", content: systemPromptSimilar },
-                    { role: "user", content: userMessage }
-                ],
-                temperature: 0.7,
-                max_tokens: 3000
-            }),
-            signal: controller.signal
-        });
-        clearTimeout(timeoutId);
-        
-        if (!response.ok) throw new Error(`vLLM server returned status ${response.status}`);
-        
-        const data = await response.json();
-        const message = data.choices?.[0]?.message;
-        if (!message) throw new Error("No message returned from vLLM server.");
-        
-        let content = message.content;
-        if (content === null || content === undefined || content.trim() === "") {
-            if (message.reasoning) {
-                const jsonMatch = message.reasoning.match(/\[\s*\{[\s\S]*\}\s*\]/);
-                if (jsonMatch) {
-                    content = jsonMatch[0];
-                }
+    const MAX_RETRIES = 2;
+    let attempt = 0;
+    let addedPhrases = [];
+    let success = false;
+
+    while (attempt <= MAX_RETRIES && !success) {
+        try {
+            if (activeLlmModel === "default-model") {
+                await fetchLlmModel();
             }
-        }
-        
-        if (!content) {
-            throw new Error("vLLM server returned empty content. Try again.");
-        }
-        
-        content = content.trim();
-        
-        let cleanContent = content;
-        if (cleanContent.startsWith("```json")) {
-            cleanContent = cleanContent.substring(7);
-        } else if (cleanContent.startsWith("```")) {
-            cleanContent = cleanContent.substring(3);
-        }
-        if (cleanContent.endsWith("```")) {
-            cleanContent = cleanContent.substring(0, cleanContent.length - 3);
-        }
-        cleanContent = cleanContent.trim();
-        
-        const jsonMatch = cleanContent.match(/\[\s*\{[\s\S]*\}\s*\]/);
-        const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanContent);
-        if (Array.isArray(parsed)) {
-            const addedPhrases = [];
-            parsed.forEach(item => {
-                const phrase = item.phrase.trim().toLowerCase();
-                if (!phrase) return;
-                
-                // Add to state.topics with default positive weight if not present
-                const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
-                if (!existsInTopics) {
-                    state.topics.push({ phrase, weight: 5 });
-                }
-                
-                // Push to smartFeedTopicsQueue if not already in queue or used
-                const inQueue = state.smartFeedTopicsQueue.includes(phrase);
-                const inUsed = state.smartFeedUsedTopics.includes(phrase);
-                if (!inQueue && !inUsed) {
-                    state.smartFeedTopicsQueue.push(phrase);
-                    addedPhrases.push(phrase);
-                }
-            });
             
-            saveTopics();
-            console.log(`[Smart Feed] Successfully brainstormed and queued ${addedPhrases.length} similar topics for "${searchQuery}":`, addedPhrases);
-            if (addedPhrases.length > 0) {
-                showToast(`💡 Queued ${addedPhrases.length} topics similar to "${searchQuery}"`, "success");
-                
-                // Trigger filling preload buffer with newly queued topics
-                fillSmartFeedPreloadBuffer();
+            if (attempt > 0) {
+                console.log(`[Smart Feed] Similar brainstorm attempt ${attempt + 1}/${MAX_RETRIES + 1}...`);
             }
-        } else {
-            throw new Error("Invalid response format: expected a JSON array.");
+            
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 180000);
+            const response = await fetch("/vllm/v1/chat/completions", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    model: activeLlmModel,
+                    messages: [
+                        { role: "system", content: systemPromptSimilar },
+                        { role: "user", content: userMessage }
+                    ],
+                    temperature: 0.7 + (attempt * 0.1),
+                    max_tokens: 3000
+                }),
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            
+            if (!response.ok) throw new Error(`vLLM server returned status ${response.status}`);
+            
+            const data = await response.json();
+            const message = data.choices?.[0]?.message;
+            if (!message) throw new Error("No message returned from vLLM server.");
+            
+            let content = message.content;
+            if (content === null || content === undefined || content.trim() === "") {
+                if (message.reasoning) {
+                    const jsonMatch = message.reasoning.match(/\[\s*\{[\s\S]*\}\s*\]/);
+                    if (jsonMatch) {
+                        content = jsonMatch[0];
+                    }
+                }
+            }
+            
+            if (!content) {
+                throw new Error("vLLM server returned empty content. Try again.");
+            }
+            
+            content = content.trim();
+            
+            let cleanContent = content;
+            if (cleanContent.startsWith("```json")) {
+                cleanContent = cleanContent.substring(7);
+            } else if (cleanContent.startsWith("```")) {
+                cleanContent = cleanContent.substring(3);
+            }
+            if (cleanContent.endsWith("```")) {
+                cleanContent = cleanContent.substring(0, cleanContent.length - 3);
+            }
+            cleanContent = cleanContent.trim();
+            
+            const jsonMatch = cleanContent.match(/\[\s*\{[\s\S]*\}\s*\]/);
+            const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanContent);
+            if (Array.isArray(parsed)) {
+                parsed.forEach(item => {
+                    const phrase = item.phrase?.trim().toLowerCase();
+                    if (!phrase) return;
+                    
+                    // Add to state.topics with default positive weight if not present
+                    const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
+                    if (!existsInTopics) {
+                        state.topics.push({ phrase, weight: 5 });
+                    }
+                    
+                    // Push to smartFeedTopicsQueue if not already in queue or used
+                    const inQueue = state.smartFeedTopicsQueue.includes(phrase);
+                    const inUsed = state.smartFeedUsedTopics.includes(phrase);
+                    if (!inQueue && !inUsed) {
+                        state.smartFeedTopicsQueue.push(phrase);
+                        addedPhrases.push(phrase);
+                    }
+                });
+                
+                if (addedPhrases.length > 0) {
+                    success = true;
+                    saveTopics();
+                    console.log(`[Smart Feed] Successfully brainstormed and queued ${addedPhrases.length} similar topics for "${searchQuery}":`, addedPhrases);
+                    showToast(`💡 Queued ${addedPhrases.length} topics similar to "${searchQuery}"`, "success");
+                    
+                    // Trigger filling preload buffer with newly queued topics
+                    fillSmartFeedPreloadBuffer();
+                } else {
+                    console.warn(`[Smart Feed] Similar brainstorm returned no new topics on attempt ${attempt + 1}.`);
+                    attempt++;
+                }
+            } else {
+                throw new Error("Invalid response format: expected a JSON array.");
+            }
+        } catch (err) {
+            console.error(`Similar search topics brainstorm error on attempt ${attempt + 1}:`, err);
+            attempt++;
         }
-    } catch (err) {
-        console.error("Similar search topics brainstorm error:", err);
     }
 }
 
