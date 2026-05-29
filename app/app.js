@@ -512,9 +512,7 @@ function setupEventListeners() {
         }
     });
 
-    // Close Inline Player (also bound dynamically when player is created)
-    const closePlayerBtn = document.getElementById("btn-close-player");
-    if (closePlayerBtn) closePlayerBtn.addEventListener("click", closePlayer);
+    // Close Inline Player — bound dynamically when player is created by playVideo()
 
     // Global settings toggles
     document.getElementById("toggle-use-ytdlp").addEventListener("change", (e) => {
@@ -2011,46 +2009,47 @@ function playVideo(video) {
         inlinePlayer = document.createElement("div");
         inlinePlayer.id = "inline-player";
         inlinePlayer.className = "inline-player";
-        inlinePlayer.innerHTML = `
-            <div class="inline-player-inner">
-                <div class="inline-player-video">
-                    <div id="player-wrapper" class="player-wrapper"></div>
-                </div>
-                <div class="inline-player-bar">
-                    <div class="inline-player-meta">
-                        <h2 id="player-video-title">Video Title</h2>
-                        <p id="player-video-channel">Channel Name</p>
-                    </div>
-                    <button id="btn-close-player" class="inline-player-close" title="Close Player">✕ Close</button>
-                </div>
-            </div>
-        `;
+        inlinePlayer.innerHTML = [
+            '<div class="inline-player-inner">',
+            '  <div class="inline-player-video">',
+            '    <div class="player-wrapper-box"></div>',
+            '  </div>',
+            '  <div class="inline-player-bar">',
+            '    <div class="inline-player-meta">',
+            '      <h2 class="player-title"></h2>',
+            '      <p class="player-channel"></p>',
+            '    </div>',
+            '    <button class="inline-player-close" title="Close Player">✕ Close</button>',
+            '  </div>',
+            '</div>'
+        ].join("");
         // Insert before .feed-section inside .main-content
         const feedSection = document.querySelector(".feed-section");
         if (feedSection && feedSection.parentNode) {
             feedSection.parentNode.insertBefore(inlinePlayer, feedSection);
         } else {
-            // Fallback: append to main-content
             const mainContent = document.querySelector(".main-content");
             if (mainContent) mainContent.appendChild(inlinePlayer);
         }
-        // Bind close button
-        document.getElementById("btn-close-player").addEventListener("click", closePlayer);
+        // Bind close button using querySelector on the element itself
+        inlinePlayer.querySelector(".inline-player-close").addEventListener("click", closePlayer);
     }
 
-    const playerWrapper = document.getElementById("player-wrapper");
+    // Use querySelector on the player element - never document.getElementById
+    const playerWrapper = inlinePlayer.querySelector(".player-wrapper-box");
+    const titleEl = inlinePlayer.querySelector(".player-title");
+    const channelEl = inlinePlayer.querySelector(".player-channel");
 
-    document.getElementById("player-video-title").textContent = video.title;
-    document.getElementById("player-video-channel").textContent = video.channelName;
+    if (titleEl) titleEl.textContent = video.title;
+    if (channelEl) channelEl.textContent = video.channelName;
 
-    playerWrapper.innerHTML = `
-        <iframe 
-            src="https://www.youtube.com/embed/${video.id}?autoplay=1&rel=0&modestbranding=1" 
-            title="${escapeHTML(video.title)}" 
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
-            allowfullscreen>
-        </iframe>
-    `;
+    if (playerWrapper) {
+        playerWrapper.innerHTML = '<iframe ' +
+            'src="https://www.youtube.com/embed/' + video.id + '?autoplay=1&rel=0&modestbranding=1" ' +
+            'title="' + escapeHTML(video.title) + '" ' +
+            'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" ' +
+            'allowfullscreen></iframe>';
+    }
 
     // Show and animate in
     inlinePlayer.classList.remove("hidden", "closing");
@@ -2073,12 +2072,11 @@ function closePlayer() {
     const inlinePlayer = document.getElementById("inline-player");
     if (!inlinePlayer) return;
     inlinePlayer.classList.add("closing");
-    // Wait for slide-up animation then hide + clear iframe
     setTimeout(() => {
         inlinePlayer.classList.add("hidden");
         inlinePlayer.classList.remove("closing");
-        const pw = document.getElementById("player-wrapper");
-        if (pw) pw.innerHTML = ""; // Stops playback instantly
+        const pw = inlinePlayer.querySelector(".player-wrapper-box");
+        if (pw) pw.innerHTML = ""; // Stops playback
     }, 250);
 }
 
