@@ -2006,9 +2006,9 @@ function renderFeed() {
 }
 }
 
-// Display Video in Distraction-Free IFrame Modal
+// Display Video in Inline Player (above feed, no overlay)
 function playVideo(video) {
-    const playerModal = document.getElementById("player-modal");
+    const inlinePlayer = document.getElementById("inline-player");
     const playerWrapper = document.getElementById("player-wrapper");
     
     document.getElementById("player-video-title").textContent = video.title;
@@ -2023,7 +2023,11 @@ function playVideo(video) {
         </iframe>
     `;
     
-    playerModal.classList.remove("hidden");
+    // Show and animate in
+    inlinePlayer.classList.remove("hidden", "closing");
+    
+    // Scroll the player into view smoothly
+    inlinePlayer.scrollIntoView({ behavior: "smooth", block: "start" });
 
     // Trigger background similar topic generation using video title (deferred to avoid lag during player open)
     if (video.title) {
@@ -2035,8 +2039,14 @@ function playVideo(video) {
 }
 
 function closePlayer() {
-    document.getElementById("player-modal").classList.add("hidden");
-    document.getElementById("player-wrapper").innerHTML = ""; // Stops playback instantly
+    const inlinePlayer = document.getElementById("inline-player");
+    inlinePlayer.classList.add("closing");
+    // Wait for slide-up animation then hide + clear iframe
+    setTimeout(() => {
+        inlinePlayer.classList.add("hidden");
+        inlinePlayer.classList.remove("closing");
+        document.getElementById("player-wrapper").innerHTML = ""; // Stops playback instantly
+    }, 250);
 }
 
 function triggerGlobalSearch(query) {

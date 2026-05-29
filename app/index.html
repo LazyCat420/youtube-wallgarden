@@ -231,6 +231,24 @@
                 </div>
             </header>
 
+            <!-- Inline Video Player (replaces modal overlay for performance) -->
+            <div id="inline-player" class="inline-player hidden">
+                <div class="inline-player-inner">
+                    <div class="inline-player-video">
+                        <div id="player-wrapper" class="player-wrapper">
+                            <!-- Iframe injected dynamically -->
+                        </div>
+                    </div>
+                    <div class="inline-player-bar">
+                        <div class="inline-player-meta">
+                            <h2 id="player-video-title">Video Title</h2>
+                            <p id="player-video-channel">Channel Name</p>
+                        </div>
+                        <button id="btn-close-player" class="inline-player-close" title="Close Player">✕ Close</button>
+                    </div>
+                </div>
+            </div>
+
             <!-- Video Grid -->
             <section class="feed-section">
                 <!-- Shorts Dedicated Shelf -->
@@ -306,19 +324,6 @@
         </main>
     </div>
 
-    <!-- Distraction-free IFrame Player Overlay -->
-    <div id="player-modal" class="modal-overlay hidden">
-        <button id="btn-close-player" class="modal-close" title="Close Player">✕</button>
-        <div class="player-container">
-            <div id="player-wrapper" class="player-wrapper">
-                <!-- Iframe injected dynamically -->
-            </div>
-            <div class="player-metadata">
-                <h2 id="player-video-title">Video Title</h2>
-                <p id="player-video-channel">Channel Name</p>
-            </div>
-        </div>
-    </div>
 
     <!-- Settings Modal -->
     <div id="settings-modal" class="modal-overlay hidden">
