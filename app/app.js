@@ -1440,11 +1440,9 @@ function renderCard(video, targetContainer) {
             
             const normalizedTopic = videoTopic.trim().toLowerCase();
             
-            // Add to disliked topics if not already there
-            if (!state.dislikedTopics.includes(normalizedTopic)) {
-                state.dislikedTopics.push(normalizedTopic);
-                saveDislikedTopics();
-            }
+            // Remove from legacy topics if present
+            state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== normalizedTopic);
+            saveTopics();
             
             // Remove from liked topics if present
             if (state.likedTopics.includes(normalizedTopic)) {
@@ -1453,7 +1451,7 @@ function renderCard(video, targetContainer) {
             }
             
             dropdown.remove();
-            showToast(`🗑️ Removed topic "${capitalizePhrase(videoTopic)}" and added to disliked`, "danger");
+            showToast(`🗑️ Removed topic "${capitalizePhrase(videoTopic)}"`, "info");
             
             // Fade out all cards with this topic
             document.querySelectorAll(".video-card").forEach(c => {
@@ -2256,12 +2254,6 @@ function renderPreferencesLists(filterQuery) {
     renderList("liked-topics-list", state.likedTopics, (phrase) => {
         state.likedTopics = state.likedTopics.filter(t => t !== phrase);
         saveLikedTopics();
-        // Auto-move to disliked
-        const normalized = phrase.trim().toLowerCase();
-        if (!state.dislikedTopics.includes(normalized)) {
-            state.dislikedTopics.push(normalized);
-            saveDislikedTopics();
-        }
         renderPreferencesLists(q);
     });
 
@@ -2314,7 +2306,7 @@ function renderTopicsList(filterQuery) {
             <div class="topic-controls" style="display: flex; gap: 0.5rem; align-items: center;">
                 <span class="topic-badge-weight ${badgeClass}">${sign}${topic.weight}</span>
                 <button class="btn-like-legacy" data-phrase="${escapeHTML(topic.phrase)}" title="Move to Liked Topics" style="background: transparent; border: none; cursor: pointer; font-size: 1.1rem; padding: 0;">👍</button>
-                <button class="btn-remove btn-remove-legacy" data-phrase="${escapeHTML(topic.phrase)}" title="Remove & Move to Disliked Topics">✕</button>
+                <button class="btn-remove btn-remove-legacy" data-phrase="${escapeHTML(topic.phrase)}" title="Remove Topic">✕</button>
             </div>
         `;
         
@@ -2342,10 +2334,6 @@ function renderTopicsList(filterQuery) {
             saveTopics();
             
             const normalized = phrase.trim().toLowerCase();
-            if (!state.dislikedTopics.includes(normalized)) {
-                state.dislikedTopics.push(normalized);
-                saveDislikedTopics();
-            }
             // Ensure it's not in liked
             state.likedTopics = state.likedTopics.filter(t => t !== normalized);
             saveLikedTopics();
