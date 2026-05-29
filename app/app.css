@@ -714,8 +714,8 @@ body {
 .inline-player {
     background: #0D0D0D;
     border-bottom: 1px solid var(--card-border);
-    overflow: hidden;
-    animation: playerSlideDown 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+    flex-shrink: 0;
+    animation: playerFadeIn 0.3s ease both;
 }
 
 .inline-player.hidden {
@@ -723,17 +723,17 @@ body {
 }
 
 .inline-player.closing {
-    animation: playerSlideUp 0.25s cubic-bezier(0.4, 0, 1, 1) both;
+    animation: playerFadeOut 0.25s ease both;
 }
 
-@keyframes playerSlideDown {
-    from { max-height: 0; opacity: 0; }
-    to { max-height: 80vh; opacity: 1; }
+@keyframes playerFadeIn {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 
-@keyframes playerSlideUp {
-    from { max-height: 80vh; opacity: 1; }
-    to { max-height: 0; opacity: 0; }
+@keyframes playerFadeOut {
+    from { opacity: 1; transform: translateY(0); }
+    to { opacity: 0; transform: translateY(-10px); }
 }
 
 .inline-player-inner {
