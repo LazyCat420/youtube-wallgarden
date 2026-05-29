@@ -976,7 +976,8 @@ async function syncFeeds() {
                 try {
                     console.log(`Syncing channel ${channel.name} (${channel.id}) via scraper-service...`);
                     const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 12000);
+                    // Increased timeout to 120s to allow fetching all videos from the channel
+                    const timeoutId = setTimeout(() => controller.abort(), 120000);
                     const response = await fetch("/scraper/collect", {
                         method: "POST",
                         headers: {
@@ -985,8 +986,8 @@ async function syncFeeds() {
                         body: JSON.stringify({
                             source: "youtube",
                             channels: [channel.id],
-                            limit: 10,
-                            days_back: 30,
+                            limit: 0,
+                            days_back: 0,
                             require_transcript: false
                         }),
                         signal: controller.signal
@@ -3269,7 +3270,12 @@ async function fillSmartFeedPreloadBuffer() {
         const videos = await fetchVideosForTopic(topic);
         if (videos && videos.length > 0) {
             videos.forEach(v => v._topic = topic);
-            state.smartFeedPreloadedVideos.push(...videos);
+            
+            // Limit to a max of 8 videos per topic to ensure a diverse mix in the feed
+            // and prevent one topic (e.g. 50 videos) from dominating the view at once
+            const limitedVideos = videos.slice(0, 8);
+            state.smartFeedPreloadedVideos.push(...limitedVideos);
+            
             // Shuffle to mix topics seamlessly
             state.smartFeedPreloadedVideos.sort(() => Math.random() - 0.5);
             
