@@ -2237,14 +2237,14 @@ function playVideo(video) {
         sidebar.querySelector(".sidebar-btn-like").addEventListener("click", () => {
             if (state.videoRatings[video.id] === 5) delete state.videoRatings[video.id];
             else state.videoRatings[video.id] = 5;
-            saveRatings();
+            saveVideoRatings();
             playVideo(video);
             renderFeed();
         });
         sidebar.querySelector(".sidebar-btn-dislike").addEventListener("click", () => {
             if (state.videoRatings[video.id] === -5) delete state.videoRatings[video.id];
             else state.videoRatings[video.id] = -5;
-            saveRatings();
+            saveVideoRatings();
             playVideo(video);
             renderFeed();
         });
