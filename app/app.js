@@ -1060,7 +1060,27 @@ async function syncFeeds() {
 }
 
 // Compute custom interest score for a video
+function invalidateScoreCache() {
+    console.log("[Performance] Invalidating video score cache...");
+    Object.values(state.cache.videos).forEach(channelVideos => {
+        channelVideos.forEach(v => {
+            delete v._score;
+            delete v._matchedTopics;
+        });
+    });
+    if (state.smartFeedVideos) {
+        state.smartFeedVideos.forEach(v => {
+            delete v._score;
+            delete v._matchedTopics;
+        });
+    }
+}
+
 function getScoreAndMatches(video) {
+    if (video._score !== undefined && video._matchedTopics !== undefined) {
+        return { score: video._score, matches: video._matchedTopics };
+    }
+    
     let score = 0;
     const title = video.title.toLowerCase();
     const matches = [];
@@ -1107,10 +1127,8 @@ function getScoreAndMatches(video) {
     }
     
     // Explicit user rating override
-    if (state.videoRatings && state.videoRatings[video.id] !== undefined) {
-        score = state.videoRatings[video.id];
-    }
-    
+    video._score = score;
+    video._matchedTopics = matches;
     return { score, matches };
 }
 
@@ -2007,10 +2025,12 @@ function playVideo(video) {
     
     playerModal.classList.remove("hidden");
 
-    // Trigger background similar topic generation using video title
+    // Trigger background similar topic generation using video title (deferred to avoid lag during player open)
     if (video.title) {
-        console.log(`[Smart Feed] Watching video, triggering background similar topics generation for: "${video.title}"`);
-        generateSimilarTopicsFromSearch(video.title);
+        setTimeout(() => {
+            console.log(`[Smart Feed] Watching video, triggering background similar topics generation for: "${video.title}"`);
+            generateSimilarTopicsFromSearch(video.title);
+        }, 3000);
     }
 }
 
