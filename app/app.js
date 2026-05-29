@@ -1438,33 +1438,9 @@ function renderCard(video, targetContainer) {
             ev.stopPropagation();
             if (!videoTopic) return;
             
-            const normalizedTopic = videoTopic.trim().toLowerCase();
-            
-            // Remove from legacy topics if present
-            state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== normalizedTopic);
-            saveTopics();
-            
-            // Remove from liked topics if present
-            if (state.likedTopics.includes(normalizedTopic)) {
-                state.likedTopics = state.likedTopics.filter(t => t !== normalizedTopic);
-                saveLikedTopics();
-            }
-            
             dropdown.remove();
-            showToast(`🗑️ Removed topic "${capitalizePhrase(videoTopic)}"`, "info");
             
-            // Fade out all cards with this topic
-            document.querySelectorAll(".video-card").forEach(c => {
-                const topicAttr = c.getAttribute('data-discover-topic');
-                const catBadge = c.querySelector('.category-badge');
-                const catText = catBadge ? catBadge.textContent.replace('✨ ', '').trim().toLowerCase() : '';
-                if ((topicAttr && topicAttr.toLowerCase() === normalizedTopic) || catText === normalizedTopic) {
-                    c.classList.add("fade-out-remove");
-                    setTimeout(() => c.remove(), 350);
-                }
-            });
-            
-            // Also nuke from smart feed state
+            // nukeDiscoverTopic handles state cleanup, queue/pool updates, fading out video cards/headers, and showing the success toast.
             nukeDiscoverTopic(videoTopic);
         });
         
@@ -3772,14 +3748,15 @@ function nukeDiscoverTopic(topic) {
     
     const normalizedTopic = topic.trim().toLowerCase();
     
-    // 1. Set topic weight to -10 to mute it
-    const existingIndex = state.topics.findIndex(t => t.phrase.toLowerCase() === normalizedTopic);
-    if (existingIndex !== -1) {
-        state.topics[existingIndex].weight = -10;
-    } else {
-        state.topics.push({ phrase: normalizedTopic, weight: -10 });
-    }
+    // 1. Remove from active topics completely
+    state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== normalizedTopic);
     saveTopics();
+    
+    // Remove from liked topics if present
+    if (state.likedTopics.includes(normalizedTopic)) {
+        state.likedTopics = state.likedTopics.filter(t => t !== normalizedTopic);
+        saveLikedTopics();
+    }
     
     // 2. Clear from queue/preload states
     state.smartFeedUsedTopics = state.smartFeedUsedTopics.filter(t => t !== normalizedTopic);
@@ -3808,7 +3785,7 @@ function nukeDiscoverTopic(topic) {
         setTimeout(() => el.remove(), 350);
     });
     
-    showToast(`🚫 Removed "${capitalizePhrase(topic)}" and muted it (-10 weight).`, "danger");
+    showToast(`🗑️ Removed topic "${capitalizePhrase(topic)}"`, "info");
     
     // 5. Fill buffer and load next batch in background to keep feed populated
     setTimeout(() => {
