@@ -119,6 +119,8 @@ document.addEventListener("DOMContentLoaded", () => {
     updateSubCount();
     renderSearchSuggestions();
     
+    fetchWeather();
+    
     // Render cached feed immediately so the UI is active and loads discovery videos
     renderFeed();
     
@@ -413,6 +415,23 @@ function setupEventListeners() {
     document.getElementById("btn-close-search-results").addEventListener("click", () => {
         document.getElementById("search-results-container").classList.add("hidden");
     });
+
+    const refreshNewsBtn = document.getElementById("btn-refresh-news");
+    if (refreshNewsBtn) {
+        refreshNewsBtn.addEventListener("click", () => {
+            const btnText = refreshNewsBtn.querySelector(".btn-text");
+            const spinner = refreshNewsBtn.querySelector(".sync-spinner");
+            if (btnText) btnText.textContent = "Refreshing...";
+            if (spinner) spinner.style.animation = "spin 1s linear infinite";
+            refreshNewsBtn.disabled = true;
+            
+            renderNewsFeed().finally(() => {
+                if (btnText) btnText.textContent = "Refresh News";
+                if (spinner) spinner.style.animation = "none";
+                refreshNewsBtn.disabled = false;
+            });
+        });
+    }
 
     // Settings Tabs toggles
     document.querySelectorAll(".tab-btn").forEach(btn => {
@@ -1532,10 +1551,20 @@ function renderFeed() {
     const brainstormContainer = document.getElementById("ai-brainstorm-container");
     const discoverChannelsContainer = document.getElementById("discover-channels-container");
     
+    const newsFeedContainer = document.getElementById("news-feed-container");
+    
     if (grid) grid.classList.remove("hidden");
     if (brainstormContainer) brainstormContainer.classList.add("hidden");
     if (discoverChannelsContainer) discoverChannelsContainer.classList.add("hidden");
+    if (newsFeedContainer) newsFeedContainer.classList.add("hidden");
     setupInfiniteScroll();
+    
+    if (state.currentView === "news-feed") {
+        if (grid) grid.classList.add("hidden");
+        if (newsFeedContainer) newsFeedContainer.classList.remove("hidden");
+        renderNewsFeed();
+        return;
+    }
     
     if (state.currentView === "discover-channels") {
         if (grid) grid.classList.add("hidden");
@@ -1857,6 +1886,40 @@ function renderFeed() {
                 </div>
             `;
             
+            const refreshBtn = document.getElementById("btn-refresh-discover");
+            if (refreshBtn) {
+                refreshBtn.addEventListener("click", () => {
+                    const btnText = refreshBtn.querySelector(".btn-text");
+                    const spinner = refreshBtn.querySelector(".discover-spinner");
+                    if (btnText) btnText.textContent = "Refreshing...";
+                    if (spinner) spinner.style.animation = "spin 1s linear infinite";
+                    refreshBtn.disabled = true;
+                    
+                    fetchDiscoverRecommendations(true).finally(() => {
+                        if (btnText) btnText.textContent = "Refresh Suggestions";
+                        if (spinner) spinner.style.animation = "none";
+                        refreshBtn.disabled = false;
+                    });
+                });
+            }
+            
+            const refreshNewsBtn = document.getElementById("btn-refresh-news");
+            if (refreshNewsBtn) {
+                refreshNewsBtn.addEventListener("click", () => {
+                    const btnText = refreshNewsBtn.querySelector(".btn-text");
+                    const spinner = refreshNewsBtn.querySelector(".sync-spinner");
+                    if (btnText) btnText.textContent = "Refreshing...";
+                    if (spinner) spinner.style.animation = "spin 1s linear infinite";
+                    refreshNewsBtn.disabled = true;
+                    
+                    renderNewsFeed().finally(() => {
+                        if (btnText) btnText.textContent = "Refresh News";
+                        if (spinner) spinner.style.animation = "none";
+                        refreshNewsBtn.disabled = false;
+                    });
+                });
+            }
+            
             summaryElement.addEventListener("click", () => {
                 const icon = summaryElement.querySelector(".collapse-icon");
                 icon.style.transform = detailsElement.open ? "rotate(-90deg)" : "rotate(0deg)";
@@ -2130,7 +2193,12 @@ function playVideo(video) {
         const videoTopic = video.discoveryTopic || (video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:")) : null) || "";
         const currentRating = state.videoRatings[video.id];
 
+        const pubDateStr = video.published ? new Date(video.published * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }) : "Unknown Date";
+
         sidebar.innerHTML = `
+            <div class="sidebar-meta" style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem; border-bottom: 1px solid var(--card-border); padding-bottom: 0.5rem;">
+                📅 Published: ${pubDateStr}
+            </div>
             <div class="sidebar-description-box">
                 ${escapeHTML(video.description || "No description available.").replace(/\n/g, '<br>')}
             </div>
@@ -2140,8 +2208,31 @@ function playVideo(video) {
                 <button class="btn sidebar-btn-subscribe${isSubscribed ? ' active' : ''}">${isSubscribed ? '➖ Unsubscribe' : '➕ Subscribe'}</button>
                 ${videoTopic ? `<button class="btn sidebar-btn-topic">🗑️ Remove Topic</button>` : ''}
             </div>
-            <button class="btn sidebar-btn-block" style="margin-top: 0.5rem; width: 100%;">🚫 Block Channel</button>
+            <div class="sidebar-add-topic" style="margin-top: 0.75rem; display: flex; gap: 0.25rem;">
+                <input type="text" id="inline-input-topic" placeholder="Add topic..." style="flex: 1; padding: 0.4rem; border-radius: 4px; border: 1px solid var(--card-border); background: rgba(0,0,0,0.2); color: var(--text-primary); font-size: 0.8rem;">
+                <button class="btn sidebar-btn-add-topic" style="padding: 0.4rem 0.6rem;">➕ Add</button>
+            </div>
+            <button class="btn sidebar-btn-block" style="margin-top: 0.75rem; width: 100%;">🚫 Block Channel</button>
         `;
+
+        const btnAddTopic = sidebar.querySelector(".sidebar-btn-add-topic");
+        if (btnAddTopic) {
+            btnAddTopic.addEventListener("click", () => {
+                const input = sidebar.querySelector("#inline-input-topic");
+                const newTopic = input.value.trim().toLowerCase();
+                if (newTopic && !state.likedTopics.includes(newTopic)) {
+                    state.likedTopics.push(newTopic);
+                    saveLikedTopics();
+                    if (typeof renderPreferencesLists === 'function') {
+                        renderPreferencesLists(document.getElementById("input-topic-search")?.value || "");
+                    }
+                    showToast("Added topic: " + newTopic, "success");
+                    input.value = "";
+                } else if (newTopic) {
+                    showToast("Topic already added.", "info");
+                }
+            });
+        }
 
         sidebar.querySelector(".sidebar-btn-like").addEventListener("click", () => {
             if (state.videoRatings[video.id] === 5) delete state.videoRatings[video.id];
@@ -4619,3 +4710,97 @@ function renderDiscoverChannelsView() {
     });
 }
 
+async function fetchWeather() {
+    try {
+        const geoRes = await fetch("https://ipapi.co/json/");
+        if (!geoRes.ok) return;
+        const geoData = await geoRes.json();
+        
+        const weatherRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${geoData.latitude}&longitude=${geoData.longitude}&current_weather=true`);
+        if (!weatherRes.ok) return;
+        const weatherData = await weatherRes.json();
+        
+        const widget = document.getElementById("weather-widget");
+        if (widget) {
+            const temp = Math.round(weatherData.current_weather.temperature);
+            widget.innerHTML = `<div style="font-size: 0.85rem; color: var(--text-muted); padding: 0.5rem 1rem; border-top: 1px solid var(--card-border); border-bottom: 1px solid var(--card-border); margin: 0.5rem 0;">
+                🌤️ ${geoData.city}: ${temp}°C
+            </div>`;
+        }
+    } catch (e) {
+        console.error("Weather fetch failed:", e);
+        const widget = document.getElementById("weather-widget");
+        if (widget) widget.style.display = 'none';
+    }
+}
+
+async function renderNewsFeed() {
+    const newsGrid = document.getElementById("news-feed-grid");
+    if (!newsGrid) return;
+    newsGrid.innerHTML = `<div class="sync-spinner" style="font-size: 2rem; display: block; animation: spin 1s linear infinite; margin: 2rem auto;">🔄</div><p style="text-align:center; color: var(--text-muted);">Fetching news...</p>`;
+    
+    const newsSources = [
+        { name: "BBC News", url: "http://feeds.bbci.co.uk/news/rss.xml" },
+        { name: "Hacker News", url: "https://hnrss.org/frontpage" }
+    ];
+    
+    let allNews = [];
+    
+    try {
+        for (const source of newsSources) {
+            // Using allorigins to bypass CORS for public RSS feeds
+            const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(source.url)}`);
+            if (!res.ok) continue;
+            const data = await res.json();
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(data.contents, "text/xml");
+            
+            const items = xmlDoc.querySelectorAll("item");
+            items.forEach(item => {
+                const title = item.querySelector("title")?.textContent || "";
+                const link = item.querySelector("link")?.textContent || "";
+                const pubDateStr = item.querySelector("pubDate")?.textContent || "";
+                const description = item.querySelector("description")?.textContent || "";
+                const pubDate = new Date(pubDateStr).getTime() / 1000;
+                
+                allNews.push({
+                    id: link,
+                    title: title,
+                    channelName: source.name,
+                    channelId: source.name,
+                    published: pubDate,
+                    thumbnailUrl: "",
+                    description: description.replace(/<[^>]+>/g, '').substring(0, 200) + "...",
+                    link: link,
+                    isNews: true
+                });
+            });
+        }
+        
+        allNews.sort((a, b) => b.published - a.published);
+        newsGrid.innerHTML = "";
+        
+        if (allNews.length === 0) {
+            newsGrid.innerHTML = `<div class="empty-state"><h3>No news found</h3></div>`;
+            return;
+        }
+        
+        const fragment = document.createDocumentFragment();
+        allNews.slice(0, 30).forEach(news => {
+            const card = document.createElement("div");
+            card.className = "video-card fade-in";
+            card.innerHTML = `
+                <div class="video-info" style="padding: 1rem;">
+                    <div class="video-title" style="margin-bottom: 0.5rem;"><a href="${news.link}" target="_blank" style="color: var(--text-primary); text-decoration: none;">${news.title}</a></div>
+                    <div class="video-channel" style="color: var(--accent); margin-bottom: 0.5rem;">${news.channelName}</div>
+                    <div class="video-meta" style="margin-bottom: 0.5rem;">${formatTimeAgo(news.published)}</div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4;">${news.description}</div>
+                </div>
+            `;
+            fragment.appendChild(card);
+        });
+        newsGrid.appendChild(fragment);
+    } catch (e) {
+        newsGrid.innerHTML = `<div class="empty-state"><h3>Error fetching news</h3><p>${e.message}</p></div>`;
+    }
+}

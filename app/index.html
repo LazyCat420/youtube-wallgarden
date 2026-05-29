@@ -183,6 +183,10 @@
                     <span class="nav-icon">🌿</span>
                     <span class="nav-label">Smart Feed</span>
                 </button>
+                <button class="nav-item" data-view="news-feed">
+                    <span class="nav-icon">📰</span>
+                    <span class="nav-label">News Feed</span>
+                </button>
                 <button class="nav-item" data-view="subscriptions">
                     <span class="nav-icon">📺</span>
                     <span class="nav-label">Subscriptions</span>
@@ -193,6 +197,10 @@
                     <span class="nav-label">Discover Channels</span>
                 </button>
             </nav>
+
+            <div id="weather-widget" class="weather-widget">
+                <div class="weather-loading" style="font-size: 0.85rem; color: var(--text-muted); padding: 0.5rem 1rem;">🌤️ Loading weather...</div>
+            </div>
 
             <div class="sidebar-footer">
                 <a href="/extension/" class="btn-sidebar" target="_blank" title="Browse Chrome Extension Files">
@@ -264,6 +272,20 @@
 
                 <div id="video-grid" class="video-grid">
                     <!-- Cards injected dynamically -->
+                </div>
+
+                <!-- News Feed View -->
+                <div id="news-feed-container" class="news-feed-container hidden">
+                    <div class="discover-header-row">
+                        <p class="discover-intro">Latest updates from your news sources.</p>
+                        <button id="btn-refresh-news" class="btn btn-primary btn-icon-only" title="Refresh News">
+                            <span class="btn-text">Refresh News</span>
+                            <span class="sync-spinner">🔄</span>
+                        </button>
+                    </div>
+                    <div id="news-feed-grid" class="video-grid">
+                        <!-- News cards injected here dynamically -->
+                    </div>
                 </div>
 
                 <!-- Discover Channels View -->
