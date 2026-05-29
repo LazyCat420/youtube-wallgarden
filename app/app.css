@@ -478,6 +478,31 @@ body {
     flex: 1;
 }
 
+.video-title-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.25rem;
+    margin-bottom: 0.5rem;
+    position: relative;
+}
+
+.video-title-row .video-title {
+    margin-bottom: 0;
+    flex: 1;
+}
+
+.video-title-row .card-action-btn {
+    position: static;
+    background: transparent;
+    border: none;
+    backdrop-filter: none;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    margin-top: -2px;
+}
+
 .video-title {
     font-size: 0.95rem;
     font-weight: 600;

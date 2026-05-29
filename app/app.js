@@ -1147,10 +1147,12 @@ function renderCard(video, targetContainer) {
             </div>
             <div class="score-badge ${scoreClass}">★ ${video.score}</div>
             ${video.isDiscover && video.discoveryTopic ? `<div class="category-badge" style="background:var(--accent);color:var(--bg)">✨ ${capitalizePhrase(video.discoveryTopic)}</div>` : (video.isDiscover ? `<div class="search-badge">🔍 Search</div>` : (categoryText ? `<div class="category-badge">${categoryText}</div>` : ""))}
-            <button class="card-action-btn" title="Actions">⋮</button>
         </div>
         <div class="card-details">
-            <h3 class="video-title">${escapeHTML(video.title)}</h3>
+            <div class="video-title-row">
+                <h3 class="video-title">${escapeHTML(video.title)}</h3>
+                <button class="card-action-btn" title="Actions">⋮</button>
+            </div>
             <p class="video-channel">${escapeHTML(metaLine)}</p>
             <p class="video-time">${relativeTime}${video.duration ? ` • ${formatDuration(video.duration)}` : ""}</p>
         </div>
@@ -1292,7 +1294,14 @@ function renderCard(video, targetContainer) {
             showToast(`🔇 Video hidden`, "info");
         });
         
-        card.appendChild(dropdown);
+        // Position absolutely relative to document body to avoid z-index/overflow issues
+        const rect = actionBtn.getBoundingClientRect();
+        dropdown.style.position = "absolute";
+        dropdown.style.top = `${window.scrollY + rect.bottom + 4}px`;
+        dropdown.style.right = `${document.documentElement.clientWidth - (window.scrollX + rect.right)}px`;
+        dropdown.style.left = "auto";
+        dropdown.style.zIndex = "1000";
+        document.body.appendChild(dropdown);
         
         // Close dropdown on outside click
         const closeDropdown = (ev) => {
