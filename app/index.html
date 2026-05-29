@@ -165,8 +165,8 @@
     </style>
 
     <!-- Non-blocking full CSS via preload pattern -->
-    <link rel="preload" href="app.min.css?v=20260529-v20" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="app.min.css?v=20260529-v20"></noscript>
+    <link rel="preload" href="app.min.css?v=20260529-v21" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="app.min.css?v=20260529-v21"></noscript>
 </head>
 <body>
     <div class="app-layout">
@@ -186,6 +186,10 @@
                 <button class="nav-item" data-view="news-feed">
                     <span class="nav-icon">📰</span>
                     <span class="nav-label">News Feed</span>
+                </button>
+                <button class="nav-item" data-view="playlists">
+                    <span class="nav-icon">▶️</span>
+                    <span class="nav-label">Playlists</span>
                 </button>
                 <button class="nav-item" data-view="subscriptions">
                     <span class="nav-icon">📺</span>
@@ -285,6 +289,28 @@
                     </div>
                     <div id="news-feed-grid" class="video-grid">
                         <!-- News cards injected here dynamically -->
+                    </div>
+                </div>
+
+                <!-- Playlists View -->
+                <div id="playlists-container" class="playlists-container hidden">
+                    <div class="discover-header-row" style="margin-bottom: 1rem;">
+                        <p class="discover-intro">Your custom playlists.</p>
+                        <button id="btn-create-playlist" class="btn btn-primary btn-icon-only" title="Create Playlist">
+                            <span class="btn-text">Create Playlist</span>
+                            <span class="icon">➕</span>
+                        </button>
+                    </div>
+                    <div id="playlists-grid" class="playlists-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 1rem; margin-bottom: 2rem;">
+                        <!-- Playlist cards injected here -->
+                    </div>
+                    
+                    <div id="playlist-videos-header" class="hidden" style="margin-bottom: 1rem; display: flex; align-items: center; gap: 1rem;">
+                        <button id="btn-back-to-playlists" class="btn">🔙 Back</button>
+                        <h2 id="current-playlist-title" style="margin: 0;"></h2>
+                    </div>
+                    <div id="playlist-videos-grid" class="video-grid hidden">
+                        <!-- Videos for the selected playlist injected here -->
                     </div>
                 </div>
 
@@ -562,6 +588,26 @@
         </div>
     </div>
 
-    <script src="app.min.js?v=20260529-v20" defer></script>
+    <!-- Add to Playlist Modal -->
+    <div id="playlist-modal" class="modal-overlay hidden" style="position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 10000; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(5px);">
+        <div class="modal-content" style="background: var(--card-bg); border: 1px solid var(--card-border); padding: 1.5rem; border-radius: 8px; width: 90%; max-width: 400px; display: flex; flex-direction: column; gap: 1rem;">
+            <h3 style="margin: 0; color: var(--text-primary);">Add to Playlist</h3>
+            
+            <div style="display: flex; gap: 0.5rem;">
+                <input type="text" id="input-new-playlist" placeholder="New playlist name..." style="flex: 1; padding: 0.5rem; border-radius: 4px; border: 1px solid var(--card-border); background: rgba(0,0,0,0.2); color: var(--text-primary);">
+                <button id="btn-submit-new-playlist" class="btn btn-primary">Create</button>
+            </div>
+            
+            <hr style="border: none; border-top: 1px solid var(--border); margin: 0.5rem 0;">
+            
+            <div id="playlist-modal-list" style="max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem;">
+                <!-- Existing playlists will be injected here as buttons -->
+            </div>
+            
+            <button id="btn-close-playlist-modal" class="btn" style="margin-top: 0.5rem;">Close</button>
+        </div>
+    </div>
+
+    <script src="app.min.js?v=20260529-v21" defer></script>
 </body>
 </html>

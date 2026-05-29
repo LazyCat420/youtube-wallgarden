@@ -38,6 +38,7 @@ let state = {
     currentView: "smart-feed", // 'smart-feed', or search queries
     searchQuery: "",
     searchHistory: [], // Rolling history of searches (max 10)
+    playlists: {}, // id -> { name, createdAt, videos: [] }
     brainstormTopics: [], // Brainstormed topics from LLM
     brainstormLoading: false,
     lastBrainstormTime: 0,
@@ -204,6 +205,7 @@ function loadState() {
     const rawLiked = localStorage.getItem("wallgarden_liked_topics");
     const rawDisliked = localStorage.getItem("wallgarden_disliked_topics");
     const rawBurned = localStorage.getItem("wallgarden_burned_queries");
+    const rawPlaylists = localStorage.getItem("wallgarden_playlists");
 
     state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
     state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
@@ -217,6 +219,7 @@ function loadState() {
     state.discoveredChannels = rawDiscovered ? JSON.parse(rawDiscovered) : [];
     state.smartFeedSuggestionPool = rawPool ? JSON.parse(rawPool) : [];
     state.burnedQueries = rawBurned ? JSON.parse(rawBurned) : [];
+    state.playlists = rawPlaylists ? JSON.parse(rawPlaylists) : {};
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
@@ -315,6 +318,9 @@ function saveSmartFeedSuggestionPool() {
 
 function saveBurnedQueries() {
     localStorage.setItem("wallgarden_burned_queries", JSON.stringify(state.burnedQueries));
+}
+function savePlaylists() {
+    localStorage.setItem("wallgarden_playlists", JSON.stringify(state.playlists));
 }
 
 function getCachedVideosCount() {
@@ -430,6 +436,20 @@ function setupEventListeners() {
                 if (spinner) spinner.style.animation = "none";
                 refreshNewsBtn.disabled = false;
             });
+        });
+    }
+
+    const btnCreatePlaylist = document.getElementById("btn-create-playlist");
+    if (btnCreatePlaylist) {
+        btnCreatePlaylist.addEventListener("click", () => {
+            showPlaylistModal(null);
+        });
+    }
+
+    const btnBackToPlaylists = document.getElementById("btn-back-to-playlists");
+    if (btnBackToPlaylists) {
+        btnBackToPlaylists.addEventListener("click", () => {
+            renderPlaylistsView();
         });
     }
 
@@ -1550,13 +1570,14 @@ function renderFeed() {
     const emptyState = document.getElementById("empty-state");
     const brainstormContainer = document.getElementById("ai-brainstorm-container");
     const discoverChannelsContainer = document.getElementById("discover-channels-container");
-    
     const newsFeedContainer = document.getElementById("news-feed-container");
+    const playlistsContainer = document.getElementById("playlists-container");
     
     if (grid) grid.classList.remove("hidden");
     if (brainstormContainer) brainstormContainer.classList.add("hidden");
     if (discoverChannelsContainer) discoverChannelsContainer.classList.add("hidden");
     if (newsFeedContainer) newsFeedContainer.classList.add("hidden");
+    if (playlistsContainer) playlistsContainer.classList.add("hidden");
     setupInfiniteScroll();
     
     if (state.currentView === "news-feed") {
@@ -1570,6 +1591,13 @@ function renderFeed() {
         if (grid) grid.classList.add("hidden");
         if (discoverChannelsContainer) discoverChannelsContainer.classList.remove("hidden");
         renderDiscoverChannelsView();
+        return;
+    }
+    
+    if (state.currentView === "playlists") {
+        if (grid) grid.classList.add("hidden");
+        if (playlistsContainer) playlistsContainer.classList.remove("hidden");
+        renderPlaylistsView();
         return;
     }
     
@@ -2202,35 +2230,20 @@ function playVideo(video) {
             <div class="sidebar-description-box">
                 ${escapeHTML(video.description || "No description available.").replace(/\n/g, '<br>')}
             </div>
-            <div class="sidebar-actions-grid">
+            <div class="sidebar-actions-grid" style="grid-template-columns: 1fr 1fr;">
                 <button class="btn sidebar-btn-like${currentRating === 5 ? ' active' : ''}">👍 Like</button>
                 <button class="btn sidebar-btn-dislike${currentRating === -5 ? ' active' : ''}">👎 Dislike</button>
                 <button class="btn sidebar-btn-subscribe${isSubscribed ? ' active' : ''}">${isSubscribed ? '➖ Unsubscribe' : '➕ Subscribe'}</button>
-                ${videoTopic ? `<button class="btn sidebar-btn-topic">🗑️ Remove Topic</button>` : ''}
+                <button class="btn sidebar-btn-playlist">▶️ Add to Playlist</button>
             </div>
-            <div class="sidebar-add-topic" style="margin-top: 0.75rem; display: flex; gap: 0.25rem;">
-                <input type="text" id="inline-input-topic" placeholder="Add topic..." style="flex: 1; padding: 0.4rem; border-radius: 4px; border: 1px solid var(--card-border); background: rgba(0,0,0,0.2); color: var(--text-primary); font-size: 0.8rem;">
-                <button class="btn sidebar-btn-add-topic" style="padding: 0.4rem 0.6rem;">➕ Add</button>
-            </div>
+            ${videoTopic ? `<button class="btn sidebar-btn-topic" style="margin-top: 0.75rem; width: 100%;">🗑️ Remove Topic: ${capitalizePhrase(videoTopic)}</button>` : ''}
             <button class="btn sidebar-btn-block" style="margin-top: 0.75rem; width: 100%;">🚫 Block Channel</button>
         `;
 
-        const btnAddTopic = sidebar.querySelector(".sidebar-btn-add-topic");
-        if (btnAddTopic) {
-            btnAddTopic.addEventListener("click", () => {
-                const input = sidebar.querySelector("#inline-input-topic");
-                const newTopic = input.value.trim().toLowerCase();
-                if (newTopic && !state.likedTopics.includes(newTopic)) {
-                    state.likedTopics.push(newTopic);
-                    saveLikedTopics();
-                    if (typeof renderPreferencesLists === 'function') {
-                        renderPreferencesLists(document.getElementById("input-topic-search")?.value || "");
-                    }
-                    showToast("Added topic: " + newTopic, "success");
-                    input.value = "";
-                } else if (newTopic) {
-                    showToast("Topic already added.", "info");
-                }
+        const btnAddPlaylist = sidebar.querySelector(".sidebar-btn-playlist");
+        if (btnAddPlaylist) {
+            btnAddPlaylist.addEventListener("click", () => {
+                showPlaylistModal(video);
             });
         }
 
@@ -4803,4 +4816,143 @@ async function renderNewsFeed() {
     } catch (e) {
         newsGrid.innerHTML = `<div class="empty-state"><h3>Error fetching news</h3><p>${e.message}</p></div>`;
     }
+}
+
+// PLAYLISTS LOGIC
+function renderPlaylistsView() {
+    const grid = document.getElementById("playlists-grid");
+    const header = document.getElementById("playlist-videos-header");
+    const videoGrid = document.getElementById("playlist-videos-grid");
+    const title = document.getElementById("current-playlist-title");
+    
+    grid.innerHTML = "";
+    header.classList.add("hidden");
+    videoGrid.classList.add("hidden");
+    videoGrid.innerHTML = "";
+    grid.style.display = "grid";
+    
+    const playlists = Object.values(state.playlists);
+    if (playlists.length === 0) {
+        grid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;"><h3>No Playlists</h3><p>Create a playlist or add a video to get started.</p></div>`;
+        return;
+    }
+    
+    playlists.forEach(pl => {
+        const card = document.createElement("div");
+        card.className = "channel-card fade-in";
+        card.style.cursor = "pointer";
+        card.innerHTML = `
+            <div class="channel-card-name">${escapeHTML(pl.name)}</div>
+            <div class="channel-card-meta">${pl.videos.length} videos</div>
+            <div class="channel-card-actions">
+                <button class="btn btn-danger btn-sm btn-delete-playlist">Delete</button>
+            </div>
+        `;
+        
+        card.addEventListener("click", (e) => {
+            if (e.target.classList.contains("btn-delete-playlist")) {
+                e.stopPropagation();
+                if (confirm(`Delete playlist "${pl.name}"?`)) {
+                    delete state.playlists[pl.id];
+                    savePlaylists();
+                    renderPlaylistsView();
+                }
+                return;
+            }
+            // Open playlist
+            grid.style.display = "none";
+            header.classList.remove("hidden");
+            videoGrid.classList.remove("hidden");
+            title.textContent = pl.name;
+            
+            videoGrid.innerHTML = "";
+            if (pl.videos.length === 0) {
+                videoGrid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;"><p>This playlist is empty.</p></div>`;
+            } else {
+                const fragment = document.createDocumentFragment();
+                pl.videos.forEach((video, index) => {
+                    const vCard = createVideoCard(video);
+                    
+                    // Add remove button overlay
+                    const removeBtn = document.createElement("button");
+                    removeBtn.className = "btn btn-danger btn-sm";
+                    removeBtn.textContent = "✕";
+                    removeBtn.style.position = "absolute";
+                    removeBtn.style.top = "5px";
+                    removeBtn.style.right = "5px";
+                    removeBtn.style.zIndex = "10";
+                    removeBtn.style.padding = "2px 6px";
+                    removeBtn.onclick = (ev) => {
+                        ev.stopPropagation();
+                        pl.videos.splice(index, 1);
+                        savePlaylists();
+                        card.click(); // re-render
+                    };
+                    vCard.style.position = "relative";
+                    vCard.appendChild(removeBtn);
+                    
+                    fragment.appendChild(vCard);
+                });
+                videoGrid.appendChild(fragment);
+            }
+        });
+        
+        grid.appendChild(card);
+    });
+}
+
+function showPlaylistModal(video) {
+    const modal = document.getElementById("playlist-modal");
+    const list = document.getElementById("playlist-modal-list");
+    const input = document.getElementById("input-new-playlist");
+    const createBtn = document.getElementById("btn-submit-new-playlist");
+    const closeBtn = document.getElementById("btn-close-playlist-modal");
+    
+    modal.classList.remove("hidden");
+    input.value = "";
+    
+    function renderList() {
+        list.innerHTML = "";
+        const playlists = Object.values(state.playlists);
+        if (playlists.length === 0) {
+            list.innerHTML = `<p style="color: var(--text-muted); font-size: 0.9rem;">No existing playlists.</p>`;
+        } else {
+            playlists.forEach(pl => {
+                const btn = document.createElement("button");
+                btn.className = "btn";
+                btn.style.textAlign = "left";
+                btn.textContent = pl.name;
+                btn.onclick = () => {
+                    if (video) {
+                        if (!pl.videos.find(v => v.id === video.id)) {
+                            pl.videos.push(video);
+                            savePlaylists();
+                            showToast(`Added to ${pl.name}`, "success");
+                        } else {
+                            showToast(`Already in ${pl.name}`, "info");
+                        }
+                    }
+                    modal.classList.add("hidden");
+                };
+                list.appendChild(btn);
+            });
+        }
+    }
+    
+    renderList();
+    
+    createBtn.onclick = () => {
+        const name = input.value.trim();
+        if (!name) return;
+        const id = "pl_" + Date.now() + "_" + Math.floor(Math.random()*1000);
+        const newPl = { id, name, createdAt: Date.now(), videos: [] };
+        if (video) newPl.videos.push(video);
+        state.playlists[id] = newPl;
+        savePlaylists();
+        showToast(video ? `Created ${name} and added video` : `Created ${name}`, "success");
+        modal.classList.add("hidden");
+        if (!video && state.currentView === "playlists") renderPlaylistsView();
+    };
+    
+    closeBtn.onclick = () => modal.classList.add("hidden");
 }
