@@ -165,8 +165,8 @@
     </style>
 
     <!-- Non-blocking full CSS via preload pattern -->
-    <link rel="preload" href="app.min.css?v=20260529-v13" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="app.min.css?v=20260529-v13"></noscript>
+    <link rel="preload" href="app.min.css?v=20260529-v14" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="app.min.css?v=20260529-v14"></noscript>
 </head>
 <body>
     <div class="app-layout">
@@ -175,6 +175,7 @@
             <div class="sidebar-brand">
                 <span class="brand-icon">🌿</span>
                 <span class="brand-name">Wallgarden</span>
+                <button id="btn-sidebar-close" class="sidebar-close" aria-label="Close Navigation">✕</button>
             </div>
 
             <nav class="sidebar-nav">
@@ -202,13 +203,19 @@
                 </button>
             </div>
         </aside>
+        
+        <!-- Mobile Sidebar Backdrop Overlay -->
+        <div id="sidebar-overlay" class="sidebar-overlay hidden"></div>
 
         <!-- Main Dashboard View -->
         <main class="main-content">
             <header class="main-header">
                 <div class="header-top-row">
                     <div class="header-title-area">
-                        <h1 id="current-view-title">Smart Feed</h1>
+                        <div class="header-title-container">
+                            <button id="btn-sidebar-toggle" class="sidebar-toggle" aria-label="Toggle Navigation">☰</button>
+                            <h1 id="current-view-title">Smart Feed</h1>
+                        </div>
                         <p id="dashboard-status-text" class="status-subtitle">Loading feeds...</p>
                     </div>
                     <div class="header-actions">
@@ -524,6 +531,6 @@
         </div>
     </div>
 
-    <script src="app.min.js?v=20260529-v13" defer></script>
+    <script src="app.min.js?v=20260529-v14" defer></script>
 </body>
 </html>

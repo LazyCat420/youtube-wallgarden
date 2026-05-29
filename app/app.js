@@ -295,11 +295,20 @@ function getCachedVideosCount() {
     return Object.values(state.cache.videos).reduce((acc, curr) => acc + curr.length, 0);
 }
 
+// Mobile Sidebar Helpers
+function closeMobileSidebar() {
+    const sidebar = document.querySelector(".sidebar");
+    const overlay = document.getElementById("sidebar-overlay");
+    if (sidebar) sidebar.classList.remove("open");
+    if (overlay) overlay.classList.add("hidden");
+}
+
 // Setup Interactive UI Listeners
 function setupEventListeners() {
     // Navigation
     document.querySelectorAll(".nav-item").forEach(item => {
         item.addEventListener("click", (e) => {
+            closeMobileSidebar();
             document.querySelectorAll(".nav-item").forEach(btn => btn.classList.remove("active"));
             const btn = e.currentTarget;
             btn.classList.add("active");
@@ -330,6 +339,25 @@ function setupEventListeners() {
         });
     });
 
+    // Mobile Sidebar Toggles
+    const btnToggle = document.getElementById("btn-sidebar-toggle");
+    const btnCloseSidebar = document.getElementById("btn-sidebar-close");
+    const sidebarOverlay = document.getElementById("sidebar-overlay");
+    const sidebar = document.querySelector(".sidebar");
+
+    if (btnToggle) {
+        btnToggle.addEventListener("click", () => {
+            if (sidebar) sidebar.classList.add("open");
+            if (sidebarOverlay) sidebarOverlay.classList.remove("hidden");
+        });
+    }
+    if (btnCloseSidebar) {
+        btnCloseSidebar.addEventListener("click", closeMobileSidebar);
+    }
+    if (sidebarOverlay) {
+        sidebarOverlay.addEventListener("click", closeMobileSidebar);
+    }
+
     // Sync button
     const btnSync = document.getElementById("btn-sync-now");
     btnSync.addEventListener("click", () => syncFeeds());
@@ -340,6 +368,7 @@ function setupEventListeners() {
     const settingsModal = document.getElementById("settings-modal");
 
     btnOpenSettings.addEventListener("click", () => {
+        closeMobileSidebar();
         renderChannelsList();
         renderTopicsList();
         renderBlockedList();
