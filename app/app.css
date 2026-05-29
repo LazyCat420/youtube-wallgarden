@@ -379,6 +379,8 @@ body {
     backdrop-filter: blur(8px);
     transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
     position: relative;
+    content-visibility: auto;
+    contain-intrinsic-size: 320px;
 }
 
 .video-card:hover {
@@ -515,6 +517,7 @@ body {
     -webkit-box-orient: vertical;
     overflow: hidden;
     cursor: pointer;
+    height: 2.8em; /* Force exactly 2 lines of vertical height to prevent card height variations (CLS fix) */
 }
 
 .video-title:hover {
@@ -526,6 +529,11 @@ body {
     color: var(--text-secondary);
     font-weight: 500;
     margin-bottom: 0.25rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    height: 1.2em;
+    line-height: 1.2;
 }
 
 .video-time {

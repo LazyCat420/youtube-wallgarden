@@ -1457,6 +1457,7 @@ function renderFeed() {
     if (grid) grid.classList.remove("hidden");
     if (brainstormContainer) brainstormContainer.classList.add("hidden");
     if (discoverChannelsContainer) discoverChannelsContainer.classList.add("hidden");
+    setupInfiniteScroll();
     
     if (state.currentView === "discover-channels") {
         if (grid) grid.classList.add("hidden");
@@ -2817,69 +2818,84 @@ function showToast(message, type) {
 }
 
 // Infinite scroll for search/topic/brainstorm views
-function setupInfiniteScroll() {
-    const feedSection = document.querySelector(".feed-section");
-    if (!feedSection) return;
-    
-    feedSection.addEventListener("scroll", () => {
-        // Handle Smart Feed scroll discovery
-        if (state.currentView === "smart-feed") {
-            const scrollBottom = feedSection.scrollHeight - feedSection.scrollTop - feedSection.clientHeight;
-            if (scrollBottom <= 300) {
-                loadNextSmartFeedBatch();
-            }
-            return;
-        }
+// Infinite scroll using highly-optimized IntersectionObserver (eliminates layout thrashing)
+let infiniteScrollObserver = null;
 
-        // Only activate for topic/search views
-        const isTopicView = state.currentView.startsWith("topic_");
-        const isSearchView = state.currentView.startsWith("search_");
-        if (!isTopicView && !isSearchView) return;
-        
-        const queryTerm = isTopicView 
-            ? state.currentView.substring(6).toLowerCase() 
-            : state.currentView.substring(7).toLowerCase();
-        
-        // Don't fetch if already loading, max reached, or not near bottom
-        if (topicSearchLoading[queryTerm]) return;
-        if (state.discoverMaxReached) return;
-        
-        const scrollBottom = feedSection.scrollHeight - feedSection.scrollTop - feedSection.clientHeight;
-        if (scrollBottom > 300) return;
-        
-        // Don't fetch more if no initial results yet
-        const cachedCount = sessionTopicSearchCache[queryTerm] ? sessionTopicSearchCache[queryTerm].length : 0;
-        if (cachedCount === 0) return;
-        
-        // Check if we already hit the cap
-        if (cachedCount >= DISCOVER_MAX_RESULTS) {
-            state.discoverMaxReached = true;
-            // Append end-of-results message without re-rendering
-            const grid = document.getElementById("video-grid");
-            if (!grid.querySelector(".end-of-results")) {
-                const endMsg = document.createElement("div");
-                endMsg.className = "end-of-results";
-                endMsg.textContent = `Showing top ${DISCOVER_MAX_RESULTS} results. Refine your search for more.`;
-                grid.appendChild(endMsg);
+function setupInfiniteScroll() {
+    const trigger = document.getElementById("infinite-scroll-trigger");
+    if (!trigger) return;
+    
+    // Disconnect old observer if any
+    if (infiniteScrollObserver) {
+        infiniteScrollObserver.disconnect();
+    }
+    
+    infiniteScrollObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                handleTriggerIntersection();
             }
-            return;
-        }
-        
-        // Add a loading spinner at the bottom of the grid
-        const grid = document.getElementById("video-grid");
-        if (!grid.querySelector(".infinite-scroll-loader")) {
-            const loader = document.createElement("div");
-            loader.className = "infinite-scroll-loader";
-            loader.innerHTML = `<div class="loader-spinner"></div><p>Loading more results...</p>`;
-            grid.appendChild(loader);
-        }
-        
-        // Fetch next batch
-        state.discoverBatchIndex++;
-        const offset = state.discoverBatchIndex * DISCOVER_BATCH_SIZE;
-        console.log(`[Infinite Scroll] Fetching batch ${state.discoverBatchIndex + 1} (offset: ${offset}) for "${queryTerm}"`);
-        fetchTopicSearchDiscovery(queryTerm, offset);
+        });
+    }, {
+        root: document.querySelector(".feed-section") || null,
+        rootMargin: "300px" // Start loading 300px before the user reaches the bottom
     });
+    
+    infiniteScrollObserver.observe(trigger);
+}
+
+function handleTriggerIntersection() {
+    // Handle Smart Feed scroll discovery
+    if (state.currentView === "smart-feed") {
+        loadNextSmartFeedBatch();
+        return;
+    }
+
+    // Only activate for topic/search views
+    const isTopicView = state.currentView.startsWith("topic_");
+    const isSearchView = state.currentView.startsWith("search_");
+    if (!isTopicView && !isSearchView) return;
+    
+    const queryTerm = isTopicView 
+        ? state.currentView.substring(6).toLowerCase() 
+        : state.currentView.substring(7).toLowerCase();
+    
+    // Don't fetch if already loading, max reached
+    if (topicSearchLoading[queryTerm]) return;
+    if (state.discoverMaxReached) return;
+    
+    // Don't fetch more if no initial results yet
+    const cachedCount = sessionTopicSearchCache[queryTerm] ? sessionTopicSearchCache[queryTerm].length : 0;
+    if (cachedCount === 0) return;
+    
+    // Check if we already hit the cap
+    if (cachedCount >= DISCOVER_MAX_RESULTS) {
+        state.discoverMaxReached = true;
+        // Append end-of-results message without re-rendering
+        const grid = document.getElementById("video-grid");
+        if (grid && !grid.querySelector(".end-of-results")) {
+            const endMsg = document.createElement("div");
+            endMsg.className = "end-of-results";
+            endMsg.textContent = `Showing top ${DISCOVER_MAX_RESULTS} results. Refine your search for more.`;
+            grid.appendChild(endMsg);
+        }
+        return;
+    }
+    
+    // Add a loading spinner at the bottom of the grid
+    const grid = document.getElementById("video-grid");
+    if (grid && !grid.querySelector(".infinite-scroll-loader")) {
+        const loader = document.createElement("div");
+        loader.className = "infinite-scroll-loader";
+        loader.innerHTML = `<div class="loader-spinner"></div><p>Loading more results...</p>`;
+        grid.appendChild(loader);
+    }
+    
+    // Fetch next batch
+    state.discoverBatchIndex++;
+    const offset = state.discoverBatchIndex * DISCOVER_BATCH_SIZE;
+    console.log(`[Infinite Scroll] Fetching batch ${state.discoverBatchIndex + 1} (offset: ${offset}) for "${queryTerm}"`);
+    fetchTopicSearchDiscovery(queryTerm, offset);
 }
 
 // Initialize infinite scroll on load
