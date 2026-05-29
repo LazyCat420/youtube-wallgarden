@@ -1,9 +1,9 @@
 {
   "name": "youtube-wallgarden",
-  "private": true,
   "version": "1.0.0",
+  "private": true,
   "scripts": {
-    "deploy": "bash deploy.sh",
-    "deploy:dry": "bash deploy.sh --dry-run"
+    "build": "npx --yes terser@5.27.0 app/app.js -o app/app.min.js --compress --mangle && npx --yes clean-css-cli@5.6.3 app/app.css -o app/app.min.css",
+    "deploy": "bash deploy.sh"
   }
 }

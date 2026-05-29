@@ -3,11 +3,170 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Wallgarden — A private, distraction-free YouTube dashboard. Browse curated RSS feeds, discover channels via AI, and manage subscriptions without algorithmic noise.">
+    <meta name="robots" content="noindex, nofollow">
     <title>🌿 Wallgarden — Dashboard</title>
+
+    <!-- Non-blocking Google Fonts via preload pattern -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="app.css?v=20260528-v11">
+    <link rel="preload" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"></noscript>
+
+    <!-- Inline critical CSS for above-the-fold content (eliminates render-blocking app.css) -->
+    <style>
+        :root {
+            --bg-primary: #0A0A0A;
+            --bg-secondary: #111111;
+            --bg-sidebar: rgba(15, 15, 15, 0.95);
+            --card-bg: rgba(26, 26, 26, 0.85);
+            --card-border: rgba(42, 42, 42, 0.8);
+            --accent: #4ADE80;
+            --accent-glow: rgba(74, 222, 128, 0.2);
+            --text-primary: #F0F0F0;
+            --text-secondary: #B0B0B0;
+            --text-muted: #8A8A8A;
+            --score-high: #4ADE80;
+            --score-mid: #60A5FA;
+            --score-low: #F87171;
+            --font-stack: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        .hidden { display: none !important; }
+        body {
+            font-family: var(--font-stack);
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            overflow: hidden;
+            height: 100vh;
+        }
+        .app-layout {
+            display: grid;
+            grid-template-columns: 260px 1fr;
+            height: 100vh;
+            width: 100vw;
+        }
+        .sidebar {
+            background: var(--bg-sidebar);
+            border-right: 1px solid var(--card-border);
+            display: flex;
+            flex-direction: column;
+            padding: 1.5rem;
+            z-index: 10;
+        }
+        .sidebar-brand {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 2.5rem;
+            padding-left: 0.5rem;
+        }
+        .brand-icon { font-size: 1.75rem; }
+        .brand-name {
+            font-size: 1.35rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            background: linear-gradient(to right, #F0F0F0, var(--accent));
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .sidebar-nav {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            overflow-y: auto;
+        }
+        .nav-item {
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            padding: 0.75rem 1rem;
+            border-radius: 4px;
+            font-family: var(--font-stack);
+            font-size: 0.95rem;
+            font-weight: 500;
+            cursor: pointer;
+            text-align: left;
+        }
+        .nav-item.active {
+            background: rgba(74, 222, 128, 0.06);
+            color: var(--accent);
+            font-weight: 600;
+        }
+        .nav-item .nav-count {
+            margin-left: auto;
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-muted);
+            font-size: 0.7rem;
+            font-weight: 600;
+            padding: 0.15rem 0.45rem;
+            border-radius: 10px;
+        }
+        .sidebar-footer {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            margin-top: auto;
+            padding-top: 1.5rem;
+            border-top: 1px solid var(--card-border);
+        }
+        .btn-sidebar {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--card-border);
+            color: var(--text-secondary);
+            padding: 0.75rem;
+            border-radius: 4px;
+            font-family: var(--font-stack);
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            text-decoration: none;
+            justify-content: center;
+        }
+        .main-content {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            background: var(--bg-primary);
+            overflow: hidden;
+        }
+        .main-header {
+            display: flex;
+            flex-direction: column;
+            padding: 1.5rem 2.5rem 1rem 2.5rem;
+            border-bottom: 1px solid var(--card-border);
+            gap: 1rem;
+        }
+        .header-top-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+        }
+        .header-title-area h1 {
+            font-size: 2rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+        }
+        .status-subtitle {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
+    </style>
+
+    <!-- Non-blocking full CSS via preload pattern -->
+    <link rel="preload" href="app.min.css?v=20260529-v12" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="app.min.css?v=20260529-v12"></noscript>
 </head>
 <body>
     <div class="app-layout">
@@ -378,6 +537,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=20260528-v11"></script>
+    <script src="app.min.js?v=20260529-v12" defer></script>
 </body>
 </html>

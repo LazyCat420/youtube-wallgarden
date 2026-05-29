@@ -1,0 +1,11 @@
+# Wallgarden — Private NAS Application
+# This is a self-hosted dashboard, not intended for public indexing.
+
+User-agent: *
+Disallow: /
+
+# Allow access to static assets for performance
+Allow: /app.min.js
+Allow: /app.min.css
+Allow: /app.css
+Allow: /app.js
