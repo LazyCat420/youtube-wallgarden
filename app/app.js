@@ -512,13 +512,8 @@ function setupEventListeners() {
         }
     });
 
-    // Close Player Modal
+    // Close Inline Player
     document.getElementById("btn-close-player").addEventListener("click", closePlayer);
-    document.getElementById("player-modal").addEventListener("click", (e) => {
-        if (e.target === document.getElementById("player-modal")) {
-            closePlayer();
-        }
-    });
 
     // Global settings toggles
     document.getElementById("toggle-use-ytdlp").addEventListener("change", (e) => {
