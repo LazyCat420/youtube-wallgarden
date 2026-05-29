@@ -195,6 +195,7 @@ function loadState() {
     const rawSearchHistory = localStorage.getItem("wallgarden_search_history");
     const rawBrainstorm = localStorage.getItem("wallgarden_brainstorm_topics");
     const rawVideoRatings = localStorage.getItem("wallgarden_video_ratings");
+    const rawDiscovered = localStorage.getItem("wallgarden_discovered_channels");
 
     const rawLiked = localStorage.getItem("wallgarden_liked_topics");
     const rawDisliked = localStorage.getItem("wallgarden_disliked_topics");
@@ -208,6 +209,7 @@ function loadState() {
     state.searchHistory = rawSearchHistory ? JSON.parse(rawSearchHistory) : [];
     state.brainstormTopics = rawBrainstorm ? JSON.parse(rawBrainstorm) : [];
     state.videoRatings = rawVideoRatings ? JSON.parse(rawVideoRatings) : {};
+    state.discoveredChannels = rawDiscovered ? JSON.parse(rawDiscovered) : [];
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
@@ -320,6 +322,8 @@ function setupEventListeners() {
                 state.smartFeedVideos = [];
                 state.smartFeedPreloadedVideos = [];
                 initSmartFeed(); // Repopulates and randomizes topics queue
+            } else if (state.currentView === "discover-channels") {
+                initDiscoverChannels();
             }
             
             renderFeed();
@@ -1110,6 +1114,114 @@ function getScoreAndMatches(video) {
     return { score, matches };
 }
 
+// Navigation & dynamic feed fetching helper functions
+function navigateToChannel(channelId, channelName) {
+    if (state.currentView !== "discover-channels" && state.currentView !== "subscriptions" && !state.currentView.startsWith("channel_")) {
+        state.lastViewBeforeInspect = state.currentView;
+    } else if (state.currentView === "discover-channels" || state.currentView === "subscriptions") {
+        state.lastViewBeforeInspect = state.currentView;
+    }
+    state.currentView = "channel_" + channelId;
+    document.getElementById("current-view-title").textContent = channelName;
+    renderFeed();
+}
+
+async function resolveAndInspectChannelByName(channelName) {
+    showToast(`🔍 Locating channel "${channelName}"...`, "info");
+    try {
+        let channelId = "";
+        if (channelName.startsWith("@")) {
+            const cleanHandle = channelName.substring(1);
+            const resolveUrl = `/youtube/@${cleanHandle}`;
+            const resp = await fetch(resolveUrl);
+            if (resp.ok) {
+                const text = await resp.text();
+                const match = text.match(/<link rel="canonical" href="https:\/\/www\.youtube\.com\/channel\/(UC[A-Za-z0-9_-]{22})"/);
+                if (match && match[1]) {
+                    channelId = match[1];
+                }
+            }
+        }
+        
+        if (!channelId) {
+            const channels = await searchChannelsOnYouTube(channelName);
+            if (channels && channels.length > 0) {
+                channelId = channels[0].id;
+            }
+        }
+        
+        if (channelId) {
+            navigateToChannel(channelId, channelName);
+        } else {
+            showToast(`❌ Could not resolve channel ID for "${channelName}"`, "danger");
+        }
+    } catch (err) {
+        console.error("Error resolving channel:", err);
+        showToast("Error locating channel: " + err.message, "danger");
+    }
+}
+
+async function fetchChannelFeedOnDemand(channelId, channelName) {
+    try {
+        const response = await fetch(`/youtube-feed/?channel_id=${channelId}`);
+        if (!response.ok) throw new Error("Failed to fetch RSS feed");
+        const xmlText = await response.text();
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+        
+        const feedTitle = xmlDoc.querySelector("feed > title")?.textContent || channelName;
+        const entries = xmlDoc.querySelectorAll("feed > entry");
+        const videos = [];
+        
+        entries.forEach(entry => {
+            const videoId = entry.querySelector("videoId")?.textContent || 
+                            entry.querySelector("id")?.textContent?.split(":")[2];
+            const title = entry.querySelector("title")?.textContent || "";
+            const publishedStr = entry.querySelector("published")?.textContent || 
+                                 entry.querySelector("updated")?.textContent || "";
+                                 
+            if (videoId && title) {
+                videos.push({
+                    id: videoId,
+                    title: title,
+                    channelName: feedTitle,
+                    channelId: channelId,
+                    published: new Date(publishedStr).getTime()
+                });
+            }
+        });
+        
+        state.tempChannelFeeds = state.tempChannelFeeds || {};
+        state.tempChannelFeeds[channelId] = {
+            name: feedTitle,
+            videos: videos
+        };
+        
+        navigateToChannel(channelId, feedTitle);
+    } catch (err) {
+        console.error("Failed to load channel feed dynamically:", err);
+        const grid = document.getElementById("video-grid");
+        if (grid) {
+            grid.innerHTML = `
+                <div class="empty-state" style="grid-column: 1 / -1; min-height: 200px;">
+                    <div class="empty-icon">⚠️</div>
+                    <h3>Failed to load feed</h3>
+                    <p>${escapeHTML(err.message)}</p>
+                    <button class="btn btn-secondary btn-sm" id="btn-inspect-error-back">Back</button>
+                </div>
+            `;
+            document.getElementById("btn-inspect-error-back").addEventListener("click", () => {
+                if (state.lastViewBeforeInspect) {
+                    state.currentView = state.lastViewBeforeInspect;
+                    state.lastViewBeforeInspect = null;
+                } else {
+                    state.currentView = "subscriptions";
+                }
+                renderFeed();
+            });
+        }
+    }
+}
 
 // Render Helper Function (declared globally for reuse)
 function renderCard(video, targetContainer) {
@@ -1153,7 +1265,7 @@ function renderCard(video, targetContainer) {
                 <h3 class="video-title">${escapeHTML(video.title)}</h3>
                 <button class="card-action-btn" title="Actions">⋮</button>
             </div>
-            <p class="video-channel">${escapeHTML(metaLine)}</p>
+            <p class="video-channel"><span class="channel-link" data-id="${video.channelId || ''}" data-name="${escapeHTML(video.channelName)}">${escapeHTML(video.channelName)}</span>${video.viewCount && video.viewCount > 0 ? ` • ${formatViews(video.viewCount)}` : ''}</p>
             <p class="video-time">${relativeTime}${video.duration ? ` • ${formatDuration(video.duration)}` : ""}</p>
         </div>
     `;
@@ -1161,6 +1273,20 @@ function renderCard(video, targetContainer) {
     const openAction = () => playVideo(video);
     card.querySelector(".thumbnail-play-overlay").addEventListener("click", openAction);
     card.querySelector(".video-title").addEventListener("click", openAction);
+    
+    const channelLink = card.querySelector(".channel-link");
+    if (channelLink) {
+        channelLink.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const chId = channelLink.dataset.id;
+            const chName = channelLink.dataset.name;
+            if (chId) {
+                navigateToChannel(chId, chName);
+            } else {
+                resolveAndInspectChannelByName(chName);
+            }
+        });
+    }
     
     // 3-dot action menu
     const actionBtn = card.querySelector(".card-action-btn");
@@ -1326,9 +1452,18 @@ function renderFeed() {
     const redditGrid = document.getElementById("reddit-grid");
     const emptyState = document.getElementById("empty-state");
     const brainstormContainer = document.getElementById("ai-brainstorm-container");
+    const discoverChannelsContainer = document.getElementById("discover-channels-container");
     
     if (grid) grid.classList.remove("hidden");
     if (brainstormContainer) brainstormContainer.classList.add("hidden");
+    if (discoverChannelsContainer) discoverChannelsContainer.classList.add("hidden");
+    
+    if (state.currentView === "discover-channels") {
+        if (grid) grid.classList.add("hidden");
+        if (discoverChannelsContainer) discoverChannelsContainer.classList.remove("hidden");
+        renderDiscoverChannelsView();
+        return;
+    }
     
     grid.innerHTML = "";
     shortsGrid.innerHTML = "";
@@ -1408,27 +1543,112 @@ function renderFeed() {
     if (state.currentView.startsWith("channel_")) {
         emptyState.classList.add("hidden");
         const channelId = state.currentView.substring(8);
-        const channelVideos = state.cache.videos[channelId] || [];
-        const channel = state.channels.find(ch => ch.id === channelId);
+        const isSubscribed = state.channels.some(ch => ch.id === channelId);
+        
+        let channelVideos = [];
+        let channelName = document.getElementById("current-view-title").textContent || "Channel";
+        
+        if (isSubscribed) {
+            channelVideos = state.cache.videos[channelId] || [];
+            const channel = state.channels.find(ch => ch.id === channelId);
+            if (channel) channelName = channel.name;
+        } else {
+            const tempFeed = state.tempChannelFeeds && state.tempChannelFeeds[channelId];
+            if (tempFeed) {
+                channelVideos = tempFeed.videos;
+                channelName = tempFeed.name;
+            } else {
+                fetchChannelFeedOnDemand(channelId, channelName);
+                return;
+            }
+        }
         
         // Back button
         const backRow = document.createElement("div");
         backRow.style.gridColumn = "1 / -1";
         backRow.style.marginBottom = "1rem";
+        backRow.style.display = "flex";
+        backRow.style.justifyContent = "space-between";
+        backRow.style.alignItems = "center";
+        
         const backBtn = document.createElement("button");
         backBtn.className = "btn btn-secondary btn-sm";
-        backBtn.innerHTML = "← Back to Subscriptions";
+        backBtn.innerHTML = "← Back";
         backBtn.addEventListener("click", () => {
-            state.currentView = "subscriptions";
-            document.getElementById("current-view-title").textContent = "Subscriptions";
+            if (state.lastViewBeforeInspect) {
+                state.currentView = state.lastViewBeforeInspect;
+                state.lastViewBeforeInspect = null;
+            } else {
+                state.currentView = "subscriptions";
+            }
             document.querySelectorAll(".nav-item").forEach(btn => {
-                if (btn.dataset.view === "subscriptions") btn.classList.add("active");
+                if (btn.dataset.view === state.currentView) btn.classList.add("active");
                 else btn.classList.remove("active");
             });
+            const activeNav = document.querySelector(`.nav-item[data-view="${state.currentView}"]`);
+            document.getElementById("current-view-title").textContent = activeNav ? activeNav.querySelector(".nav-label").textContent : "Wallgarden";
             renderFeed();
         });
         backRow.appendChild(backBtn);
+        
+        const headerActions = document.createElement("div");
+        headerActions.style.display = "flex";
+        headerActions.style.gap = "0.5rem";
+        
+        if (isSubscribed) {
+            headerActions.innerHTML = `
+                <button class="btn btn-danger btn-sm btn-header-unsub">Unsubscribe</button>
+                <button class="btn btn-danger btn-sm btn-header-block">🚫 Block Channel</button>
+            `;
+            headerActions.querySelector(".btn-header-unsub").addEventListener("click", () => {
+                state.channels = state.channels.filter(ch => ch.id !== channelId);
+                saveChannels();
+                updateSubCount();
+                showToast(`➖ Unsubscribed from ${channelName}`, "info");
+                navigateToChannel(channelId, channelName);
+            });
+        } else {
+            headerActions.innerHTML = `
+                <button class="btn btn-primary btn-sm btn-header-sub" style="background:var(--accent);color:var(--bg-primary);border-color:var(--accent);">➕ Subscribe</button>
+                <button class="btn btn-danger btn-sm btn-header-block">🚫 Block Channel</button>
+            `;
+            headerActions.querySelector(".btn-header-sub").addEventListener("click", () => {
+                state.channels.push({ name: channelName, id: channelId });
+                saveChannels();
+                updateSubCount();
+                showToast(`✅ Subscribed to ${channelName}`, "success");
+                navigateToChannel(channelId, channelName);
+            });
+        }
+        
+        headerActions.querySelector(".btn-header-block").addEventListener("click", () => {
+            if (!state.blockedChannels.some(bc => bc.id === channelId)) {
+                state.blockedChannels.push({ name: channelName, id: channelId });
+                saveBlocked();
+            }
+            showToast(`🚫 Blocked ${channelName}`, "danger");
+            if (state.lastViewBeforeInspect) {
+                state.currentView = state.lastViewBeforeInspect;
+                state.lastViewBeforeInspect = null;
+            } else {
+                state.currentView = "subscriptions";
+            }
+            renderFeed();
+        });
+        backRow.appendChild(headerActions);
         grid.appendChild(backRow);
+        
+        if (!isSubscribed) {
+            const banner = document.createElement("div");
+            banner.className = "channel-inspect-banner";
+            banner.innerHTML = `
+                <div class="channel-inspect-content">
+                    <h3>🌿 Channel Inspection Mode</h3>
+                    <p>You are viewing the latest videos of <strong>${escapeHTML(channelName)}</strong>. Subscribe to add them to your Smart Feed, or Block to hide them permanently.</p>
+                </div>
+            `;
+            grid.appendChild(banner);
+        }
         
         if (channelVideos.length === 0) {
             emptyState.classList.remove("hidden");
@@ -3581,5 +3801,380 @@ async function editDiscoverTopic(topic) {
     } finally {
         fillSmartFeedPreloadBuffer();
     }
+}
+
+// ============================================================
+//  DYNAMIC CHANNEL DISCOVERY SYSTEM
+// ============================================================
+
+function saveDiscovered() {
+    localStorage.setItem("wallgarden_discovered_channels", JSON.stringify(state.discoveredChannels));
+}
+
+function initDiscoverChannels() {
+    const btnRefresh = document.getElementById("btn-refresh-discover");
+    if (btnRefresh && !btnRefresh.dataset.hooked) {
+        btnRefresh.dataset.hooked = "true";
+        btnRefresh.addEventListener("click", () => {
+            generateDiscoverChannels(true);
+        });
+    }
+    generateDiscoverChannels(false);
+}
+
+async function scrapeFeaturedChannels(channelId) {
+    try {
+        const resp = await fetch(`/youtube/channel/${channelId}`);
+        if (!resp.ok) return [];
+        const html = await resp.text();
+        
+        const match = html.match(/ytInitialData\s*=\s*({.+?});/);
+        if (!match) return [];
+        const data = JSON.parse(match[1]);
+        
+        const channels = [];
+        function findChannelsRecursive(obj) {
+            if (!obj || typeof obj !== "object") return;
+            if (obj.channelId && (obj.title || obj.displayName)) {
+                const name = obj.title?.simpleText || obj.title?.runs?.[0]?.text || obj.displayName?.runs?.[0]?.text || "";
+                const handle = obj.navigationEndpoint?.browseEndpoint?.canonicalBaseUrl || "";
+                if (obj.channelId !== channelId) {
+                    channels.push({
+                        id: obj.channelId,
+                        name: name,
+                        handle: handle.startsWith("/@") ? handle.replace("/", "") : ""
+                    });
+                }
+            }
+            for (const key in obj) {
+                if (obj.hasOwnProperty(key)) {
+                    findChannelsRecursive(obj[key]);
+                }
+            }
+        }
+        findChannelsRecursive(data);
+        return channels;
+    } catch (e) {
+        console.warn("Featured channels scraping error:", e);
+        return [];
+    }
+}
+
+async function searchTopicsForChannels(topic) {
+    try {
+        const url = `/youtube/results?search_query=${encodeURIComponent(topic)}&sp=EgIQAg%3D%3D`;
+        const resp = await fetch(url);
+        if (!resp.ok) return [];
+        const html = await resp.text();
+        
+        const match = html.match(/ytInitialData\s*=\s*({.+?});/);
+        if (!match) return [];
+        const data = JSON.parse(match[1]);
+        
+        const channels = [];
+        function findChannelsRecursive(obj) {
+            if (!obj || typeof obj !== "object") return;
+            if (obj.channelId && (obj.title || obj.displayName)) {
+                const name = obj.title?.simpleText || obj.title?.runs?.[0]?.text || obj.displayName?.runs?.[0]?.text || "";
+                const handle = obj.navigationEndpoint?.browseEndpoint?.canonicalBaseUrl || "";
+                channels.push({
+                    id: obj.channelId,
+                    name: name,
+                    handle: handle.startsWith("/@") ? handle.replace("/", "") : ""
+                });
+            }
+            for (const key in obj) {
+                if (obj.hasOwnProperty(key)) {
+                    findChannelsRecursive(obj[key]);
+                }
+            }
+        }
+        findChannelsRecursive(data);
+        return channels;
+    } catch (e) {
+        console.warn("Topic channel search error:", e);
+        return [];
+    }
+}
+
+async function generateDiscoverChannels(force = false) {
+    if (state.discoverChannelsLoading) return;
+    
+    if (!force && state.discoveredChannels && state.discoveredChannels.length > 0) {
+        renderDiscoverChannelsView();
+        return;
+    }
+    
+    state.discoverChannelsLoading = true;
+    
+    const loadingState = document.getElementById("discover-loading-state");
+    const grid = document.getElementById("discover-channels-grid");
+    const btnRefresh = document.getElementById("btn-refresh-discover");
+    
+    if (loadingState) loadingState.classList.remove("hidden");
+    if (grid) grid.classList.add("hidden");
+    if (btnRefresh) btnRefresh.classList.add("spinning");
+    
+    let allRecommendations = [];
+    const seenIds = new Set();
+    const currentSubscribedIds = new Set(state.channels.map(c => c.id).filter(Boolean));
+    const currentBlockedNames = new Set(state.blockedChannels.map(bc => bc.name.toLowerCase()));
+    const currentBlockedIds = new Set(state.blockedChannels.map(bc => bc.id).filter(Boolean));
+    
+    const addRecommendation = (rec) => {
+        if (!rec.id && !rec.handle) return;
+        
+        const key = rec.id || rec.handle;
+        if (seenIds.has(key)) return;
+        
+        if (rec.id && currentSubscribedIds.has(rec.id)) return;
+        if (rec.id && currentBlockedIds.has(rec.id)) return;
+        if (rec.name && currentBlockedNames.has(rec.name.toLowerCase())) return;
+        
+        seenIds.add(key);
+        allRecommendations.push(rec);
+    };
+    
+    const promises = [];
+    
+    // 1. vLLM Suggestion
+    const vllmPromise = (async () => {
+        if (state.channels.length === 0) return;
+        try {
+            if (activeLlmModel === "default-model") {
+                await fetchLlmModel();
+            }
+            
+            const subscribedNames = state.channels.slice(0, 15).map(c => c.name).join(", ");
+            const systemPrompt = `You are a YouTube channel recommendation engine. Recommend 5 high-quality channels that are similar in nature to the channels the user likes. Avoid recommending channels in the user's list. Return a JSON object with a 'channels' array: {"channels": [{"name": "Channel Name", "handle": "@handle", "reason": "1-sentence reason why the user will like it"}]}`;
+            const userMessage = `I like these channels: [${subscribedNames}]. Suggest 5 other high-quality YouTube channels.`;
+            
+            const resp = await fetch("/vllm/v1/chat/completions", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    model: activeLlmModel,
+                    messages: [
+                        { role: "system", content: systemPrompt },
+                        { role: "user", content: userMessage }
+                    ],
+                    temperature: 0.2,
+                    max_tokens: 1000
+                })
+            });
+            
+            if (resp.ok) {
+                const data = await resp.json();
+                const content = data.choices?.[0]?.message?.content;
+                const parsed = parseLlmJsonResponse(content);
+                if (parsed && Array.isArray(parsed.channels)) {
+                    parsed.channels.forEach(ch => {
+                        if (ch.name) {
+                            addRecommendation({
+                                name: ch.name,
+                                handle: ch.handle ? (ch.handle.startsWith("@") ? ch.handle : "@" + ch.handle) : "",
+                                id: ch.id || "",
+                                reason: ch.reason || "Suggested based on your subscription style.",
+                                source: "vllm",
+                                sourceLabel: "AI Suggestion"
+                            });
+                        }
+                    });
+                }
+            }
+        } catch (e) {
+            console.error("vLLM channel recommendation failed:", e);
+        }
+    })();
+    promises.push(vllmPromise);
+    
+    // 2. Featured channels scraper
+    const featuredPromise = (async () => {
+        if (state.channels.length === 0) return;
+        try {
+            const shuffled = [...state.channels].sort(() => 0.5 - Math.random());
+            const selected = shuffled.slice(0, 3);
+            
+            for (const ch of selected) {
+                if (!ch.id || ch.id.startsWith("reddit:")) continue;
+                const results = await scrapeFeaturedChannels(ch.id);
+                results.forEach(rec => {
+                    if (rec.name) {
+                        addRecommendation({
+                            id: rec.id,
+                            name: rec.name,
+                            handle: rec.handle,
+                            reason: `Featured on ${ch.name}`,
+                            source: "featured",
+                            sourceLabel: `Featured by ${ch.name}`
+                        });
+                    }
+                });
+            }
+        } catch (e) {
+            console.error("Featured channels scraper failed:", e);
+        }
+    })();
+    promises.push(featuredPromise);
+    
+    // 3. Topic searches
+    const topicPromise = (async () => {
+        try {
+            const topTopics = state.topics
+                .filter(t => t.weight > 0)
+                .sort((a, b) => b.weight - a.weight)
+                .slice(0, 3)
+                .map(t => t.phrase);
+                
+            if (topTopics.length === 0) {
+                topTopics.push("programming", "science");
+            }
+            
+            for (const topic of topTopics) {
+                const results = await searchTopicsForChannels(topic);
+                results.forEach(rec => {
+                    if (rec.name) {
+                        addRecommendation({
+                            id: rec.id,
+                            name: rec.name,
+                            handle: rec.handle,
+                            reason: `Top matching creator for "${topic}"`,
+                            source: "topic",
+                            sourceLabel: `Topic: ${capitalizePhrase(topic)}`
+                        });
+                    }
+                });
+            }
+        } catch (e) {
+            console.error("Topic search discovery failed:", e);
+        }
+    })();
+    promises.push(topicPromise);
+    
+    await Promise.allSettled(promises);
+    
+    state.discoveredChannels = allRecommendations;
+    saveDiscovered();
+    
+    state.discoverChannelsLoading = false;
+    
+    if (loadingState) loadingState.classList.add("hidden");
+    if (grid) grid.classList.remove("hidden");
+    if (btnRefresh) btnRefresh.classList.remove("spinning");
+    
+    renderDiscoverChannelsView();
+}
+
+function renderDiscoverChannelsView() {
+    const grid = document.getElementById("discover-channels-grid");
+    if (!grid) return;
+    grid.innerHTML = "";
+    
+    if (!state.discoveredChannels || state.discoveredChannels.length === 0) {
+        grid.innerHTML = `
+            <div class="empty-state" style="grid-column: 1 / -1; min-height: 200px;">
+                <div class="empty-icon">💡</div>
+                <h3>No recommendations yet</h3>
+                <p>Click "Refresh Suggestions" to run the dynamic discovery pipeline.</p>
+            </div>
+        `;
+        return;
+    }
+    
+    const sorted = [...state.discoveredChannels].sort((a, b) => {
+        const order = { vllm: 0, featured: 1, topic: 2 };
+        return (order[a.source] || 3) - (order[b.source] || 3);
+    });
+    
+    sorted.forEach(rec => {
+        const card = document.createElement("div");
+        card.className = "discover-channel-card fade-in";
+        
+        let badgeClass = "vllm";
+        if (rec.source === "featured") badgeClass = "featured";
+        if (rec.source === "topic") badgeClass = "topic";
+        
+        card.innerHTML = `
+            <div class="discover-channel-info">
+                <span class="discover-source-badge ${badgeClass}">${escapeHTML(rec.sourceLabel)}</span>
+                <h3>${escapeHTML(rec.name)}</h3>
+                ${rec.handle ? `<div class="discover-channel-handle">${escapeHTML(rec.handle)}</div>` : ''}
+                <div class="discover-channel-reason">${escapeHTML(rec.reason)}</div>
+            </div>
+            <div class="discover-channel-actions">
+                <button class="btn btn-secondary btn-sm btn-inspect-rec">🔍 Inspect Feed</button>
+                <button class="btn btn-primary btn-sm btn-sub-rec" style="background:var(--accent);color:var(--bg-primary);border-color:var(--accent);">➕ Subscribe</button>
+            </div>
+        `;
+        
+        card.querySelector(".btn-inspect-rec").addEventListener("click", () => {
+            if (rec.id) {
+                navigateToChannel(rec.id, rec.name);
+            } else if (rec.handle) {
+                resolveAndInspectChannelByName(rec.handle);
+            } else {
+                resolveAndInspectChannelByName(rec.name);
+            }
+        });
+        
+        card.querySelector(".btn-sub-rec").addEventListener("click", async (e) => {
+            const btn = e.target;
+            btn.disabled = true;
+            btn.textContent = "Subscribing...";
+            
+            try {
+                let channelId = rec.id;
+                if (!channelId) {
+                    const nameToResolve = rec.handle || rec.name;
+                    if (nameToResolve.startsWith("@")) {
+                        const cleanHandle = nameToResolve.substring(1);
+                        const resp = await fetch(`/youtube/@${cleanHandle}`);
+                        if (resp.ok) {
+                            const text = await resp.text();
+                            const match = text.match(/<link rel="canonical" href="https:\/\/www\.youtube\.com\/channel\/(UC[A-Za-z0-9_-]{22})"/);
+                            if (match && match[1]) {
+                                channelId = match[1];
+                            }
+                        }
+                    }
+                    if (!channelId) {
+                        const searchResults = await searchChannelsOnYouTube(rec.name);
+                        if (searchResults && searchResults.length > 0) {
+                            channelId = searchResults[0].id;
+                        }
+                    }
+                }
+                
+                if (channelId) {
+                    if (!state.channels.some(ch => ch.id === channelId)) {
+                        state.channels.push({ name: rec.name, id: channelId });
+                        saveChannels();
+                        updateSubCount();
+                        showToast(`✅ Subscribed to ${rec.name}`, "success");
+                        btn.textContent = "Subscribed";
+                        btn.style.background = "transparent";
+                        btn.style.color = "var(--text-muted)";
+                        btn.style.borderColor = "var(--card-border)";
+                        
+                        state.discoveredChannels = state.discoveredChannels.filter(c => c.id !== rec.id && c.name !== rec.name);
+                        saveDiscovered();
+                        
+                        syncFeeds();
+                    } else {
+                        showToast("Already subscribed!", "info");
+                        btn.textContent = "Subscribed";
+                    }
+                } else {
+                    throw new Error("Could not resolve channel ID");
+                }
+            } catch (err) {
+                showToast("Failed to subscribe: " + err.message, "danger");
+                btn.disabled = false;
+                btn.textContent = "➕ Subscribe";
+            }
+        });
+        
+        grid.appendChild(card);
+    });
 }
 

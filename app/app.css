@@ -2025,3 +2025,163 @@ body {
     padding: 0 1px;
 }
 
+/* Clickable Channel Names */
+.video-channel {
+    cursor: pointer;
+    transition: color 0.2s ease, text-decoration 0.2s ease;
+}
+.video-channel:hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
+/* Inspection Banner for Channel Detail View */
+.channel-inspect-banner {
+    grid-column: 1 / -1;
+    background: rgba(74, 222, 128, 0.05);
+    border: 1px solid rgba(74, 222, 128, 0.2);
+    border-radius: 8px;
+    padding: 1rem 1.5rem;
+    margin-bottom: 1.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+    animation: fadeIn 0.3s ease both;
+}
+
+.channel-inspect-content h3 {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 0.25rem;
+}
+
+.channel-inspect-content p {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.channel-inspect-actions {
+    display: flex;
+    gap: 0.75rem;
+}
+
+/* Discover Channels Page Layout */
+.discover-channels-container {
+    animation: fadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.discover-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 2rem;
+    margin-bottom: 2rem;
+    border-bottom: 1px solid var(--card-border);
+    padding-bottom: 1.5rem;
+}
+
+.discover-intro {
+    font-size: 0.95rem;
+    color: var(--text-secondary);
+    max-width: 600px;
+    line-height: 1.5;
+}
+
+.discover-spinner {
+    font-size: 0.95rem;
+    display: inline-block;
+    transition: transform 0.2s ease;
+}
+
+.spinning .discover-spinner {
+    animation: spin 1s linear infinite;
+}
+
+/* Discover Channels Grid & Cards */
+.discover-channels-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 1.5rem;
+}
+
+.discover-channel-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 1rem;
+    position: relative;
+    backdrop-filter: blur(8px);
+    transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.discover-channel-card:hover {
+    transform: translateY(-4px);
+    border-color: rgba(255, 255, 255, 0.12);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.discover-channel-info h3 {
+    font-size: 1.1rem;
+    font-weight: 700;
+    margin-bottom: 0.25rem;
+    color: var(--text-primary);
+}
+
+.discover-channel-handle {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.75rem;
+    font-weight: 500;
+}
+
+.discover-channel-reason {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+    margin-bottom: 0.5rem;
+}
+
+.discover-source-badge {
+    display: inline-block;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    margin-bottom: 0.75rem;
+}
+
+.discover-source-badge.vllm {
+    background: rgba(147, 51, 234, 0.15);
+    color: #C084FC;
+    border: 1px solid rgba(147, 51, 234, 0.3);
+}
+
+.discover-source-badge.featured {
+    background: rgba(59, 130, 246, 0.15);
+    color: #60A5FA;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.discover-source-badge.topic {
+    background: rgba(245, 158, 11, 0.15);
+    color: #FBBF24;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.discover-channel-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.discover-channel-actions button {
+    flex: 1;
+}
+

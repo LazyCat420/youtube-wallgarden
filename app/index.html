@@ -28,6 +28,10 @@
                     <span class="nav-label">Subscriptions</span>
                     <span class="nav-count" id="nav-sub-count">0</span>
                 </button>
+                <button class="nav-item" data-view="discover-channels">
+                    <span class="nav-icon">✨</span>
+                    <span class="nav-label">Discover Channels</span>
+                </button>
             </nav>
 
             <div class="sidebar-footer">
@@ -94,6 +98,27 @@
 
                 <div id="video-grid" class="video-grid">
                     <!-- Cards injected dynamically -->
+                </div>
+
+                <!-- Discover Channels View -->
+                <div id="discover-channels-container" class="discover-channels-container hidden">
+                    <div class="discover-header-row">
+                        <p class="discover-intro">Find new high-quality creators based on your subscription graph, favorite topics, and AI suggestions. Inspect their latest videos before subscribing.</p>
+                        <button id="btn-refresh-discover" class="btn btn-primary btn-icon-only" title="Refresh Recommendations">
+                            <span class="btn-text">Refresh Suggestions</span>
+                            <span class="discover-spinner">🔄</span>
+                        </button>
+                    </div>
+                    
+                    <div id="discover-loading-state" class="empty-state hidden">
+                        <div class="sync-spinner" style="font-size: 2.5rem; animation: spin 1s linear infinite; display: block; margin: 0 auto 1.5rem;">🔄</div>
+                        <h3>Analyzing subscriptions & topics...</h3>
+                        <p>Querying local vLLM, searching YouTube, and generating suggestions.</p>
+                    </div>
+
+                    <div id="discover-channels-grid" class="discover-channels-grid">
+                        <!-- Recommended channel cards injected here dynamically -->
+                    </div>
                 </div>
 
                 <!-- AI Topic Brainstorming View -->
