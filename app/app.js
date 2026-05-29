@@ -970,7 +970,8 @@ async function syncFeeds() {
                                     title: title,
                                     channelName: channel.name,
                                     channelId: channel.id,
-                                    published: new Date(publishedStr).getTime()
+                                    published: new Date(publishedStr).getTime(),
+                                    description: content || ""
                                 });
                             }
                         });
@@ -1004,6 +1005,9 @@ async function syncFeeds() {
                             const title = entry.querySelector("title")?.textContent || "";
                             const publishedStr = entry.querySelector("published")?.textContent || 
                                                  entry.querySelector("updated")?.textContent || "";
+                            
+                            const mediaGroup = entry.getElementsByTagName("media:group")[0];
+                            const description = mediaGroup ? mediaGroup.getElementsByTagName("media:description")[0]?.textContent : "";
                                                  
                             if (videoId && title) {
                                 videos.push({
@@ -1011,7 +1015,8 @@ async function syncFeeds() {
                                     title: title,
                                     channelName: feedTitle || channel.name,
                                     channelId: channel.id,
-                                    published: new Date(publishedStr).getTime()
+                                    published: new Date(publishedStr).getTime(),
+                                    description: description || ""
                                 });
                             }
                         });
@@ -1053,7 +1058,8 @@ async function syncFeeds() {
                                     title: item.title,
                                     channelName: item.channel || channel.name,
                                     channelId: channel.id,
-                                    published: item.published_at ? new Date(item.published_at).getTime() : Date.now()
+                                    published: item.published_at ? new Date(item.published_at).getTime() : Date.now(),
+                                    description: item.description || ""
                                 });
                             });
                             
@@ -2071,15 +2077,19 @@ function playVideo(video) {
         inlinePlayer.className = "inline-player";
         inlinePlayer.innerHTML = [
             '<div class="inline-player-inner">',
-            '  <div class="inline-player-video">',
-            '    <div class="player-wrapper-box"></div>',
-            '  </div>',
-            '  <div class="inline-player-bar">',
-            '    <div class="inline-player-meta">',
-            '      <h2 class="player-title"></h2>',
-            '      <p class="player-channel"></p>',
+            '  <div class="inline-player-main">',
+            '    <div class="inline-player-video">',
+            '      <div class="player-wrapper-box"></div>',
             '    </div>',
-            '    <button class="inline-player-close" title="Close Player">✕ Close</button>',
+            '    <div class="inline-player-bar">',
+            '      <div class="inline-player-meta">',
+            '        <h2 class="player-title"></h2>',
+            '        <p class="player-channel"></p>',
+            '      </div>',
+            '      <button class="inline-player-close" title="Close Player">✕ Close</button>',
+            '    </div>',
+            '  </div>',
+            '  <div class="inline-player-sidebar">',
             '  </div>',
             '</div>'
         ].join("");
@@ -2109,6 +2119,77 @@ function playVideo(video) {
             'title="' + escapeHTML(video.title) + '" ' +
             'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" ' +
             'allowfullscreen></iframe>';
+    }
+
+    const sidebar = inlinePlayer.querySelector(".inline-player-sidebar");
+    if (sidebar) {
+        const isSubscribed = state.channels.some(ch => 
+            (ch.id && video.channelId && ch.id === video.channelId) || 
+            (ch.name && video.channelName && ch.name.toLowerCase() === video.channelName.toLowerCase())
+        );
+        const videoTopic = video.discoveryTopic || (video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:")) : null) || "";
+        const currentRating = state.videoRatings[video.id];
+
+        sidebar.innerHTML = `
+            <div class="sidebar-description-box">
+                ${escapeHTML(video.description || "No description available.").replace(/\n/g, '<br>')}
+            </div>
+            <div class="sidebar-actions-grid">
+                <button class="btn sidebar-btn-like${currentRating === 5 ? ' active' : ''}">👍 Like</button>
+                <button class="btn sidebar-btn-dislike${currentRating === -5 ? ' active' : ''}">👎 Dislike</button>
+                <button class="btn sidebar-btn-subscribe${isSubscribed ? ' active' : ''}">${isSubscribed ? '➖ Unsubscribe' : '➕ Subscribe'}</button>
+                ${videoTopic ? `<button class="btn sidebar-btn-topic">🗑️ Remove Topic</button>` : ''}
+            </div>
+            <button class="btn sidebar-btn-block" style="margin-top: 0.5rem; width: 100%;">🚫 Block Channel</button>
+        `;
+
+        sidebar.querySelector(".sidebar-btn-like").addEventListener("click", () => {
+            if (state.videoRatings[video.id] === 5) delete state.videoRatings[video.id];
+            else state.videoRatings[video.id] = 5;
+            saveRatings();
+            playVideo(video);
+            renderFeed();
+        });
+        sidebar.querySelector(".sidebar-btn-dislike").addEventListener("click", () => {
+            if (state.videoRatings[video.id] === -5) delete state.videoRatings[video.id];
+            else state.videoRatings[video.id] = -5;
+            saveRatings();
+            playVideo(video);
+            renderFeed();
+        });
+        sidebar.querySelector(".sidebar-btn-subscribe").addEventListener("click", () => {
+            if (isSubscribed) {
+                state.channels = state.channels.filter(ch => ch.id !== video.channelId && ch.name !== video.channelName);
+            } else {
+                state.channels.push({ id: video.channelId, name: video.channelName });
+            }
+            saveChannels();
+            renderChannelsList();
+            playVideo(video);
+            renderFeed();
+        });
+        const btnTopic = sidebar.querySelector(".sidebar-btn-topic");
+        if (btnTopic) {
+            btnTopic.addEventListener("click", () => {
+                if (videoTopic) {
+                    state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== videoTopic.toLowerCase());
+                    saveTopics();
+                    renderTopicsList();
+                    renderPreferencesLists();
+                    playVideo(video);
+                }
+            });
+        }
+        sidebar.querySelector(".sidebar-btn-block").addEventListener("click", () => {
+            if (!state.blockedChannels.some(bc => bc.id === video.channelId)) {
+                state.blockedChannels.push({ id: video.channelId, name: video.channelName });
+                saveBlocked();
+                renderBlockedList();
+            }
+            showToast(`🚫 Blocked ${video.channelName}`, "danger");
+            closePlayer();
+            renderFeed();
+        });
     }
 
     // Show and animate in

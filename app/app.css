@@ -737,9 +737,74 @@ body {
 }
 
 .inline-player-inner {
-    max-width: 1100px;
+    max-width: 1400px;
     margin: 0 auto;
     padding: 1rem 2rem;
+    display: grid;
+    grid-template-columns: 1fr 350px;
+    gap: 1.5rem;
+    align-items: start;
+}
+
+.inline-player-main {
+    min-width: 0;
+}
+
+.inline-player-sidebar {
+    background: var(--bg-secondary);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    max-height: calc(100vh - 120px);
+    overflow-y: auto;
+}
+
+.sidebar-description-box {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 6px;
+    padding: 1rem;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.sidebar-actions-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+}
+
+.sidebar-actions-grid .btn {
+    width: 100%;
+}
+
+.sidebar-btn-subscribe {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
+}
+.sidebar-btn-subscribe.active {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.sidebar-btn-block {
+    background: rgba(239, 68, 68, 0.1);
+    color: #F87171;
+    border-color: rgba(239, 68, 68, 0.2);
+}
+.sidebar-btn-block:hover {
+    background: rgba(239, 68, 68, 0.2);
+}
+
+@media (max-width: 1000px) {
+    .inline-player-inner {
+        grid-template-columns: 1fr;
+    }
 }
 
 .inline-player-video {
