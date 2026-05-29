@@ -57,8 +57,9 @@ let state = {
     smartFeedLoading: false,
     smartFeedInitialized: false,
     smartFeedSubscriptionIndex: 0,
-    smartFeedPreloadedVideos: [],
-    smartFeedPreloadLoading: false
+    smartFeedPreloadedVideos: [], // kept as reference/compat if needed
+    smartFeedPreloadLoading: false,
+    smartFeedSuggestionPool: []
 };
 
 const DISCOVER_BATCH_SIZE = 30;
@@ -93,7 +94,6 @@ function initSmartFeed() {
     state.smartFeedLoading = false;
     state.smartFeedSubscriptionIndex = 0;
     state.smartFeedInitialized = true;
-    state.smartFeedPreloadedVideos = [];
     state.smartFeedPreloadLoading = false;
     
     // Get positive topics randomized by weight
@@ -196,6 +196,7 @@ function loadState() {
     const rawBrainstorm = localStorage.getItem("wallgarden_brainstorm_topics");
     const rawVideoRatings = localStorage.getItem("wallgarden_video_ratings");
     const rawDiscovered = localStorage.getItem("wallgarden_discovered_channels");
+    const rawPool = localStorage.getItem("wallgarden_smart_feed_pool");
 
     const rawLiked = localStorage.getItem("wallgarden_liked_topics");
     const rawDisliked = localStorage.getItem("wallgarden_disliked_topics");
@@ -210,9 +211,21 @@ function loadState() {
     state.brainstormTopics = rawBrainstorm ? JSON.parse(rawBrainstorm) : [];
     state.videoRatings = rawVideoRatings ? JSON.parse(rawVideoRatings) : {};
     state.discoveredChannels = rawDiscovered ? JSON.parse(rawDiscovered) : [];
+    state.smartFeedSuggestionPool = rawPool ? JSON.parse(rawPool) : [];
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
+    }
+
+    // Discard expired cached suggestions older than 14 days
+    const fourteenDaysAgo = Date.now() - (14 * 24 * 60 * 60 * 1000);
+    const initialPoolSize = state.smartFeedSuggestionPool.length;
+    state.smartFeedSuggestionPool = state.smartFeedSuggestionPool.filter(v => 
+        v.crawledAt && v.crawledAt > fourteenDaysAgo
+    );
+    if (state.smartFeedSuggestionPool.length !== initialPoolSize) {
+        console.log(`[Smart Feed] Discarded ${initialPoolSize - state.smartFeedSuggestionPool.length} expired suggestions older than 14 days.`);
+        saveSmartFeedSuggestionPool();
     }
 
     // Migrate old bad default channel IDs if present
@@ -291,6 +304,10 @@ function saveSearchHistory() {
     localStorage.setItem("wallgarden_search_history", JSON.stringify(state.searchHistory));
 }
 
+function saveSmartFeedSuggestionPool() {
+    localStorage.setItem("wallgarden_smart_feed_pool", JSON.stringify(state.smartFeedSuggestionPool));
+}
+
 function getCachedVideosCount() {
     return Object.values(state.cache.videos).reduce((acc, curr) => acc + curr.length, 0);
 }
@@ -329,7 +346,7 @@ function setupEventListeners() {
             
             if (state.currentView === "smart-feed") {
                 state.smartFeedVideos = [];
-                state.smartFeedPreloadedVideos = [];
+                // Do not clear persistent suggestions pool so we can render instantly
                 initSmartFeed(); // Repopulates and randomizes topics queue
             } else if (state.currentView === "discover-channels") {
                 initDiscoverChannels();
@@ -3560,10 +3577,10 @@ let smartFeedPreloadTimeout = null;
 async function fillSmartFeedPreloadBuffer() {
     if (state.smartFeedPreloadLoading) return;
     
-    // We keep a larger buffer (e.g. 50) so we can randomly mix topics in loadNextSmartFeedBatch
-    const targetPreloadCount = 200;
-    if (state.smartFeedPreloadedVideos.length >= targetPreloadCount) {
-        return; // Preload buffer is full
+    // Keep a larger buffer (1000 suggestions) for instant zero-lag loading
+    const targetPreloadCount = 1000;
+    if (state.smartFeedSuggestionPool.length >= targetPreloadCount) {
+        return; // Suggestion pool is full
     }
     
     // Clear any pending timeout to prevent duplicate schedules
@@ -3604,17 +3621,23 @@ async function fillSmartFeedPreloadBuffer() {
     try {
         const videos = await fetchVideosForTopic(topic);
         if (videos && videos.length > 0) {
-            videos.forEach(v => v._topic = topic);
+            const timestamp = Date.now();
+            videos.forEach(v => {
+                v._topic = topic;
+                v.crawledAt = timestamp;
+            });
             
             // Limit to a max of 8 videos per topic to ensure a diverse mix in the feed
             // and prevent one topic (e.g. 50 videos) from dominating the view at once
             const limitedVideos = videos.slice(0, 8);
-            state.smartFeedPreloadedVideos.push(...limitedVideos);
+            state.smartFeedSuggestionPool.push(...limitedVideos);
             
             // Shuffle to mix topics seamlessly
-            state.smartFeedPreloadedVideos.sort(() => Math.random() - 0.5);
+            state.smartFeedSuggestionPool.sort(() => Math.random() - 0.5);
             
-            console.log(`[Smart Feed Preload] Successfully preloaded topic "${topic}". Buffer size: ${state.smartFeedPreloadedVideos.length}`);
+            saveSmartFeedSuggestionPool();
+            
+            console.log(`[Smart Feed Preload] Successfully preloaded topic "${topic}". Suggestion Pool size: ${state.smartFeedSuggestionPool.length}`);
             
             // If the Smart Feed currently has no discovery videos rendered, and the user is waiting,
             // we should instantly render this newly loaded batch!
@@ -3631,7 +3654,7 @@ async function fillSmartFeedPreloadBuffer() {
         
         // Cooldown delay of 1.5 seconds between fetches to protect from rate-limiting
         // Only schedule if we are still below target preload count
-        if (state.smartFeedPreloadedVideos.length < targetPreloadCount) {
+        if (state.smartFeedSuggestionPool.length < targetPreloadCount) {
             smartFeedPreloadTimeout = setTimeout(() => {
                 fillSmartFeedPreloadBuffer();
             }, 1500);
@@ -3650,14 +3673,28 @@ async function loadNextSmartFeedBatch() {
         return;
     }
     
-    // Check if we have preloaded content in the buffer
-    if (state.smartFeedPreloadedVideos.length > 0) {
+    // Check if we have suggestions in our persistent pool
+    if (state.smartFeedSuggestionPool.length > 0) {
         // Take a batch of 12 mixed videos
-        const batchSize = Math.min(12, state.smartFeedPreloadedVideos.length);
-        const videosToRender = state.smartFeedPreloadedVideos.splice(0, batchSize);
+        const batchSize = Math.min(12, state.smartFeedSuggestionPool.length);
+        const videosToRender = state.smartFeedSuggestionPool.splice(0, batchSize);
+        
+        saveSmartFeedSuggestionPool();
+        
+        // Dynamic dynamic check against active preferences/blocks on-the-fly
+        const allowedVideos = videosToRender.filter(v => {
+            const evaluation = getScoreAndMatches(v);
+            v.score = evaluation.score;
+            v.matchedTopics = evaluation.matches;
+            
+            const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === v.channelId);
+            const isBlockedName = state.blockedChannels.some(bc => !bc.id && v.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+            
+            return !isBlockedId && !isBlockedName && v.score > -10;
+        });
         
         const existingIds = new Set(state.smartFeedVideos.map(v => v.id));
-        const deduplicated = videosToRender.filter(v => !existingIds.has(v.id));
+        const deduplicated = allowedVideos.filter(v => !existingIds.has(v.id));
         
         if (deduplicated.length > 0) {
             state.smartFeedVideos.push(...deduplicated);
@@ -3672,7 +3709,7 @@ async function loadNextSmartFeedBatch() {
         state.smartFeedLoading = false;
         updateStatusText("Ready");
         
-        // Trigger preloader to fill the gap
+        // Trigger preloader asynchronously in background to replenish pool
         fillSmartFeedPreloadBuffer();
         return;
     }
@@ -3759,7 +3796,12 @@ function nukeDiscoverTopic(topic) {
     // 2. Clear from queue/preload states
     state.smartFeedUsedTopics = state.smartFeedUsedTopics.filter(t => t !== normalizedTopic);
     state.smartFeedTopicsQueue = state.smartFeedTopicsQueue.filter(t => t !== normalizedTopic);
-    state.smartFeedPreloadedVideos = state.smartFeedPreloadedVideos.filter(item => item.topic !== normalizedTopic);
+    state.smartFeedSuggestionPool = state.smartFeedSuggestionPool.filter(item => 
+        (item.topic || "").toLowerCase() !== normalizedTopic && 
+        (item.discoveryTopic || "").toLowerCase() !== normalizedTopic &&
+        (item._topic || "").toLowerCase() !== normalizedTopic
+    );
+    saveSmartFeedSuggestionPool();
     
     // 3. Remove videos of this topic from active smartFeedVideos state
     state.smartFeedVideos = state.smartFeedVideos.filter(v => (v.discoveryTopic || "").toLowerCase() !== normalizedTopic);
