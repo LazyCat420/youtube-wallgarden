@@ -1844,8 +1844,8 @@ function renderFeed() {
         return;
     }
     
-    // Handle Smart Feed
-    if (state.currentView === "smart-feed") {
+    // Handle Subscription Feed
+    if (state.currentView === "subscription-feed") {
         let subVideos = [];
         let redditVideos = [];
         Object.values(state.cache.videos).forEach(channelVideos => {
@@ -1885,12 +1885,12 @@ function renderFeed() {
             return b.published - a.published;
         });
         
-        const initialSubVideos = subVideos.slice(0, 20);
+        const initialSubVideos = subVideos.slice(0, 50);
         
         if (subShorts.length > 0) {
             shortsShelf.classList.remove("hidden");
             const shortsFragment = document.createDocumentFragment();
-            subShorts.slice(0, 10).forEach(short => renderCard(short, shortsFragment));
+            subShorts.slice(0, 15).forEach(short => renderCard(short, shortsFragment));
             shortsGrid.appendChild(shortsFragment);
         }
 
@@ -1902,87 +1902,17 @@ function renderFeed() {
         }
         
         if (initialSubVideos.length > 0) {
-            const detailsElement = document.createElement("details");
-            detailsElement.className = "subscriptions-collapsible";
-            detailsElement.style.gridColumn = "1 / -1";
-            detailsElement.open = true;
-            
-            const summaryElement = document.createElement("summary");
-            summaryElement.className = "discover-section-header";
-            summaryElement.style.cursor = "pointer";
-            summaryElement.style.outline = "none";
-            summaryElement.style.marginBottom = "1rem";
-            summaryElement.style.display = "flex";
-            summaryElement.style.alignItems = "center";
-            summaryElement.style.listStyle = "none";
-            
-            summaryElement.innerHTML = `
-                <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
-                    <div style="display: flex; align-items: center; gap: 0.5rem;">
-                        <span class="collapse-icon" style="font-size: 0.9rem; transition: transform 0.2s;">▼</span>
-                        <h2 class="discover-section-title" style="font-size: 1.15rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
-                            <span>🌿 Subscribed Feeds</span>
-                        </h2>
-                        <span class="discover-badge" style="font-size: 0.7rem; opacity: 0.6;">Your Subscriptions</span>
-                    </div>
-                    <span style="font-size: 0.8rem; color: var(--text-muted);">Click to toggle</span>
-                </div>
-            `;
-            
-            const refreshBtn = document.getElementById("btn-refresh-discover");
-            if (refreshBtn) {
-                refreshBtn.addEventListener("click", () => {
-                    const btnText = refreshBtn.querySelector(".btn-text");
-                    const spinner = refreshBtn.querySelector(".discover-spinner");
-                    if (btnText) btnText.textContent = "Refreshing...";
-                    if (spinner) spinner.style.animation = "spin 1s linear infinite";
-                    refreshBtn.disabled = true;
-                    
-                    fetchDiscoverRecommendations(true).finally(() => {
-                        if (btnText) btnText.textContent = "Refresh Suggestions";
-                        if (spinner) spinner.style.animation = "none";
-                        refreshBtn.disabled = false;
-                    });
-                });
-            }
-            
-            const refreshNewsBtn = document.getElementById("btn-refresh-news");
-            if (refreshNewsBtn) {
-                refreshNewsBtn.addEventListener("click", () => {
-                    const btnText = refreshNewsBtn.querySelector(".btn-text");
-                    const spinner = refreshNewsBtn.querySelector(".sync-spinner");
-                    if (btnText) btnText.textContent = "Refreshing...";
-                    if (spinner) spinner.style.animation = "spin 1s linear infinite";
-                    refreshNewsBtn.disabled = true;
-                    
-                    renderNewsFeed().finally(() => {
-                        if (btnText) btnText.textContent = "Refresh News";
-                        if (spinner) spinner.style.animation = "none";
-                        refreshNewsBtn.disabled = false;
-                    });
-                });
-            }
-            
-            summaryElement.addEventListener("click", () => {
-                const icon = summaryElement.querySelector(".collapse-icon");
-                icon.style.transform = detailsElement.open ? "rotate(-90deg)" : "rotate(0deg)";
-            });
-
-            detailsElement.appendChild(summaryElement);
-            
-            const subGrid = document.createElement("div");
-            subGrid.className = "video-grid";
-            subGrid.style.marginBottom = "2rem";
-            
             const feedFragment = document.createDocumentFragment();
             initialSubVideos.forEach(video => renderCard(video, feedFragment));
-            subGrid.appendChild(feedFragment);
-            
-            detailsElement.appendChild(subGrid);
-            grid.appendChild(detailsElement);
+            grid.appendChild(feedFragment);
+        } else {
+            emptyState.classList.remove("hidden");
         }
-        
-        // ── Suggestions Section (AI-driven discover feed) ──
+        return;
+    }
+    
+    // Handle Smart Feed (Discovery)
+    if (state.currentView === "smart-feed") {
         const suggestionsHeader = document.createElement("div");
         suggestionsHeader.className = "suggestions-section-header";
         suggestionsHeader.style.gridColumn = "1 / -1";
@@ -1990,7 +1920,7 @@ function renderFeed() {
             <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
                 <div style="display: flex; align-items: center; gap: 0.5rem;">
                     <h2 class="discover-section-title" style="font-size: 1.15rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
-                        <span>✨ Suggestions</span>
+                        <span>✨ Discovery Feed</span>
                     </h2>
                     <span class="suggestions-badge">AI Discovery</span>
                 </div>
@@ -2014,7 +1944,7 @@ function renderFeed() {
             loadNextSmartFeedBatch();
         }
         
-        if (initialSubVideos.length === 0 && state.smartFeedVideos.length === 0) {
+        if (state.smartFeedVideos.length === 0 && !state.smartFeedLoading) {
             emptyState.classList.remove("hidden");
         } else {
             emptyState.classList.add("hidden");

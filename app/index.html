@@ -165,8 +165,8 @@
     </style>
 
     <!-- Non-blocking full CSS via preload pattern -->
-    <link rel="preload" href="app.min.css?v=20260529-v23" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="app.min.css?v=20260529-v23"></noscript>
+    <link rel="preload" href="app.min.css?v=20260529-v24" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="app.min.css?v=20260529-v24"></noscript>
 </head>
 <body>
     <div class="app-layout">
@@ -180,8 +180,12 @@
 
             <nav class="sidebar-nav">
                 <button class="nav-item active" data-view="smart-feed">
+                    <span class="nav-icon">✨</span>
+                    <span class="nav-label">Discovery Feed</span>
+                </button>
+                <button class="nav-item" data-view="subscription-feed">
                     <span class="nav-icon">🌿</span>
-                    <span class="nav-label">Smart Feed</span>
+                    <span class="nav-label">Subscription Feed</span>
                 </button>
                 <button class="nav-item" data-view="news-feed">
                     <span class="nav-icon">📰</span>
@@ -196,8 +200,8 @@
                     <span class="nav-label">Liked Videos</span>
                 </button>
                 <button class="nav-item" data-view="subscriptions">
-                    <span class="nav-icon">📺</span>
-                    <span class="nav-label">Subscriptions</span>
+                    <span class="nav-icon">⚙️</span>
+                    <span class="nav-label">Manage Subscriptions</span>
                     <span class="nav-count" id="nav-sub-count">0</span>
                 </button>
                 <button class="nav-item" data-view="discover-channels">
@@ -622,6 +626,6 @@
         </div>
     </div>
 
-    <script src="app.min.js?v=20260529-v23" defer></script>
+    <script src="app.min.js?v=20260529-v24" defer></script>
 </body>
 </html>
