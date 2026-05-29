@@ -512,8 +512,9 @@ function setupEventListeners() {
         }
     });
 
-    // Close Inline Player
-    document.getElementById("btn-close-player").addEventListener("click", closePlayer);
+    // Close Inline Player (also bound dynamically when player is created)
+    const closePlayerBtn = document.getElementById("btn-close-player");
+    if (closePlayerBtn) closePlayerBtn.addEventListener("click", closePlayer);
 
     // Global settings toggles
     document.getElementById("toggle-use-ytdlp").addEventListener("change", (e) => {
@@ -2003,12 +2004,45 @@ function renderFeed() {
 
 // Display Video in Inline Player (above feed, no overlay)
 function playVideo(video) {
-    const inlinePlayer = document.getElementById("inline-player");
+    // Get or create the inline player element
+    let inlinePlayer = document.getElementById("inline-player");
+    if (!inlinePlayer) {
+        // Dynamically create the inline player and insert before feed-section
+        inlinePlayer = document.createElement("div");
+        inlinePlayer.id = "inline-player";
+        inlinePlayer.className = "inline-player";
+        inlinePlayer.innerHTML = `
+            <div class="inline-player-inner">
+                <div class="inline-player-video">
+                    <div id="player-wrapper" class="player-wrapper"></div>
+                </div>
+                <div class="inline-player-bar">
+                    <div class="inline-player-meta">
+                        <h2 id="player-video-title">Video Title</h2>
+                        <p id="player-video-channel">Channel Name</p>
+                    </div>
+                    <button id="btn-close-player" class="inline-player-close" title="Close Player">✕ Close</button>
+                </div>
+            </div>
+        `;
+        // Insert before .feed-section inside .main-content
+        const feedSection = document.querySelector(".feed-section");
+        if (feedSection && feedSection.parentNode) {
+            feedSection.parentNode.insertBefore(inlinePlayer, feedSection);
+        } else {
+            // Fallback: append to main-content
+            const mainContent = document.querySelector(".main-content");
+            if (mainContent) mainContent.appendChild(inlinePlayer);
+        }
+        // Bind close button
+        document.getElementById("btn-close-player").addEventListener("click", closePlayer);
+    }
+
     const playerWrapper = document.getElementById("player-wrapper");
-    
+
     document.getElementById("player-video-title").textContent = video.title;
     document.getElementById("player-video-channel").textContent = video.channelName;
-    
+
     playerWrapper.innerHTML = `
         <iframe 
             src="https://www.youtube.com/embed/${video.id}?autoplay=1&rel=0&modestbranding=1" 
@@ -2017,14 +2051,16 @@ function playVideo(video) {
             allowfullscreen>
         </iframe>
     `;
-    
+
     // Show and animate in
     inlinePlayer.classList.remove("hidden", "closing");
-    
-    // Scroll the player into view smoothly
-    inlinePlayer.scrollIntoView({ behavior: "smooth", block: "start" });
+    inlinePlayer.style.display = "";
 
-    // Trigger background similar topic generation using video title (deferred to avoid lag during player open)
+    // Scroll the main content area so player is visible
+    const mainContent = document.querySelector(".main-content");
+    if (mainContent) mainContent.scrollTop = 0;
+
+    // Trigger background similar topic generation (deferred)
     if (video.title) {
         setTimeout(() => {
             console.log(`[Smart Feed] Watching video, triggering background similar topics generation for: "${video.title}"`);
@@ -2035,12 +2071,14 @@ function playVideo(video) {
 
 function closePlayer() {
     const inlinePlayer = document.getElementById("inline-player");
+    if (!inlinePlayer) return;
     inlinePlayer.classList.add("closing");
     // Wait for slide-up animation then hide + clear iframe
     setTimeout(() => {
         inlinePlayer.classList.add("hidden");
         inlinePlayer.classList.remove("closing");
-        document.getElementById("player-wrapper").innerHTML = ""; // Stops playback instantly
+        const pw = document.getElementById("player-wrapper");
+        if (pw) pw.innerHTML = ""; // Stops playback instantly
     }, 250);
 }
 
