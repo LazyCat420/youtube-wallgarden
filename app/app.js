@@ -3310,8 +3310,8 @@ const TOPIC_TOOL_DEFINITION = {
                         },
                         required: ["phrase", "category", "reason", "associated_with"]
                     },
-                    minItems: 5,
-                    maxItems: 5
+                    minItems: 50,
+                    maxItems: 100
                 }
             },
             required: ["topics"]
@@ -3320,10 +3320,10 @@ const TOPIC_TOOL_DEFINITION = {
 };
 
 const BRAINSTORM_SYSTEM_PROMPT = `/no_think
-You are a topic brainstorming assistant. Call the suggest_topics tool with 5 new topics related to the user's interests.`;
+You are a topic brainstorming assistant. Call the suggest_topics tool with 50 to 100 new topics related to the user's interests.`;
 
 const SIMILAR_SYSTEM_PROMPT = `/no_think
-You are a search query assistant. Call the suggest_topics tool with 5 topics related to the user's search query.`;
+You are a search query assistant. Call the suggest_topics tool with 50 to 100 topics related to the user's search query.`;
 
 async function fetchLlmModel() {
     try {
@@ -3408,7 +3408,7 @@ Recent searches: [${searches}]
 Recently used (avoid these): [${recentUsed}]
 Failed queries (don't reuse these exact phrases, they returned bad results): [${burnedList}]
 
-Suggest 5 new topics.`;
+Suggest 50 to 100 new topics.`;
 
     const MAX_RETRIES = 2;
     let attempt = 0;
@@ -3925,7 +3925,7 @@ async function fillSmartFeedPreloadBuffer() {
     const cooldownMs = 15000; // 15-second cooldown
     const isCooldownActive = state.lastBrainstormTime && (now - state.lastBrainstormTime < cooldownMs);
 
-    if (totalUpcoming < 50 && !state.brainstormLoading && !isCooldownActive) {
+    if (totalUpcoming < 150 && !state.brainstormLoading && !isCooldownActive) {
         console.log("[Smart Feed] Total upcoming topics low, triggering background LLM brainstorm...");
         generateBrainstormTopics(true, 1).then(() => {
             fillSmartFeedPreloadBuffer();
