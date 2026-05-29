@@ -1377,6 +1377,21 @@ function renderCard(video, targetContainer) {
                 state.videoRatings[video.id] = rating;
                 saveVideoRatings();
                 
+                // Thumbs down explicitly adds the topic to disliked list
+                if (rating === -5 && videoTopic) {
+                    const normalized = videoTopic.trim().toLowerCase();
+                    if (!state.dislikedTopics.includes(normalized)) {
+                        state.dislikedTopics.push(normalized);
+                        saveDislikedTopics();
+                    }
+                    if (state.likedTopics.includes(normalized)) {
+                        state.likedTopics = state.likedTopics.filter(t => t !== normalized);
+                        saveLikedTopics();
+                    }
+                    state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== normalized);
+                    saveTopics();
+                }
+                
                 // Update badge visually
                 const badge = card.querySelector(".score-badge");
                 if (badge) {
