@@ -2223,6 +2223,16 @@ function playVideo(video) {
 
         const pubDateStr = video.published ? new Date(video.published * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }) : "Unknown Date";
 
+        const isTopicActive = videoTopic ? state.topics.some(t => t.phrase.toLowerCase() === videoTopic.toLowerCase()) : false;
+        let topicBtnHtml = '';
+        if (videoTopic) {
+            if (isTopicActive) {
+                topicBtnHtml = `<button class="btn sidebar-btn-topic" style="margin-top: 0.75rem; width: 100%;">🗑️ Remove Topic: ${capitalizePhrase(videoTopic)}</button>`;
+            } else {
+                topicBtnHtml = `<button class="btn sidebar-btn-topic" disabled style="margin-top: 0.75rem; width: 100%; opacity: 0.5;">✅ Topic Removed</button>`;
+            }
+        }
+
         sidebar.innerHTML = `
             <div class="sidebar-meta" style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem; border-bottom: 1px solid var(--card-border); padding-bottom: 0.5rem;">
                 📅 Published: ${pubDateStr}
@@ -2236,7 +2246,7 @@ function playVideo(video) {
                 <button class="btn sidebar-btn-subscribe${isSubscribed ? ' active' : ''}">${isSubscribed ? '➖ Unsubscribe' : '➕ Subscribe'}</button>
                 <button class="btn sidebar-btn-playlist">▶️ Add to Playlist</button>
             </div>
-            ${videoTopic ? `<button class="btn sidebar-btn-topic" style="margin-top: 0.75rem; width: 100%;">🗑️ Remove Topic: ${capitalizePhrase(videoTopic)}</button>` : ''}
+            ${topicBtnHtml}
             <button class="btn sidebar-btn-block" style="margin-top: 0.75rem; width: 100%;">🚫 Block Channel</button>
         `;
 
@@ -2273,13 +2283,15 @@ function playVideo(video) {
             renderFeed();
         });
         const btnTopic = sidebar.querySelector(".sidebar-btn-topic");
-        if (btnTopic) {
+        if (btnTopic && isTopicActive) {
             btnTopic.addEventListener("click", () => {
                 if (videoTopic) {
                     state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== videoTopic.toLowerCase());
                     saveTopics();
                     renderTopicsList();
-                    renderPreferencesLists();
+                    if (typeof renderPreferencesLists === 'function') {
+                        renderPreferencesLists(document.getElementById("input-topic-search")?.value || "");
+                    }
                     playVideo(video);
                 }
             });
