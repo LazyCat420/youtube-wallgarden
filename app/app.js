@@ -1292,7 +1292,7 @@ function renderCard(video, targetContainer) {
             showToast(`🔇 Video hidden`, "info");
         });
         
-        card.querySelector(".thumbnail-area").appendChild(dropdown);
+        card.appendChild(dropdown);
         
         // Close dropdown on outside click
         const closeDropdown = (ev) => {
