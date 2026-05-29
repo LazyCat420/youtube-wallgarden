@@ -44,6 +44,7 @@ let state = {
     lastBrainstormTime: 0,
     lastBrainstormAttempt: 0,
     videoRatings: {}, // explicit ratings set by user
+    likedVideos: [], // array of video objects liked by the user
     settings: {
         useYtdlp: true,
         muteShorts: false
@@ -206,6 +207,7 @@ function loadState() {
     const rawDisliked = localStorage.getItem("wallgarden_disliked_topics");
     const rawBurned = localStorage.getItem("wallgarden_burned_queries");
     const rawPlaylists = localStorage.getItem("wallgarden_playlists");
+    const rawLikedVideos = localStorage.getItem("wallgarden_liked_videos");
 
     state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
     state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
@@ -220,6 +222,7 @@ function loadState() {
     state.smartFeedSuggestionPool = rawPool ? JSON.parse(rawPool) : [];
     state.burnedQueries = rawBurned ? JSON.parse(rawBurned) : [];
     state.playlists = rawPlaylists ? JSON.parse(rawPlaylists) : {};
+    state.likedVideos = rawLikedVideos ? JSON.parse(rawLikedVideos) : [];
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
@@ -306,6 +309,9 @@ function saveCache() {
 
 function saveVideoRatings() {
     localStorage.setItem("wallgarden_video_ratings", JSON.stringify(state.videoRatings));
+}
+function saveLikedVideos() {
+    localStorage.setItem("wallgarden_liked_videos", JSON.stringify(state.likedVideos));
 }
 
 function saveSearchHistory() {
@@ -1572,12 +1578,14 @@ function renderFeed() {
     const discoverChannelsContainer = document.getElementById("discover-channels-container");
     const newsFeedContainer = document.getElementById("news-feed-container");
     const playlistsContainer = document.getElementById("playlists-container");
+    const likedVideosContainer = document.getElementById("liked-videos-container");
     
     if (grid) grid.classList.remove("hidden");
     if (brainstormContainer) brainstormContainer.classList.add("hidden");
     if (discoverChannelsContainer) discoverChannelsContainer.classList.add("hidden");
     if (newsFeedContainer) newsFeedContainer.classList.add("hidden");
     if (playlistsContainer) playlistsContainer.classList.add("hidden");
+    if (likedVideosContainer) likedVideosContainer.classList.add("hidden");
     setupInfiniteScroll();
     
     if (state.currentView === "news-feed") {
@@ -1598,6 +1606,13 @@ function renderFeed() {
         if (grid) grid.classList.add("hidden");
         if (playlistsContainer) playlistsContainer.classList.remove("hidden");
         renderPlaylistsView();
+        return;
+    }
+    
+    if (state.currentView === "liked-videos") {
+        if (grid) grid.classList.add("hidden");
+        if (likedVideosContainer) likedVideosContainer.classList.remove("hidden");
+        renderLikedVideosView();
         return;
     }
     
@@ -2258,16 +2273,29 @@ function playVideo(video) {
         }
 
         sidebar.querySelector(".sidebar-btn-like").addEventListener("click", () => {
-            if (state.videoRatings[video.id] === 5) delete state.videoRatings[video.id];
-            else state.videoRatings[video.id] = 5;
+            if (state.videoRatings[video.id] === 5) {
+                delete state.videoRatings[video.id];
+                state.likedVideos = state.likedVideos.filter(v => v.id !== video.id);
+            } else {
+                state.videoRatings[video.id] = 5;
+                if (!state.likedVideos.some(v => v.id === video.id)) {
+                    state.likedVideos.push(video);
+                }
+            }
             saveVideoRatings();
+            saveLikedVideos();
             playVideo(video);
             renderFeed();
         });
         sidebar.querySelector(".sidebar-btn-dislike").addEventListener("click", () => {
-            if (state.videoRatings[video.id] === -5) delete state.videoRatings[video.id];
-            else state.videoRatings[video.id] = -5;
+            if (state.videoRatings[video.id] === -5) {
+                delete state.videoRatings[video.id];
+            } else {
+                state.videoRatings[video.id] = -5;
+                state.likedVideos = state.likedVideos.filter(v => v.id !== video.id);
+            }
             saveVideoRatings();
+            saveLikedVideos();
             playVideo(video);
             renderFeed();
         });
@@ -4967,4 +4995,44 @@ function showPlaylistModal(video) {
     };
     
     closeBtn.onclick = () => modal.classList.add("hidden");
+}
+
+function renderLikedVideosView() {
+    const grid = document.getElementById("liked-videos-grid");
+    if (!grid) return;
+    grid.innerHTML = "";
+    
+    if (!state.likedVideos || state.likedVideos.length === 0) {
+        grid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;"><h3>No Liked Videos</h3><p>Videos you like will appear here.</p></div>`;
+        return;
+    }
+    
+    const fragment = document.createDocumentFragment();
+    state.likedVideos.forEach(video => {
+        const vCard = createVideoCard(video);
+        
+        // Add a small unlike button overlay
+        const unlikeBtn = document.createElement("button");
+        unlikeBtn.className = "btn btn-danger btn-sm";
+        unlikeBtn.textContent = "✕";
+        unlikeBtn.style.position = "absolute";
+        unlikeBtn.style.top = "5px";
+        unlikeBtn.style.right = "5px";
+        unlikeBtn.style.zIndex = "10";
+        unlikeBtn.style.padding = "2px 6px";
+        unlikeBtn.title = "Remove from Liked Videos";
+        unlikeBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            state.likedVideos = state.likedVideos.filter(v => v.id !== video.id);
+            delete state.videoRatings[video.id];
+            saveLikedVideos();
+            saveVideoRatings();
+            renderLikedVideosView(); // re-render
+        };
+        vCard.style.position = "relative";
+        vCard.appendChild(unlikeBtn);
+        
+        fragment.appendChild(vCard);
+    });
+    grid.appendChild(fragment);
 }

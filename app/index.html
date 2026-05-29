@@ -165,8 +165,8 @@
     </style>
 
     <!-- Non-blocking full CSS via preload pattern -->
-    <link rel="preload" href="app.min.css?v=20260529-v22" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="app.min.css?v=20260529-v22"></noscript>
+    <link rel="preload" href="app.min.css?v=20260529-v23" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="app.min.css?v=20260529-v23"></noscript>
 </head>
 <body>
     <div class="app-layout">
@@ -190,6 +190,10 @@
                 <button class="nav-item" data-view="playlists">
                     <span class="nav-icon">▶️</span>
                     <span class="nav-label">Playlists</span>
+                </button>
+                <button class="nav-item" data-view="liked-videos">
+                    <span class="nav-icon">👍</span>
+                    <span class="nav-label">Liked Videos</span>
                 </button>
                 <button class="nav-item" data-view="subscriptions">
                     <span class="nav-icon">📺</span>
@@ -311,6 +315,16 @@
                     </div>
                     <div id="playlist-videos-grid" class="video-grid hidden">
                         <!-- Videos for the selected playlist injected here -->
+                    </div>
+                </div>
+
+                <!-- Liked Videos View -->
+                <div id="liked-videos-container" class="liked-videos-container hidden">
+                    <div class="discover-header-row" style="margin-bottom: 1rem;">
+                        <p class="discover-intro">Videos you have liked.</p>
+                    </div>
+                    <div id="liked-videos-grid" class="video-grid">
+                        <!-- Liked video cards injected here dynamically -->
                     </div>
                 </div>
 
@@ -608,6 +622,6 @@
         </div>
     </div>
 
-    <script src="app.min.js?v=20260529-v22" defer></script>
+    <script src="app.min.js?v=20260529-v23" defer></script>
 </body>
 </html>

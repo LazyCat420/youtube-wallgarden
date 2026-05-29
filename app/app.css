@@ -788,8 +788,12 @@ body {
     background: rgba(255, 255, 255, 0.1);
     color: var(--text-primary);
 }
-.sidebar-btn-subscribe.active {
+.sidebar-btn-subscribe.active,
+.sidebar-btn-like.active,
+.sidebar-btn-dislike.active {
     background: rgba(255, 255, 255, 0.2);
+    border-color: var(--accent);
+    color: var(--accent);
 }
 
 .sidebar-btn-block {
