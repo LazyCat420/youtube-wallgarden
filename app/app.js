@@ -155,24 +155,41 @@ function renderSearchSuggestions() {
     
     const suggestions = new Set();
     
-    // 1. Positive-weight topics
-    state.topics
-        .filter(t => t.weight > 0)
+    // 1. Liked topics (up to 8)
+    const liked = (state.likedTopics || []).map(t => t.toLowerCase());
+    liked.slice(0, 8).forEach(t => suggestions.add(t));
+    
+    // 2. Recent search history (up to 5)
+    const searches = (state.searchHistory || []).map(q => q.toLowerCase());
+    searches.slice(0, 5).forEach(t => suggestions.add(t));
+    
+    // 3. User preferred (highly weighted topics, weight > 5, up to 6)
+    const highlyWeighted = state.topics
+        .filter(t => t.weight > 5 && !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t.phrase.toLowerCase()))
         .sort((a, b) => b.weight - a.weight)
-        .forEach(t => suggestions.add(t.phrase.toLowerCase()));
+        .map(t => t.phrase.toLowerCase());
+    highlyWeighted.slice(0, 6).forEach(t => suggestions.add(t));
     
-    // 2. Liked topics
-    if (state.likedTopics) {
-        state.likedTopics.forEach(t => suggestions.add(t.toLowerCase()));
-    }
+    // 4. Trending new (from the AI-brainstormed queue, up to 6)
+    const newQueue = (state.smartFeedTopicsQueue || [])
+        .map(t => t.toLowerCase())
+        .filter(t => !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t));
+    newQueue.slice(0, 6).forEach(t => suggestions.add(t));
     
-    // 3. Recent search history (last 5)
-    if (state.searchHistory) {
-        state.searchHistory.slice(0, 5).forEach(q => suggestions.add(q.toLowerCase()));
-    }
+    // 5. Unexplored topics (weight === 5, not liked, not searched, up to 8)
+    const unexplored = state.topics
+        .filter(t => t.weight === 5 && 
+                    !liked.includes(t.phrase.toLowerCase()) && 
+                    !searches.includes(t.phrase.toLowerCase()) &&
+                    !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t.phrase.toLowerCase()))
+        .map(t => t.phrase.toLowerCase());
     
-    // Limit to 12 pills
-    const pills = [...suggestions].slice(0, 12);
+    // Shuffle the unexplored list to make it dynamic and show different unexplored topics on reload
+    const shuffledUnexplored = unexplored.sort(() => 0.5 - Math.random());
+    shuffledUnexplored.slice(0, 8).forEach(t => suggestions.add(t));
+    
+    // Limit to 25 pills
+    const pills = [...suggestions].slice(0, 25);
     
     pills.forEach(topic => {
         const pill = document.createElement("button");
