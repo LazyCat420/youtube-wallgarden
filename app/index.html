@@ -165,8 +165,8 @@
     </style>
 
     <!-- Non-blocking full CSS via preload pattern -->
-    <link rel="preload" href="app.min.css?v=20260529-v16" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="app.min.css?v=20260529-v16"></noscript>
+    <link rel="preload" href="app.min.css?v=20260529-v17" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="app.min.css?v=20260529-v17"></noscript>
 </head>
 <body>
     <div class="app-layout">
@@ -499,6 +499,15 @@
                                 </div>
                             </div>
                         </div>
+
+                        <!-- Burned Queries -->
+                        <div style="margin-top: 1rem;">
+                            <h4 style="color: var(--text-muted); margin-top: 0; display: flex; align-items: center; gap: 0.5rem;">🔥 Burned Queries <span style="font-size: 0.7rem; font-weight: 400; opacity: 0.6;">(rolling cap: 50)</span></h4>
+                            <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem;">Nuked topic queries that returned bad results. The LLM won't suggest these exact phrases again, but can still suggest related concepts. Click ✕ to un-burn a query.</p>
+                            <div id="burned-queries-list" class="topics-list" style="min-height: 60px; padding: 0.5rem; background: rgba(0,0,0,0.2); border-radius: 4px;">
+                                <!-- Populated dynamically -->
+                            </div>
+                        </div>
                     </div>
 
                     <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
@@ -531,6 +540,6 @@
         </div>
     </div>
 
-    <script src="app.min.js?v=20260529-v16" defer></script>
+    <script src="app.min.js?v=20260529-v17" defer></script>
 </body>
 </html>

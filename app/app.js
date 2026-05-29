@@ -59,7 +59,8 @@ let state = {
     smartFeedSubscriptionIndex: 0,
     smartFeedPreloadedVideos: [], // kept as reference/compat if needed
     smartFeedPreloadLoading: false,
-    smartFeedSuggestionPool: []
+    smartFeedSuggestionPool: [],
+    burnedQueries: [] // Rolling list of nuked topic queries the LLM should avoid re-suggesting
 };
 
 const DISCOVER_BATCH_SIZE = 30;
@@ -200,6 +201,7 @@ function loadState() {
 
     const rawLiked = localStorage.getItem("wallgarden_liked_topics");
     const rawDisliked = localStorage.getItem("wallgarden_disliked_topics");
+    const rawBurned = localStorage.getItem("wallgarden_burned_queries");
 
     state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
     state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
@@ -212,6 +214,7 @@ function loadState() {
     state.videoRatings = rawVideoRatings ? JSON.parse(rawVideoRatings) : {};
     state.discoveredChannels = rawDiscovered ? JSON.parse(rawDiscovered) : [];
     state.smartFeedSuggestionPool = rawPool ? JSON.parse(rawPool) : [];
+    state.burnedQueries = rawBurned ? JSON.parse(rawBurned) : [];
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
@@ -306,6 +309,10 @@ function saveSearchHistory() {
 
 function saveSmartFeedSuggestionPool() {
     localStorage.setItem("wallgarden_smart_feed_pool", JSON.stringify(state.smartFeedSuggestionPool));
+}
+
+function saveBurnedQueries() {
+    localStorage.setItem("wallgarden_burned_queries", JSON.stringify(state.burnedQueries));
 }
 
 function getCachedVideosCount() {
@@ -2253,6 +2260,12 @@ function renderPreferencesLists(filterQuery) {
         saveDislikedTopics();
         renderPreferencesLists(q);
     });
+
+    renderList("burned-queries-list", state.burnedQueries, (phrase) => {
+        state.burnedQueries = state.burnedQueries.filter(t => t !== phrase);
+        saveBurnedQueries();
+        renderPreferencesLists(q);
+    });
 }
 
 function renderTopicsList(filterQuery) {
@@ -2341,7 +2354,10 @@ function exportSettings() {
     const backup = {
         channels: state.channels,
         topics: state.topics,
-        blockedChannels: state.blockedChannels
+        blockedChannels: state.blockedChannels,
+        likedTopics: state.likedTopics,
+        dislikedTopics: state.dislikedTopics,
+        burnedQueries: state.burnedQueries
     };
     
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
@@ -2366,6 +2382,9 @@ function importSettings(file) {
                 state.channels = backup.channels;
                 state.topics = backup.topics;
                 state.blockedChannels = Array.isArray(backup.blockedChannels) ? backup.blockedChannels : [];
+                if (Array.isArray(backup.likedTopics)) { state.likedTopics = backup.likedTopics; saveLikedTopics(); }
+                if (Array.isArray(backup.dislikedTopics)) { state.dislikedTopics = backup.dislikedTopics; saveDislikedTopics(); }
+                if (Array.isArray(backup.burnedQueries)) { state.burnedQueries = backup.burnedQueries; saveBurnedQueries(); }
                 saveChannels();
                 saveTopics();
                 saveBlocked();
@@ -2373,6 +2392,7 @@ function importSettings(file) {
                 renderChannelsList();
                 renderTopicsList();
                 renderBlockedList();
+                renderPreferencesLists();
                 alert("Settings restored successfully!");
             } else {
                 throw new Error("Invalid format. Channels and Topics properties must be arrays.");
@@ -3153,11 +3173,13 @@ async function generateBrainstormTopics(append, numRequests = 1) {
     const disliked = state.topics.filter(t => t.weight < 0).slice(0, 10).map(t => t.phrase).join(", ");
     const searches = state.searchHistory.slice(-10).join(", ");
     const recentUsed = state.smartFeedUsedTopics.slice(-20).join(", ");
+    const burnedList = state.burnedQueries.slice(-30).join(", ");
     
     const userMessage = `My interests: [${liked}]
 Disliked: [${disliked}]
 Recent searches: [${searches}]
 Recently used (avoid these): [${recentUsed}]
+Failed queries (don't reuse these exact phrases, they returned bad results): [${burnedList}]
 
 Suggest 5 new topics.`;
 
@@ -3229,6 +3251,12 @@ Suggest 5 new topics.`;
                     const phrase = (item.phrase || item.topic || item.keyword || "")?.trim().toLowerCase();
                     if (!phrase) return;
                     
+                    // Safety net: skip burned queries even if the LLM re-suggests them
+                    if (state.burnedQueries.includes(phrase)) {
+                        console.log(`[Smart Feed] Skipping burned query "${phrase}" from LLM results.`);
+                        return;
+                    }
+                    
                     const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
                     if (!existsInTopics) {
                         state.topics.push({ phrase, weight: 5 });
@@ -3276,11 +3304,13 @@ async function generateSimilarTopicsFromSearch(searchQuery) {
     const liked = state.topics.filter(t => t.weight > 0).sort((a, b) => b.weight - a.weight).slice(0, 15).map(t => t.phrase).join(", ");
     const disliked = state.topics.filter(t => t.weight < 0).slice(0, 10).map(t => t.phrase).join(", ");
     const recentUsed = state.smartFeedUsedTopics.slice(-20).join(", ");
+    const burnedList = state.burnedQueries.slice(-30).join(", ");
     
     const userMessage = `Search query: "${searchQuery}"
 My interests: [${liked}]
 Disliked: [${disliked}]
 Recently used (avoid these): [${recentUsed}]
+Failed queries (don't reuse these exact phrases): [${burnedList}]
 
 Suggest 5 topics related to "${searchQuery}".`;
 
@@ -3339,6 +3369,12 @@ Suggest 5 topics related to "${searchQuery}".`;
             topicsArray.forEach(item => {
                 const phrase = (item.phrase || item.topic || item.keyword || "")?.trim().toLowerCase();
                 if (!phrase) return;
+                
+                // Safety net: skip burned queries even if the LLM re-suggests them
+                if (state.burnedQueries.includes(phrase)) {
+                    console.log(`[Smart Feed] Skipping burned query "${phrase}" from similar topics results.`);
+                    return;
+                }
                 
                 const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
                 if (!existsInTopics) {
@@ -3861,7 +3897,17 @@ function nukeDiscoverTopic(topic) {
     
     const normalizedTopic = topic.trim().toLowerCase();
     
-    // 1. Remove from active topics completely
+    // 1. Add to burned queries (rolling cap of 50) — LLM will avoid these exact phrases
+    if (!state.burnedQueries.includes(normalizedTopic)) {
+        state.burnedQueries.push(normalizedTopic);
+        // Rolling cap: keep only the 50 most recent burned queries
+        if (state.burnedQueries.length > 50) {
+            state.burnedQueries = state.burnedQueries.slice(-50);
+        }
+        saveBurnedQueries();
+    }
+    
+    // 2. Remove from active topics completely
     state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== normalizedTopic);
     saveTopics();
     
@@ -3871,7 +3917,7 @@ function nukeDiscoverTopic(topic) {
         saveLikedTopics();
     }
     
-    // 2. Clear from queue/preload states
+    // 3. Clear from queue/preload states
     state.smartFeedUsedTopics = state.smartFeedUsedTopics.filter(t => t !== normalizedTopic);
     state.smartFeedTopicsQueue = state.smartFeedTopicsQueue.filter(t => t !== normalizedTopic);
     state.smartFeedSuggestionPool = state.smartFeedSuggestionPool.filter(item => 
@@ -3881,10 +3927,10 @@ function nukeDiscoverTopic(topic) {
     );
     saveSmartFeedSuggestionPool();
     
-    // 3. Remove videos of this topic from active smartFeedVideos state
+    // 4. Remove videos of this topic from active smartFeedVideos state
     state.smartFeedVideos = state.smartFeedVideos.filter(v => (v.discoveryTopic || "").toLowerCase() !== normalizedTopic);
     
-    // 4. Locate and remove DOM elements
+    // 5. Locate and remove DOM elements
     const elements = [
         ...Array.from(document.querySelectorAll('.discover-section-header')),
         ...Array.from(document.querySelectorAll('.video-card'))
@@ -3898,9 +3944,9 @@ function nukeDiscoverTopic(topic) {
         setTimeout(() => el.remove(), 350);
     });
     
-    showToast(`🗑️ Removed topic "${capitalizePhrase(topic)}"`, "info");
+    showToast(`🗑️ Burned query "${capitalizePhrase(topic)}" — LLM won't suggest this again`, "info");
     
-    // 5. Fill buffer and load next batch in background to keep feed populated
+    // 6. Fill buffer and load next batch in background to keep feed populated
     setTimeout(() => {
         fillSmartFeedPreloadBuffer();
     }, 500);
