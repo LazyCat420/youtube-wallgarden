@@ -1173,6 +1173,24 @@ function getScoreAndMatches(video) {
         });
     }
     
+    // Vintage bonus: pre-2023 videos are more likely to be genuine quality content
+    const JAN_2023 = 1672531200000; // new Date("2023-01-01").getTime()
+    if (video.published && video.published < JAN_2023 && video.published > 946684800000) {
+        score += 3;
+        matches.push("vintage");
+    }
+    
+    // Viral spam heuristic for post-2023 videos
+    if (video.published && video.published > JAN_2023 && video.viewCount) {
+        const ageMs = Date.now() - video.published;
+        const ageMonths = ageMs / (30 * 24 * 60 * 60 * 1000);
+        // Suspiciously viral: >10M views in <12 months
+        if (video.viewCount > 10000000 && ageMonths < 12) {
+            score -= 2;
+            matches.push("viral-spam");
+        }
+    }
+    
     // Explicit user rating override
     video._score = score;
     video._matchedTopics = matches;
@@ -1300,8 +1318,8 @@ function renderCard(video, targetContainer) {
     if (video.score >= 5) scoreClass = "high";
     if (video.score < 0) scoreClass = "low";
     
-    const relativeTime = video.isDiscover ? (video.publishedStr || "Recently") : getRelativeTime(video.published);
-    const topMatchedTopic = video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation");
+    const displayDate = formatPublishDate(video.published, video.publishedStr);
+    const topMatchedTopic = video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:") && t !== "vintage" && t !== "viral-spam");
     const categoryText = topMatchedTopic ? capitalizePhrase(topMatchedTopic) : "";
     
     // Format meta/views if available
@@ -1331,7 +1349,7 @@ function renderCard(video, targetContainer) {
                 <button class="card-action-btn" title="Actions">⋮</button>
             </div>
             <p class="video-channel"><span class="channel-link" data-id="${video.channelId || ''}" data-name="${escapeHTML(video.channelName)}">${escapeHTML(video.channelName)}</span>${video.viewCount && video.viewCount > 0 ? ` • ${formatViews(video.viewCount)}` : ''}</p>
-            <p class="video-time">${relativeTime}${video.duration ? ` • ${formatDuration(video.duration)}` : ""}</p>
+            <p class="video-time">${displayDate}${video.duration ? ` • ${formatDuration(video.duration)}` : ""}</p>
         </div>
     `;
     
@@ -2459,6 +2477,43 @@ function getRelativeTime(timestamp) {
     return "Just now";
 }
 
+// Smart date formatting: shows readable dates instead of useless "4380d ago"
+function formatPublishDate(timestamp, publishedStr) {
+    // If timestamp is missing/invalid or is basically "now" (fallback default)
+    if (!timestamp || timestamp <= 0) {
+        return publishedStr || "Recently";
+    }
+    
+    const now = Date.now();
+    const diffMs = now - timestamp;
+    const diffDays = Math.floor(diffMs / (24 * 60 * 60 * 1000));
+    const date = new Date(timestamp);
+    
+    // Sanity check: if the date looks like the current time (within 1 hour), it's a fallback default
+    if (Math.abs(diffMs) < 3600000 && publishedStr) {
+        return publishedStr;
+    }
+    
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    
+    if (diffDays < 1) {
+        // Today
+        return getRelativeTime(timestamp);
+    } else if (diffDays < 7) {
+        // This week
+        return `${diffDays}d ago`;
+    } else if (diffDays < 30) {
+        // This month
+        return `${months[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
+    } else if (diffDays < 730) {
+        // Within 2 years — show month + year
+        return `${months[date.getMonth()]} ${date.getFullYear()}`;
+    } else {
+        // Older than 2 years — just the year is the important info
+        return `${date.getFullYear()}`;
+    }
+}
+
 function updateStatusText(text) {
     document.getElementById("dashboard-status-text").textContent = text;
 }
@@ -3407,26 +3462,39 @@ Suggest 5 topics related to "${searchQuery}".`;
     }
 }
 
-// Time-range buckets for video era variety
-const VIDEO_ERA_BUCKETS = ["before:2015", "before:2018", "before:2020", "after:2023", ""];
+// Deep-cut era buckets for classic YouTube content
+const DEEP_CUT_ERAS = ["before:2015", "before:2018", "before:2020"];
 
-function getRandomEraBucket() {
-    return VIDEO_ERA_BUCKETS[Math.floor(Math.random() * VIDEO_ERA_BUCKETS.length)];
+function getRandomDeepCutEra() {
+    return DEEP_CUT_ERAS[Math.floor(Math.random() * DEEP_CUT_ERAS.length)];
+}
+
+// Interleave arrays round-robin for era diversity
+function interleaveArrays(...arrays) {
+    const result = [];
+    const maxLen = Math.max(...arrays.map(a => a.length));
+    for (let i = 0; i < maxLen; i++) {
+        for (const arr of arrays) {
+            if (i < arr.length) result.push(arr[i]);
+        }
+    }
+    return result;
 }
 
 async function fetchVideosForTopic(topic) {
     let videos = [];
     let success = false;
-    const fetchCountPerRequest = 25;
+    const fetchCountPerRequest = 10; // 10 per era x 3 eras = 30 total
     
     if (state.settings.useYtdlp) {
         try {
-            // Parallel split-fetch: one current era + one random era bucket
-            const eraBucket = getRandomEraBucket();
-            const currentQuery = topic;
-            const eraQuery = eraBucket ? `${topic} ${eraBucket}` : topic;
+            // 3-way parallel era fetching: vintage + modern + deep cut
+            const deepCutEra = getRandomDeepCutEra();
+            const vintageQuery = `${topic} before:2023`;
+            const modernQuery = `${topic} after:2022`;
+            const deepCutQuery = `${topic} ${deepCutEra}`;
             
-            console.log(`[Smart Feed Fetch] Parallel fetch for "${topic}" — current era + era bucket: "${eraBucket || 'none'}"`);
+            console.log(`[Smart Feed Fetch] 3-way parallel for "${topic}" — vintage(before:2023) + modern(after:2022) + deep(${deepCutEra})`);
             
             const fetchOne = async (query, label) => {
                 const controller = new AbortController();
@@ -3459,40 +3527,60 @@ async function fetchVideosForTopic(topic) {
                 return [];
             };
             
-            // Fire both in parallel
-            const [currentItems, eraItems] = await Promise.all([
-                fetchOne(currentQuery, "current-era"),
-                currentQuery !== eraQuery ? fetchOne(eraQuery, `era(${eraBucket})`) : Promise.resolve([])
+            // Fire all 3 in parallel
+            const [vintageItems, modernItems, deepItems] = await Promise.all([
+                fetchOne(vintageQuery, "vintage(before:2023)"),
+                fetchOne(modernQuery, "modern(after:2022)"),
+                fetchOne(deepCutQuery, `deep(${deepCutEra})`)
             ]);
             
-            const allItems = [...currentItems, ...eraItems];
+            // Map items to video objects, tagging with _era for reference
+            const mapItems = (items, era) => {
+                const mapped = [];
+                items.forEach(item => {
+                    if (item.video_id) {
+                        mapped.push({
+                            id: item.video_id,
+                            title: item.title,
+                            channelName: item.channel,
+                            channelId: "",
+                            publishedStr: item.published_at ? getRelativeTime(new Date(item.published_at).getTime()) : "Recently",
+                            published: item.published_at ? new Date(item.published_at).getTime() : Date.now(),
+                            duration: item.duration_secs,
+                            viewCount: item.view_count,
+                            isDiscover: true,
+                            discoveryTopic: topic,
+                            _era: era
+                        });
+                    }
+                });
+                return mapped;
+            };
             
-            // Deduplicate by video_id
+            const vintageVideos = mapItems(vintageItems, "vintage");
+            const modernVideos = mapItems(modernItems, "modern");
+            const deepVideos = mapItems(deepItems, "deep");
+            
+            // Interleave eras round-robin for diversity (vintage1, modern1, deep1, vintage2, ...)
+            const interleaved = interleaveArrays(vintageVideos, modernVideos, deepVideos);
+            
+            // Deduplicate by video id
             const seenIds = new Set();
-            allItems.forEach(item => {
-                if (item.video_id && !seenIds.has(item.video_id)) {
-                    seenIds.add(item.video_id);
-                    videos.push({
-                        id: item.video_id,
-                        title: item.title,
-                        channelName: item.channel,
-                        channelId: "",
-                        publishedStr: item.published_at ? getRelativeTime(new Date(item.published_at).getTime()) : "Recently",
-                        published: item.published_at ? new Date(item.published_at).getTime() : Date.now(),
-                        duration: item.duration_secs,
-                        viewCount: item.view_count,
-                        isDiscover: true,
-                        discoveryTopic: topic
-                    });
+            interleaved.forEach(v => {
+                if (!seenIds.has(v.id)) {
+                    seenIds.add(v.id);
+                    videos.push(v);
                 }
             });
             
-            // Shuffle to mix eras together
-            videos.sort(() => Math.random() - 0.5);
-            
             if (videos.length > 0) {
                 success = true;
-                console.log(`[Smart Feed Fetch] Total unique videos for "${topic}": ${videos.length}`);
+                const eraBreakdown = {
+                    vintage: videos.filter(v => v._era === "vintage").length,
+                    modern: videos.filter(v => v._era === "modern").length,
+                    deep: videos.filter(v => v._era === "deep").length
+                };
+                console.log(`[Smart Feed Fetch] Total unique videos for "${topic}": ${videos.length} (vintage:${eraBreakdown.vintage}, modern:${eraBreakdown.modern}, deep:${eraBreakdown.deep})`);
             }
         } catch (err) {
             console.error(`[Smart Feed Fetch] Scraper fetch failed for "${topic}":`, err);
