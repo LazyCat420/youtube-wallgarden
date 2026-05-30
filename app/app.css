@@ -746,20 +746,21 @@ body {
     to { opacity: 0; transform: translateY(-10px); }
 }
 
+/* Update inner container to use flexbox vertical layout */
 .inline-player-inner {
     max-width: 1400px;
     margin: 0 auto;
     padding: 1rem 2rem;
-    display: grid;
-    grid-template-columns: 1fr 350px;
+    display: flex;
+    flex-direction: column;
     gap: 1.5rem;
-    align-items: start;
 }
 
 .inline-player-main {
     min-width: 0;
 }
 
+/* Sidebar flows naturally beneath the player, no local scrollbar */
 .inline-player-sidebar {
     background: var(--bg-secondary);
     border: 1px solid var(--card-border);
@@ -768,8 +769,8 @@ body {
     display: flex;
     flex-direction: column;
     gap: 1rem;
-    max-height: calc(100vh - 120px);
-    overflow-y: auto;
+    max-height: none;
+    overflow-y: visible;
 }
 
 .sidebar-description-box {
