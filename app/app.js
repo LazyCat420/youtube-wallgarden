@@ -241,6 +241,11 @@ function loadState() {
     state.smartFeedSuggestionPool = rawPool ? JSON.parse(rawPool) : [];
     state.burnedQueries = rawBurned ? JSON.parse(rawBurned) : [];
     state.playlists = rawPlaylists ? JSON.parse(rawPlaylists) : {};
+    if (state.playlists) {
+        Object.values(state.playlists).forEach(pl => {
+            if (pl && !pl.videos) pl.videos = [];
+        });
+    }
     state.likedVideos = rawLikedVideos ? JSON.parse(rawLikedVideos) : [];
     state.newsSourceRatings = rawNewsRatings ? JSON.parse(rawNewsRatings) : {};
     state.queue = rawQueue ? JSON.parse(rawQueue) : [];
@@ -350,6 +355,11 @@ function saveBurnedQueries() {
     localStorage.setItem("wallgarden_burned_queries", JSON.stringify(state.burnedQueries));
 }
 function savePlaylists() {
+    if (state.playlists) {
+        Object.values(state.playlists).forEach(pl => {
+            if (pl && !pl.videos) pl.videos = [];
+        });
+    }
     localStorage.setItem("wallgarden_playlists", JSON.stringify(state.playlists));
 }
 
@@ -1386,7 +1396,7 @@ async function fetchChannelFeedOnDemand(channelId, channelName) {
 }
 
 // Render Helper Function (declared globally for reuse)
-function renderCard(video, targetContainer) {
+function createVideoCard(video) {
     const card = document.createElement("div");
     card.className = "video-card fade-in";
     if (video.isDiscover) {
@@ -1398,19 +1408,21 @@ function renderCard(video, targetContainer) {
     if (video.score < 0) scoreClass = "low";
     
     const displayDate = formatPublishDate(video.published, video.publishedStr);
-    const topMatchedTopic = video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:") && t !== "vintage" && t !== "viral-spam");
+    const topMatchedTopic = video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:") && t !== "vintage" && t !== "viral-spam") : null;
     const categoryText = topMatchedTopic ? capitalizePhrase(topMatchedTopic) : "";
     
     // Format meta/views if available
-    let metaLine = video.channelName;
+    let metaLine = video.channelName || "";
     if (video.viewCount && video.viewCount > 0) {
         metaLine += ` • ${formatViews(video.viewCount)}`;
     }
     
     // Check if channel is already subscribed
-    const isSubscribed = state.channels.some(ch => 
-        (ch.id && video.channelId && ch.id === video.channelId) || 
-        (ch.name && video.channelName && ch.name.toLowerCase() === video.channelName.toLowerCase())
+    const isSubscribed = state.channels && state.channels.some(ch => 
+        ch && (
+            (ch.id && video.channelId && ch.id === video.channelId) || 
+            (ch.name && video.channelName && ch.name.toLowerCase() === video.channelName.toLowerCase())
+        )
     );
     
     card.innerHTML = `
@@ -1419,13 +1431,13 @@ function renderCard(video, targetContainer) {
             <div class="thumbnail-play-overlay">
                 <div class="play-icon-circle">▶</div>
             </div>
-            <div class="score-badge ${scoreClass}">★ ${video.score}</div>
+            <div class="score-badge ${scoreClass}">★ ${video.score || 0}</div>
             ${video.isDiscover && video.discoveryTopic ? `<div class="category-badge" style="background:var(--accent);color:var(--bg)">✨ ${capitalizePhrase(video.discoveryTopic)}</div>` : (video.isDiscover ? `<div class="search-badge">🔍 Search</div>` : (categoryText ? `<div class="category-badge">${categoryText}</div>` : ""))}
         </div>
         <div class="card-details">
             <div class="video-title-row">
                 <h3 class="video-title">${escapeHTML(video.title)}</h3>
-                <button class="card-action-btn" title="Actions">⋮</button>
+                <button type="button" class="card-action-btn" title="Actions">⋮</button>
             </div>
             <p class="video-channel"><span class="channel-link" data-id="${video.channelId || ''}" data-name="${escapeHTML(video.channelName)}">${escapeHTML(video.channelName)}</span>${video.viewCount && video.viewCount > 0 ? ` • ${formatViews(video.viewCount)}` : ''}</p>
             <p class="video-time">${displayDate}${video.duration ? ` • ${formatDuration(video.duration)}` : ""}</p>
@@ -1475,18 +1487,6 @@ function renderCard(video, targetContainer) {
             <button data-action="remove-topic"${videoTopic ? '' : ' disabled'}>🗑️ Remove Topic${videoTopic ? ': ' + capitalizePhrase(videoTopic) : ''}</button>
             <button data-action="hide">🔇 Hide Video</button>
         `;
-
-        dropdown.querySelector('[data-action="play-next"]').addEventListener("click", (ev) => {
-            ev.stopPropagation();
-            addToQueue(video, true);
-            dropdown.remove();
-        });
-
-        dropdown.querySelector('[data-action="add-to-queue"]').addEventListener("click", (ev) => {
-            ev.stopPropagation();
-            addToQueue(video, false);
-            dropdown.remove();
-        });
         
         dropdown.querySelectorAll(".rate-thumb-btn").forEach(btn => {
             btn.addEventListener("click", (ev) => {
@@ -1521,24 +1521,38 @@ function renderCard(video, targetContainer) {
             });
         });
         
+        dropdown.querySelector('[data-action="play-next"]').addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            addToQueue(video, true);
+            dropdown.remove();
+        });
+
+        dropdown.querySelector('[data-action="add-to-queue"]').addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            addToQueue(video, false);
+            dropdown.remove();
+        });
+
         dropdown.querySelector('[data-action="block"]').addEventListener("click", (ev) => {
             ev.stopPropagation();
             const channelName = video.channelName;
             const channelId = video.channelId || "";
-            if (!state.blockedChannels.some(bc => bc.name.toLowerCase() === channelName.toLowerCase())) {
+            if (channelName && !state.blockedChannels.some(bc => bc && bc.name && bc.name.toLowerCase() === channelName.toLowerCase())) {
                 state.blockedChannels.push({ name: channelName, id: channelId });
                 saveBlocked();
             }
             dropdown.remove();
-            showToast(`🚫 Blocked ${channelName}`, "danger");
+            showToast(`🚫 Blocked ${channelName || 'Channel'}`, "danger");
             // Remove all cards from this channel with fade-out
-            document.querySelectorAll(".video-card").forEach(c => {
-                const chEl = c.querySelector(".video-channel");
-                if (chEl && chEl.textContent.toLowerCase().includes(channelName.toLowerCase())) {
-                    c.classList.add("fade-out-remove");
-                    setTimeout(() => c.remove(), 350);
-                }
-            });
+            if (channelName) {
+                document.querySelectorAll(".video-card").forEach(c => {
+                    const chEl = c.querySelector(".video-channel");
+                    if (chEl && chEl.textContent && chEl.textContent.toLowerCase().includes(channelName.toLowerCase())) {
+                        c.classList.add("fade-out-remove");
+                        setTimeout(() => c.remove(), 350);
+                    }
+                });
+            }
         });
         
         dropdown.querySelector('[data-action="subscribe"]').addEventListener("click", (ev) => {
@@ -1549,8 +1563,10 @@ function renderCard(video, targetContainer) {
             if (isSubscribed) {
                 // Unsubscribe
                 state.channels = state.channels.filter(ch => 
-                    !(ch.id && video.channelId && ch.id === video.channelId) &&
-                    !(ch.name && video.channelName && ch.name.toLowerCase() === video.channelName.toLowerCase())
+                    ch && (
+                        !(ch.id && video.channelId && ch.id === video.channelId) &&
+                        !(ch.name && video.channelName && ch.name.toLowerCase() === video.channelName.toLowerCase())
+                    )
                 );
                 saveChannels();
                 updateSubCount();
@@ -1570,10 +1586,7 @@ function renderCard(video, targetContainer) {
         dropdown.querySelector('[data-action="remove-topic"]').addEventListener("click", (ev) => {
             ev.stopPropagation();
             if (!videoTopic) return;
-            
             dropdown.remove();
-            
-            // nukeDiscoverTopic handles state cleanup, queue/pool updates, fading out video cards/headers, and showing the success toast.
             nukeDiscoverTopic(videoTopic);
         });
         
@@ -1604,6 +1617,11 @@ function renderCard(video, targetContainer) {
         setTimeout(() => document.addEventListener("click", closeDropdown), 0);
     });
     
+    return card;
+}
+
+function renderCard(video, targetContainer) {
+    const card = createVideoCard(video);
     targetContainer.appendChild(card);
 }
 
@@ -1909,7 +1927,7 @@ function renderFeed() {
         
         subVideos = subVideos.filter(video => {
             const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === video.channelId);
-            const isBlockedName = state.blockedChannels.some(bc => !bc.id && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+            const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && video.channelName && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
             return !isBlockedId && !isBlockedName && video.score > -10;
         });
         
@@ -2014,13 +2032,13 @@ function renderFeed() {
         
         allVideos = allVideos.filter(video => {
             const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === video.channelId);
-            const isBlockedName = state.blockedChannels.some(bc => !bc.id && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+            const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && video.channelName && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
             return !isBlockedId && !isBlockedName && video.score > -10;
         });
         
         allVideos = allVideos.filter(v => 
-            v.title.toLowerCase().includes(queryTerm) || 
-            v.channelName.toLowerCase().includes(queryTerm)
+            (v.title && v.title.toLowerCase().includes(queryTerm)) || 
+            (v.channelName && v.channelName.toLowerCase().includes(queryTerm))
         );
         
         allVideos.sort((a, b) => {
@@ -2046,7 +2064,7 @@ function renderFeed() {
             
             discoverVideos = discoverVideos.filter(video => {
                 const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === video.channelId);
-                const isBlockedName = state.blockedChannels.some(bc => !bc.id && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+                const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && video.channelName && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
                 return !isBlockedId && !isBlockedName && video.score > -10;
             });
             
@@ -2233,14 +2251,16 @@ function playVideo(video) {
     if (sidebar) {
         const videoChannelId = video.channelId || "";
         const videoChannelName = video.channelName || "Unknown Channel";
-        const isSubscribed = state.channels.some(ch => 
-            (ch.id && videoChannelId && ch.id === videoChannelId) || 
-            (ch.name && videoChannelName && ch.name.toLowerCase() === videoChannelName.toLowerCase())
+        const isSubscribed = state.channels && state.channels.some(ch => 
+            ch && (
+                (ch.id && videoChannelId && ch.id === videoChannelId) || 
+                (ch.name && videoChannelName && ch.name.toLowerCase() === videoChannelName.toLowerCase())
+            )
         );
         const videoTopic = video.discoveryTopic || (video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:")) : null) || "";
         const currentRating = state.videoRatings[video.id];
 
-        const pubDateStr = video.published ? new Date(video.published * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }) : "Unknown Date";
+        const pubDateStr = video.published ? (video.published > 999999999999 ? new Date(video.published) : new Date(video.published * 1000)).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }) : "Unknown Date";
 
         const isTopicActive = videoTopic ? state.topics.some(t => t.phrase.toLowerCase() === videoTopic.toLowerCase()) : false;
         let topicBtnHtml = '';
@@ -2271,7 +2291,10 @@ function playVideo(video) {
             <div class="sidebar-queue-section" style="margin-top: 1.25rem; border-top: 1px solid var(--card-border); padding-top: 1rem;">
                 <h4 style="font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
                     <span>⏳ Play Queue (<span class="queue-count">0</span>)</span>
-                    <button type="button" class="btn-clear-queue btn-danger btn-sm" style="padding: 2px 6px; font-size: 0.7rem; border-radius: 4px; display: none;">Clear</button>
+                    <div style="display: flex; gap: 0.4rem; align-items: center;">
+                        <button type="button" class="btn-save-queue btn-primary btn-sm" style="padding: 2px 6px; font-size: 0.7rem; border-radius: 4px; display: none;">Save</button>
+                        <button type="button" class="btn-clear-queue btn-danger btn-sm" style="padding: 2px 6px; font-size: 0.7rem; border-radius: 4px; display: none;">Clear</button>
+                    </div>
                 </h4>
                 <div class="sidebar-queue-list" style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 250px; overflow-y: auto; padding-right: 0.25rem;">
                 </div>
@@ -2505,6 +2528,7 @@ function renderQueueUI() {
     const countEl = inlinePlayer.querySelector(".queue-count");
     const listEl = inlinePlayer.querySelector(".sidebar-queue-list");
     const clearBtn = inlinePlayer.querySelector(".btn-clear-queue");
+    const saveBtn = inlinePlayer.querySelector(".btn-save-queue");
     
     if (!listEl) return;
     
@@ -2513,6 +2537,7 @@ function renderQueueUI() {
     if (state.queue.length === 0) {
         listEl.innerHTML = `<p style="font-size: 0.75rem; color: var(--text-muted); text-align: center; padding: 1rem 0;">Queue is empty.</p>`;
         if (clearBtn) clearBtn.style.display = "none";
+        if (saveBtn) saveBtn.style.display = "none";
         return;
     }
     
@@ -2526,6 +2551,17 @@ function renderQueueUI() {
                 saveQueue();
                 renderQueueUI();
                 showToast("Play Queue cleared", "info");
+            };
+        }
+    }
+    
+    if (saveBtn) {
+        saveBtn.style.display = "block";
+        if (!saveBtn.dataset.hooked) {
+            saveBtn.dataset.hooked = "true";
+            saveBtn.onclick = (e) => {
+                e.stopPropagation();
+                showPlaylistModal([...state.queue]);
             };
         }
     }
@@ -3257,7 +3293,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
     
     // Blocked channel/nuke checks
     const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === enrichedVideo.channelId);
-    const isBlockedName = state.blockedChannels.some(bc => !bc.id && enrichedVideo.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+    const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && enrichedVideo.channelName && enrichedVideo.channelName.toLowerCase().includes(bc.name.toLowerCase()));
     if (isBlockedId || isBlockedName || enrichedVideo.score <= -10) {
         return; // Filtered out
     }
@@ -4104,7 +4140,7 @@ async function fetchVideosForTopic(topic) {
             v.matchedTopics = evaluation.matches;
             
             const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === v.channelId);
-            const isBlockedName = state.blockedChannels.some(bc => !bc.id && v.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+            const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && v.channelName && v.channelName.toLowerCase().includes(bc.name.toLowerCase()));
             
             return !isBlockedId && !isBlockedName && v.score > -10;
         });
@@ -4312,7 +4348,7 @@ async function loadNextSmartFeedBatch() {
             v.matchedTopics = evaluation.matches;
             
             const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === v.channelId);
-            const isBlockedName = state.blockedChannels.some(bc => !bc.id && v.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+            const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && v.channelName && v.channelName.toLowerCase().includes(bc.name.toLowerCase()));
             
             return !isBlockedId && !isBlockedName && v.score > -10;
         });
@@ -5169,12 +5205,14 @@ function renderPlaylistsView() {
             videoGrid.classList.remove("hidden");
             title.textContent = pl.name;
             
+            const videosList = pl.videos || [];
             videoGrid.innerHTML = "";
-            if (pl.videos.length === 0) {
+            if (videosList.length === 0) {
                 videoGrid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;"><p>This playlist is empty.</p></div>`;
             } else {
                 const fragment = document.createDocumentFragment();
-                pl.videos.forEach((video, index) => {
+                videosList.forEach((video, index) => {
+                    if (!video) return;
                     const vCard = createVideoCard(video);
                     
                     // Add remove button overlay
@@ -5205,7 +5243,7 @@ function renderPlaylistsView() {
     });
 }
 
-function showPlaylistModal(video) {
+function showPlaylistModal(videoOrVideos) {
     const modal = document.getElementById("playlist-modal");
     const list = document.getElementById("playlist-modal-list");
     const input = document.getElementById("input-new-playlist");
@@ -5214,6 +5252,9 @@ function showPlaylistModal(video) {
     
     modal.classList.remove("hidden");
     input.value = "";
+    
+    // Support passing either a single video object or an array of videos (like queue)
+    const videos = Array.isArray(videoOrVideos) ? videoOrVideos : (videoOrVideos ? [videoOrVideos] : []);
     
     function renderList() {
         list.innerHTML = "";
@@ -5227,16 +5268,23 @@ function showPlaylistModal(video) {
                 btn.style.textAlign = "left";
                 btn.textContent = pl.name;
                 btn.onclick = () => {
-                    if (video) {
-                        if (!pl.videos.find(v => v.id === video.id)) {
-                            pl.videos.push(video);
-                            savePlaylists();
-                            showToast(`Added to ${pl.name}`, "success");
+                    if (videos.length > 0) {
+                        let addedCount = 0;
+                        videos.forEach(video => {
+                            if (!pl.videos.find(v => v.id === video.id)) {
+                                pl.videos.push(video);
+                                addedCount++;
+                            }
+                        });
+                        savePlaylists();
+                        if (addedCount > 0) {
+                            showToast(`Added ${addedCount} video(s) to ${pl.name}`, "success");
                         } else {
-                            showToast(`Already in ${pl.name}`, "info");
+                            showToast(`Videos already in ${pl.name}`, "info");
                         }
                     }
                     modal.classList.add("hidden");
+                    if (state.currentView === "playlists") renderPlaylistsView();
                 };
                 list.appendChild(btn);
             });
@@ -5250,12 +5298,14 @@ function showPlaylistModal(video) {
         if (!name) return;
         const id = "pl_" + Date.now() + "_" + Math.floor(Math.random()*1000);
         const newPl = { id, name, createdAt: Date.now(), videos: [] };
-        if (video) newPl.videos.push(video);
+        if (videos.length > 0) {
+            newPl.videos.push(...videos);
+        }
         state.playlists[id] = newPl;
         savePlaylists();
-        showToast(video ? `Created ${name} and added video` : `Created ${name}`, "success");
+        showToast(videos.length > 0 ? `Created ${name} and added video(s)` : `Created ${name}`, "success");
         modal.classList.add("hidden");
-        if (!video && state.currentView === "playlists") renderPlaylistsView();
+        if (state.currentView === "playlists") renderPlaylistsView();
     };
     
     closeBtn.onclick = () => modal.classList.add("hidden");
@@ -5273,6 +5323,7 @@ function renderLikedVideosView() {
     
     const fragment = document.createDocumentFragment();
     state.likedVideos.forEach(video => {
+        if (!video) return;
         const vCard = createVideoCard(video);
         
         // Add a small unlike button overlay
