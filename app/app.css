@@ -800,7 +800,9 @@ body {
 }
 .sidebar-btn-subscribe.active,
 .sidebar-btn-like.active,
-.sidebar-btn-dislike.active {
+.sidebar-btn-dislike.active,
+.btn-news-like.active,
+.btn-news-dislike.active {
     background: rgba(255, 255, 255, 0.2);
     border-color: var(--accent);
     color: var(--accent);

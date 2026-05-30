@@ -223,6 +223,7 @@ function loadState() {
     const rawBurned = localStorage.getItem("wallgarden_burned_queries");
     const rawPlaylists = localStorage.getItem("wallgarden_playlists");
     const rawLikedVideos = localStorage.getItem("wallgarden_liked_videos");
+    const rawNewsRatings = localStorage.getItem("wallgarden_news_ratings");
 
     state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
     state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
@@ -238,6 +239,7 @@ function loadState() {
     state.burnedQueries = rawBurned ? JSON.parse(rawBurned) : [];
     state.playlists = rawPlaylists ? JSON.parse(rawPlaylists) : {};
     state.likedVideos = rawLikedVideos ? JSON.parse(rawLikedVideos) : [];
+    state.newsSourceRatings = rawNewsRatings ? JSON.parse(rawNewsRatings) : {};
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
@@ -324,6 +326,9 @@ function saveCache() {
 
 function saveVideoRatings() {
     localStorage.setItem("wallgarden_video_ratings", JSON.stringify(state.videoRatings));
+}
+function saveNewsRatings() {
+    localStorage.setItem("wallgarden_news_ratings", JSON.stringify(state.newsSourceRatings));
 }
 function saveLikedVideos() {
     localStorage.setItem("wallgarden_liked_videos", JSON.stringify(state.likedVideos));
@@ -4739,10 +4744,31 @@ async function renderNewsFeed() {
     if (!newsGrid) return;
     newsGrid.innerHTML = `<div class="sync-spinner" style="font-size: 2rem; display: block; animation: spin 1s linear infinite; margin: 2rem auto;">🔄</div><p style="text-align:center; color: var(--text-muted);">Fetching news...</p>`;
     
-    const newsSources = [
+    const ALL_NEWS_SOURCES = [
         { name: "BBC News", url: "http://feeds.bbci.co.uk/news/rss.xml" },
-        { name: "Hacker News", url: "https://hnrss.org/frontpage" }
+        { name: "CNN", url: "http://rss.cnn.com/rss/cnn_topstories.rss" },
+        { name: "NYT Home", url: "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml" },
+        { name: "NPR News", url: "https://feeds.npr.org/1001/rss.xml" },
+        { name: "Fox News", url: "http://feeds.foxnews.com/foxnews/latest" },
+        { name: "Al Jazeera", url: "https://www.aljazeera.com/xml/rss/all.xml" },
+        { name: "WSJ World", url: "https://feeds.a.dj.com/rss/RSSWorldNews.xml" },
+        { name: "The Guardian", url: "https://www.theguardian.com/world/rss" },
+        { name: "NBC News", url: "https://feeds.nbcnews.com/nbcnews/public/news" }
     ];
+    
+    // Filter out disliked
+    const validSources = ALL_NEWS_SOURCES.filter(s => state.newsSourceRatings[s.name] !== -1);
+    
+    // Prioritize liked sources, random others
+    validSources.sort((a, b) => {
+        const ratingA = state.newsSourceRatings[a.name] === 1 ? 1 : 0;
+        const ratingB = state.newsSourceRatings[b.name] === 1 ? 1 : 0;
+        if (ratingA !== ratingB) return ratingB - ratingA;
+        return 0.5 - Math.random(); // shuffle the rest
+    });
+    
+    // Pick top 4 sources to avoid slow load times
+    const newsSources = validSources.slice(0, 4);
     
     let allNews = [];
     
@@ -4794,9 +4820,39 @@ async function renderNewsFeed() {
                     <div class="video-title" style="margin-bottom: 0.5rem;"><a href="${news.link}" target="_blank" style="color: var(--text-primary); text-decoration: none;">${news.title}</a></div>
                     <div class="video-channel" style="color: var(--accent); margin-bottom: 0.5rem;">${news.channelName}</div>
                     <div class="video-meta" style="margin-bottom: 0.5rem;">${formatTimeAgo(news.published)}</div>
-                    <div style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4;">${news.description}</div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; margin-bottom: 0.75rem;">${news.description}</div>
+                    <div class="news-actions" style="display: flex; gap: 0.5rem;">
+                        <button class="btn btn-sm btn-news-like ${state.newsSourceRatings[news.channelName] === 1 ? 'active' : ''}" data-source="${news.channelName}">👍 Source</button>
+                        <button class="btn btn-sm btn-news-dislike" data-source="${news.channelName}">👎 Source</button>
+                    </div>
                 </div>
             `;
+            
+            card.querySelector(".btn-news-like").addEventListener("click", (e) => {
+                const source = e.target.getAttribute("data-source");
+                if (state.newsSourceRatings[source] === 1) {
+                    delete state.newsSourceRatings[source];
+                    e.target.classList.remove("active");
+                } else {
+                    state.newsSourceRatings[source] = 1;
+                    e.target.classList.add("active");
+                }
+                saveNewsRatings();
+            });
+
+            card.querySelector(".btn-news-dislike").addEventListener("click", (e) => {
+                const source = e.target.getAttribute("data-source");
+                state.newsSourceRatings[source] = -1;
+                saveNewsRatings();
+                // Remove all cards from this source in the UI
+                document.querySelectorAll(".btn-news-dislike").forEach(btn => {
+                    if (btn.getAttribute("data-source") === source) {
+                        const c = btn.closest(".video-card");
+                        if (c) c.remove();
+                    }
+                });
+            });
+
             fragment.appendChild(card);
         });
         newsGrid.appendChild(fragment);
