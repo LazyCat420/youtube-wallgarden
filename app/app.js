@@ -40,6 +40,7 @@ let state = {
     searchHistory: [], // Rolling history of searches (max 10)
     playlists: {}, // id -> { name, createdAt, videos: [] }
     queue: [], // list of queued video objects
+    currentlyPlayingId: null, // ID of currently playing video to avoid restarts on state updates
     brainstormTopics: [], // Brainstormed topics from LLM
     brainstormLoading: false,
     lastBrainstormTime: 0,
@@ -2190,7 +2191,10 @@ function playVideo(video) {
     if (titleEl) titleEl.textContent = video.title;
     if (channelEl) channelEl.textContent = video.channelName;
 
-    if (playerWrapper) {
+    const isSameVideo = state.currentlyPlayingId === video.id;
+    state.currentlyPlayingId = video.id;
+
+    if (playerWrapper && !isSameVideo) {
         // Clear previous player/iframe
         playerWrapper.innerHTML = '<div id="yt-player-element" style="width: 100%; height: 100%; min-height: 360px;"></div>';
         
@@ -2368,6 +2372,7 @@ function closePlayer() {
     if (!inlinePlayer) return;
     document.body.classList.remove("watch-mode");
     inlinePlayer.classList.add("closing");
+    state.currentlyPlayingId = null;
     setTimeout(() => {
         inlinePlayer.classList.add("hidden");
         inlinePlayer.classList.remove("closing");
