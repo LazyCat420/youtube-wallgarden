@@ -154,29 +154,29 @@ function renderSearchSuggestions() {
     container.innerHTML = "";
     
     const suggestions = new Set();
+    const shuffleArray = (arr) => [...arr].sort(() => 0.5 - Math.random());
     
-    // 1. Liked topics (up to 8)
+    // 1. Liked topics (random up to 8)
     const liked = (state.likedTopics || []).map(t => t.toLowerCase());
-    liked.slice(0, 8).forEach(t => suggestions.add(t));
+    shuffleArray(liked).slice(0, 8).forEach(t => suggestions.add(t));
     
-    // 2. Recent search history (up to 5)
+    // 2. Recent search history (random up to 5)
     const searches = (state.searchHistory || []).map(q => q.toLowerCase());
-    searches.slice(0, 5).forEach(t => suggestions.add(t));
+    shuffleArray(searches).slice(0, 5).forEach(t => suggestions.add(t));
     
-    // 3. User preferred (highly weighted topics, weight > 5, up to 6)
+    // 3. User preferred (highly weighted topics, weight > 5, random up to 6)
     const highlyWeighted = state.topics
         .filter(t => t.weight > 5 && !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t.phrase.toLowerCase()))
-        .sort((a, b) => b.weight - a.weight)
         .map(t => t.phrase.toLowerCase());
-    highlyWeighted.slice(0, 6).forEach(t => suggestions.add(t));
+    shuffleArray(highlyWeighted).slice(0, 6).forEach(t => suggestions.add(t));
     
-    // 4. Trending new (from the AI-brainstormed queue, up to 6)
+    // 4. Trending new (from the AI-brainstormed queue, random up to 6)
     const newQueue = (state.smartFeedTopicsQueue || [])
         .map(t => t.toLowerCase())
         .filter(t => !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t));
-    newQueue.slice(0, 6).forEach(t => suggestions.add(t));
+    shuffleArray(newQueue).slice(0, 6).forEach(t => suggestions.add(t));
     
-    // 5. Unexplored topics (weight === 5, not liked, not searched, up to 8)
+    // 5. Unexplored topics (weight === 5, not liked, not searched, random up to 8)
     const unexplored = state.topics
         .filter(t => t.weight === 5 && 
                     !liked.includes(t.phrase.toLowerCase()) && 
@@ -184,12 +184,10 @@ function renderSearchSuggestions() {
                     !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t.phrase.toLowerCase()))
         .map(t => t.phrase.toLowerCase());
     
-    // Shuffle the unexplored list to make it dynamic and show different unexplored topics on reload
-    const shuffledUnexplored = unexplored.sort(() => 0.5 - Math.random());
-    shuffledUnexplored.slice(0, 8).forEach(t => suggestions.add(t));
+    shuffleArray(unexplored).slice(0, 8).forEach(t => suggestions.add(t));
     
-    // Limit to 25 pills
-    const pills = [...suggestions].slice(0, 25);
+    // Combine, shuffle the final list, and limit to 25 pills so the row changes completely on every refresh
+    const pills = shuffleArray([...suggestions]).slice(0, 25);
     
     pills.forEach(topic => {
         const pill = document.createElement("button");
