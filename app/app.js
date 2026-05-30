@@ -39,6 +39,7 @@ let state = {
     searchQuery: "",
     searchHistory: [], // Rolling history of searches (max 10)
     playlists: {}, // id -> { name, createdAt, videos: [] }
+    queue: [], // list of queued video objects
     brainstormTopics: [], // Brainstormed topics from LLM
     brainstormLoading: false,
     lastBrainstormTime: 0,
@@ -224,6 +225,7 @@ function loadState() {
     const rawPlaylists = localStorage.getItem("wallgarden_playlists");
     const rawLikedVideos = localStorage.getItem("wallgarden_liked_videos");
     const rawNewsRatings = localStorage.getItem("wallgarden_news_ratings");
+    const rawQueue = localStorage.getItem("wallgarden_queue");
 
     state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
     state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
@@ -240,6 +242,7 @@ function loadState() {
     state.playlists = rawPlaylists ? JSON.parse(rawPlaylists) : {};
     state.likedVideos = rawLikedVideos ? JSON.parse(rawLikedVideos) : [];
     state.newsSourceRatings = rawNewsRatings ? JSON.parse(rawNewsRatings) : {};
+    state.queue = rawQueue ? JSON.parse(rawQueue) : [];
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
@@ -347,6 +350,10 @@ function saveBurnedQueries() {
 }
 function savePlaylists() {
     localStorage.setItem("wallgarden_playlists", JSON.stringify(state.playlists));
+}
+
+function saveQueue() {
+    localStorage.setItem("wallgarden_queue", JSON.stringify(state.queue));
 }
 
 function getCachedVideosCount() {
@@ -1460,11 +1467,25 @@ function renderCard(video, targetContainer) {
                 <button class="rate-thumb-btn thumb-up${currentRating === 5 ? ' active' : ''}" data-rating="5" title="Like">👍 Like</button>
                 <button class="rate-thumb-btn thumb-down${currentRating === -5 ? ' active' : ''}" data-rating="-5" title="Dislike">👎 Dislike</button>
             </div>
+            <button data-action="play-next">⏳ Play Next</button>
+            <button data-action="add-to-queue">➕ Add to Queue</button>
             <button data-action="subscribe">${isSubscribed ? '➖ Unsubscribe' : '➕ Subscribe to Channel'}</button>
             <button class="danger" data-action="block">🚫 Block Channel</button>
             <button data-action="remove-topic"${videoTopic ? '' : ' disabled'}>🗑️ Remove Topic${videoTopic ? ': ' + capitalizePhrase(videoTopic) : ''}</button>
             <button data-action="hide">🔇 Hide Video</button>
         `;
+
+        dropdown.querySelector('[data-action="play-next"]').addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            addToQueue(video, true);
+            dropdown.remove();
+        });
+
+        dropdown.querySelector('[data-action="add-to-queue"]').addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            addToQueue(video, false);
+            dropdown.remove();
+        });
         
         dropdown.querySelectorAll(".rate-thumb-btn").forEach(btn => {
             btn.addEventListener("click", (ev) => {
@@ -2170,11 +2191,38 @@ function playVideo(video) {
     if (channelEl) channelEl.textContent = video.channelName;
 
     if (playerWrapper) {
-        playerWrapper.innerHTML = '<iframe ' +
-            'src="https://www.youtube.com/embed/' + video.id + '?autoplay=1&rel=0&modestbranding=1" ' +
-            'title="' + escapeHTML(video.title) + '" ' +
-            'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" ' +
-            'allowfullscreen></iframe>';
+        // Clear previous player/iframe
+        playerWrapper.innerHTML = '<div id="yt-player-element" style="width: 100%; height: 100%; min-height: 360px;"></div>';
+        
+        loadYouTubeApi().then((YT) => {
+            const playerEl = document.getElementById("yt-player-element");
+            if (!playerEl) return;
+            
+            // Clean up old player if it existed
+            if (window.ytPlayer) {
+                try { window.ytPlayer.destroy(); } catch (e) {}
+                window.ytPlayer = null;
+            }
+            
+            window.ytPlayer = new YT.Player('yt-player-element', {
+                height: '100%',
+                width: '100%',
+                videoId: video.id,
+                playerVars: {
+                    autoplay: 1,
+                    rel: 0,
+                    modestbranding: 1,
+                    playsinline: 1
+                },
+                events: {
+                    onStateChange: (event) => {
+                        if (event.data === YT.PlayerState.ENDED) {
+                            playNextFromQueue();
+                        }
+                    }
+                }
+            });
+        });
     }
 
     const sidebar = inlinePlayer.querySelector(".inline-player-sidebar");
@@ -2213,6 +2261,15 @@ function playVideo(video) {
             </div>
             ${topicBtnHtml}
             <button class="btn sidebar-btn-block" style="margin-top: 0.75rem; width: 100%;">🚫 Block Channel</button>
+            
+            <div class="sidebar-queue-section" style="margin-top: 1.25rem; border-top: 1px solid var(--card-border); padding-top: 1rem;">
+                <h4 style="font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
+                    <span>⏳ Play Queue (<span class="queue-count">0</span>)</span>
+                    <button class="btn-clear-queue btn-danger btn-sm" style="padding: 2px 6px; font-size: 0.7rem; border-radius: 4px; display: none;">Clear</button>
+                </h4>
+                <div class="sidebar-queue-list" style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 250px; overflow-y: auto; padding-right: 0.25rem;">
+                </div>
+            </div>
         `;
 
         const btnAddPlaylist = sidebar.querySelector(".sidebar-btn-playlist");
@@ -2302,6 +2359,8 @@ function playVideo(video) {
             generateSimilarTopicsFromSearch(video.title);
         }, 3000);
     }
+
+    renderQueueUI();
 }
 
 function closePlayer() {
@@ -2314,7 +2373,189 @@ function closePlayer() {
         inlinePlayer.classList.remove("closing");
         const pw = inlinePlayer.querySelector(".player-wrapper-box");
         if (pw) pw.innerHTML = ""; // Stops playback
+        if (window.ytPlayer) {
+            try {
+                window.ytPlayer.destroy();
+            } catch (e) {
+                console.error("Error destroying YT player:", e);
+            }
+            window.ytPlayer = null;
+        }
     }, 250);
+}
+
+// ============================================================
+//  PLAY QUEUE LOGIC & YT API LOADERS
+// ============================================================
+
+let ytApiPromise = null;
+function loadYouTubeApi() {
+    if (ytApiPromise) return ytApiPromise;
+    ytApiPromise = new Promise((resolve) => {
+        if (window.YT && window.YT.Player) {
+            resolve(window.YT);
+            return;
+        }
+        
+        // Define or chain window.onYouTubeIframeAPIReady
+        const previousCallback = window.onYouTubeIframeAPIReady;
+        window.onYouTubeIframeAPIReady = function() {
+            if (previousCallback) previousCallback();
+            resolve(window.YT);
+        };
+
+        // Check if script already exists
+        const scripts = document.getElementsByTagName('script');
+        let exists = false;
+        for (let i = 0; i < scripts.length; i++) {
+            if (scripts[i].src === 'https://www.youtube.com/iframe_api') {
+                exists = true;
+                break;
+            }
+        }
+        
+        if (!exists) {
+            const tag = document.createElement('script');
+            tag.src = 'https://www.youtube.com/iframe_api';
+            const firstScriptTag = document.getElementsByTagName('script')[0];
+            if (firstScriptTag && firstScriptTag.parentNode) {
+                firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+            } else {
+                document.head.appendChild(tag);
+            }
+        }
+    });
+    return ytApiPromise;
+}
+
+function playNextFromQueue() {
+    if (state.queue && state.queue.length > 0) {
+        const nextVideo = state.queue.shift();
+        saveQueue();
+        playVideo(nextVideo);
+        renderQueueUI();
+    } else {
+        closePlayer();
+        showToast("Queue finished", "info");
+    }
+}
+
+function addToQueue(video, playNext = false) {
+    if (state.queue.some(v => v.id === video.id)) {
+        showToast("Already in Play Queue", "info");
+        return;
+    }
+    
+    // Check if the video is currently playing
+    const inlinePlayer = document.getElementById("inline-player");
+    const isPlayingCurrent = inlinePlayer && !inlinePlayer.classList.contains("hidden") && window.ytPlayer && window.ytPlayer.getVideoData && window.ytPlayer.getVideoData().video_id === video.id;
+    if (isPlayingCurrent) {
+        showToast("Currently playing this video", "info");
+        return;
+    }
+    
+    if (playNext) {
+        state.queue.unshift(video);
+        showToast("⏳ Will play next", "success");
+    } else {
+        state.queue.push(video);
+        showToast("⏳ Added to Play Queue", "success");
+    }
+    
+    saveQueue();
+    
+    const isWatchMode = document.body.classList.contains("watch-mode");
+    if (!isWatchMode) {
+        // Start playing immediately if not in watch mode
+        if (playNext) {
+            state.queue.shift();
+        } else {
+            state.queue.pop();
+        }
+        saveQueue();
+        playVideo(video);
+    } else {
+        renderQueueUI();
+    }
+}
+
+function renderQueueUI() {
+    const inlinePlayer = document.getElementById("inline-player");
+    if (!inlinePlayer) return;
+    
+    const countEl = inlinePlayer.querySelector(".queue-count");
+    const listEl = inlinePlayer.querySelector(".sidebar-queue-list");
+    const clearBtn = inlinePlayer.querySelector(".btn-clear-queue");
+    
+    if (!listEl) return;
+    
+    if (countEl) countEl.textContent = state.queue.length;
+    
+    if (state.queue.length === 0) {
+        listEl.innerHTML = `<p style="font-size: 0.75rem; color: var(--text-muted); text-align: center; padding: 1rem 0;">Queue is empty.</p>`;
+        if (clearBtn) clearBtn.style.display = "none";
+        return;
+    }
+    
+    if (clearBtn) {
+        clearBtn.style.display = "block";
+        if (!clearBtn.dataset.hooked) {
+            clearBtn.dataset.hooked = "true";
+            clearBtn.onclick = (e) => {
+                e.stopPropagation();
+                state.queue = [];
+                saveQueue();
+                renderQueueUI();
+                showToast("Play Queue cleared", "info");
+            };
+        }
+    }
+    
+    listEl.innerHTML = "";
+    state.queue.forEach((v, index) => {
+        const item = document.createElement("div");
+        item.className = "queue-item";
+        item.style.display = "flex";
+        item.style.alignItems = "center";
+        item.style.gap = "0.5rem";
+        item.style.padding = "0.4rem";
+        item.style.borderRadius = "4px";
+        item.style.background = "rgba(255, 255, 255, 0.02)";
+        item.style.border = "1px solid rgba(255, 255, 255, 0.04)";
+        item.style.cursor = "pointer";
+        item.style.position = "relative";
+        
+        item.innerHTML = `
+            <img src="https://i.ytimg.com/vi/${v.id}/default.jpg" style="width: 50px; aspect-ratio: 16/9; object-fit: cover; border-radius: 2px; flex-shrink: 0;" alt="${escapeHTML(v.title)}">
+            <div style="flex: 1; min-width: 0;">
+                <div style="font-size: 0.75rem; font-weight: 500; color: var(--text-primary); display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.3;">
+                    ${escapeHTML(v.title)}
+                </div>
+                <div style="font-size: 0.65rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 0.15rem;">
+                    ${escapeHTML(v.channelName)}
+                </div>
+            </div>
+            <button class="btn-remove-queue" style="background: transparent; border: none; color: var(--text-muted); font-size: 0.85rem; cursor: pointer; padding: 0.2rem 0.4rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0;" title="Remove from Queue">✕</button>
+        `;
+        
+        item.onclick = (e) => {
+            if (e.target.classList.contains("btn-remove-queue")) return;
+            state.queue.splice(index, 1);
+            saveQueue();
+            playVideo(v);
+            renderQueueUI();
+        };
+        
+        item.querySelector(".btn-remove-queue").onclick = (e) => {
+            e.stopPropagation();
+            state.queue.splice(index, 1);
+            saveQueue();
+            renderQueueUI();
+            showToast("Removed from Queue", "info");
+        };
+        
+        listEl.appendChild(item);
+    });
 }
 
 function triggerGlobalSearch(query) {

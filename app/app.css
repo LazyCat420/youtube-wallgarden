@@ -2597,3 +2597,18 @@ body {
     }
 }
 
+.queue-item {
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+.queue-item:hover {
+    background: rgba(255, 255, 255, 0.08) !important;
+    border-color: rgba(255, 255, 255, 0.12) !important;
+}
+.btn-remove-queue {
+    transition: color 0.15s ease;
+}
+.btn-remove-queue:hover {
+    color: #F87171 !important;
+}
+
+
