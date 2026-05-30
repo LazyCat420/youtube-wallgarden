@@ -2231,9 +2231,11 @@ function playVideo(video) {
 
     const sidebar = inlinePlayer.querySelector(".inline-player-sidebar");
     if (sidebar) {
+        const videoChannelId = video.channelId || "";
+        const videoChannelName = video.channelName || "Unknown Channel";
         const isSubscribed = state.channels.some(ch => 
-            (ch.id && video.channelId && ch.id === video.channelId) || 
-            (ch.name && video.channelName && ch.name.toLowerCase() === video.channelName.toLowerCase())
+            (ch.id && videoChannelId && ch.id === videoChannelId) || 
+            (ch.name && videoChannelName && ch.name.toLowerCase() === videoChannelName.toLowerCase())
         );
         const videoTopic = video.discoveryTopic || (video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:")) : null) || "";
         const currentRating = state.videoRatings[video.id];
@@ -2244,9 +2246,9 @@ function playVideo(video) {
         let topicBtnHtml = '';
         if (videoTopic) {
             if (isTopicActive) {
-                topicBtnHtml = `<button class="btn sidebar-btn-topic" style="margin-top: 0.75rem; width: 100%;">🗑️ Remove Topic: ${capitalizePhrase(videoTopic)}</button>`;
+                topicBtnHtml = `<button type="button" class="btn sidebar-btn-topic" style="margin-top: 0.75rem; width: 100%;">🗑️ Remove Topic: ${capitalizePhrase(videoTopic)}</button>`;
             } else {
-                topicBtnHtml = `<button class="btn sidebar-btn-topic" disabled style="margin-top: 0.75rem; width: 100%; opacity: 0.5;">✅ Topic Removed</button>`;
+                topicBtnHtml = `<button type="button" class="btn sidebar-btn-topic" disabled style="margin-top: 0.75rem; width: 100%; opacity: 0.5;">✅ Topic Removed</button>`;
             }
         }
 
@@ -2258,18 +2260,18 @@ function playVideo(video) {
                 ${escapeHTML(video.description || "No description available.").replace(/\n/g, '<br>')}
             </div>
             <div class="sidebar-actions-grid" style="grid-template-columns: 1fr 1fr;">
-                <button class="btn sidebar-btn-like${currentRating === 5 ? ' active' : ''}">👍 Like</button>
-                <button class="btn sidebar-btn-dislike${currentRating === -5 ? ' active' : ''}">👎 Dislike</button>
-                <button class="btn sidebar-btn-subscribe${isSubscribed ? ' active' : ''}">${isSubscribed ? '➖ Unsubscribe' : '➕ Subscribe'}</button>
-                <button class="btn sidebar-btn-playlist">▶️ Add to Playlist</button>
+                <button type="button" class="btn sidebar-btn-like${currentRating === 5 ? ' active' : ''}">👍 Like</button>
+                <button type="button" class="btn sidebar-btn-dislike${currentRating === -5 ? ' active' : ''}">👎 Dislike</button>
+                <button type="button" class="btn sidebar-btn-subscribe${isSubscribed ? ' active' : ''}">${isSubscribed ? '➖ Unsubscribe' : '➕ Subscribe'}</button>
+                <button type="button" class="btn sidebar-btn-playlist">▶️ Add to Playlist</button>
             </div>
             ${topicBtnHtml}
-            <button class="btn sidebar-btn-block" style="margin-top: 0.75rem; width: 100%;">🚫 Block Channel</button>
+            <button type="button" class="btn sidebar-btn-block" style="margin-top: 0.75rem; width: 100%;">🚫 Block Channel</button>
             
             <div class="sidebar-queue-section" style="margin-top: 1.25rem; border-top: 1px solid var(--card-border); padding-top: 1rem;">
                 <h4 style="font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
                     <span>⏳ Play Queue (<span class="queue-count">0</span>)</span>
-                    <button class="btn-clear-queue btn-danger btn-sm" style="padding: 2px 6px; font-size: 0.7rem; border-radius: 4px; display: none;">Clear</button>
+                    <button type="button" class="btn-clear-queue btn-danger btn-sm" style="padding: 2px 6px; font-size: 0.7rem; border-radius: 4px; display: none;">Clear</button>
                 </h4>
                 <div class="sidebar-queue-list" style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 250px; overflow-y: auto; padding-right: 0.25rem;">
                 </div>
@@ -2278,12 +2280,16 @@ function playVideo(video) {
 
         const btnAddPlaylist = sidebar.querySelector(".sidebar-btn-playlist");
         if (btnAddPlaylist) {
-            btnAddPlaylist.addEventListener("click", () => {
+            btnAddPlaylist.addEventListener("click", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
                 showPlaylistModal(video);
             });
         }
 
-        sidebar.querySelector(".sidebar-btn-like").addEventListener("click", () => {
+        sidebar.querySelector(".sidebar-btn-like").addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
             if (state.videoRatings[video.id] === 5) {
                 delete state.videoRatings[video.id];
                 state.likedVideos = state.likedVideos.filter(v => v.id !== video.id);
@@ -2298,7 +2304,9 @@ function playVideo(video) {
             playVideo(video);
             renderFeed();
         });
-        sidebar.querySelector(".sidebar-btn-dislike").addEventListener("click", () => {
+        sidebar.querySelector(".sidebar-btn-dislike").addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
             if (state.videoRatings[video.id] === -5) {
                 delete state.videoRatings[video.id];
             } else {
@@ -2310,11 +2318,13 @@ function playVideo(video) {
             playVideo(video);
             renderFeed();
         });
-        sidebar.querySelector(".sidebar-btn-subscribe").addEventListener("click", () => {
+        sidebar.querySelector(".sidebar-btn-subscribe").addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
             if (isSubscribed) {
-                state.channels = state.channels.filter(ch => ch.id !== video.channelId && ch.name !== video.channelName);
+                state.channels = state.channels.filter(ch => ch.id !== videoChannelId && ch.name !== videoChannelName);
             } else {
-                state.channels.push({ id: video.channelId, name: video.channelName });
+                state.channels.push({ id: videoChannelId, name: videoChannelName });
             }
             saveChannels();
             renderChannelsList();
@@ -2323,7 +2333,9 @@ function playVideo(video) {
         });
         const btnTopic = sidebar.querySelector(".sidebar-btn-topic");
         if (btnTopic && isTopicActive) {
-            btnTopic.addEventListener("click", () => {
+            btnTopic.addEventListener("click", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
                 if (videoTopic) {
                     state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== videoTopic.toLowerCase());
                     saveTopics();
@@ -2335,13 +2347,15 @@ function playVideo(video) {
                 }
             });
         }
-        sidebar.querySelector(".sidebar-btn-block").addEventListener("click", () => {
-            if (!state.blockedChannels.some(bc => bc.id === video.channelId)) {
-                state.blockedChannels.push({ id: video.channelId, name: video.channelName });
+        sidebar.querySelector(".sidebar-btn-block").addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!state.blockedChannels.some(bc => bc.id === videoChannelId)) {
+                state.blockedChannels.push({ id: videoChannelId, name: videoChannelName });
                 saveBlocked();
                 renderBlockedList();
             }
-            showToast(`🚫 Blocked ${video.channelName}`, "danger");
+            showToast(`🚫 Blocked ${videoChannelName}`, "danger");
             closePlayer();
             renderFeed();
         });
@@ -2874,7 +2888,8 @@ function renderBlockedList() {
 
 // String & utility helper functions
 function escapeHTML(str) {
-    return str.replace(/[&<>'"]/g, 
+    if (str === null || str === undefined) return "";
+    return String(str).replace(/[&<>'"]/g, 
         tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)
     );
 }
