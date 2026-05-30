@@ -2345,19 +2345,19 @@ body {
 
 /* ── Watch Page Side-by-Side Layout ── */
 @media (min-width: 769px) {
-    .main-content:has(#inline-player:not(.hidden)) {
+    body.watch-mode .main-content {
         display: grid;
         grid-template-rows: auto 1fr;
-        grid-template-columns: 1fr 420px;
+        grid-template-columns: 1fr minmax(400px, 35vw);
         height: 100vh;
         overflow: hidden;
     }
 
-    .main-content:has(#inline-player:not(.hidden)) .main-header {
+    body.watch-mode .main-content .main-header {
         grid-column: 1 / span 2;
     }
 
-    .main-content:has(#inline-player:not(.hidden)) #inline-player {
+    body.watch-mode .main-content #inline-player {
         grid-column: 1;
         grid-row: 2;
         height: 100%;
@@ -2366,7 +2366,7 @@ body {
         border-right: 1px solid var(--card-border);
     }
 
-    .main-content:has(#inline-player:not(.hidden)) .feed-section {
+    body.watch-mode .main-content .feed-section {
         grid-column: 2;
         grid-row: 2;
         height: 100%;
@@ -2375,7 +2375,7 @@ body {
         border-left: 1px solid var(--card-border);
     }
 
-    .main-content:has(#inline-player:not(.hidden)) .feed-section .video-grid {
+    body.watch-mode .main-content .feed-section .video-grid {
         grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
         gap: 0.75rem;
     }
@@ -2383,10 +2383,10 @@ body {
 
 /* Stacking for smaller viewports when watch page is active */
 @media (min-width: 769px) and (max-width: 1400px) {
-    .main-content:has(#inline-player:not(.hidden)) .inline-player-inner {
+    body.watch-mode .main-content .inline-player-inner {
         grid-template-columns: 1fr;
     }
-    .main-content:has(#inline-player:not(.hidden)) .inline-player-sidebar {
+    body.watch-mode .main-content .inline-player-sidebar {
         max-height: none;
         overflow-y: visible;
     }

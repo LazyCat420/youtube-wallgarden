@@ -2282,6 +2282,7 @@ function playVideo(video) {
     }
 
     // Show and animate in
+    document.body.classList.add("watch-mode");
     inlinePlayer.classList.remove("hidden", "closing");
     inlinePlayer.style.display = "";
 
@@ -2301,6 +2302,7 @@ function playVideo(video) {
 function closePlayer() {
     const inlinePlayer = document.getElementById("inline-player");
     if (!inlinePlayer) return;
+    document.body.classList.remove("watch-mode");
     inlinePlayer.classList.add("closing");
     setTimeout(() => {
         inlinePlayer.classList.add("hidden");
