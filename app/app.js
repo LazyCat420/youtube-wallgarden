@@ -883,10 +883,10 @@ function renderProfileDropdowns() {
         optActive.selected = (p === state.currentProfile);
         selectActive.appendChild(optActive);
 
-        if (p !== state.currentProfile) {
+        if (p !== "default") {
             const optDelete = document.createElement("option");
             optDelete.value = p;
-            optDelete.textContent = p === "default" ? "Default Profile" : p;
+            optDelete.textContent = p;
             selectDelete.appendChild(optDelete);
         }
     });
@@ -983,13 +983,18 @@ function createProfile(profileName) {
 
 // Delete profile
 function deleteProfile(profileName) {
-    if (profileName === "default" || profileName === state.currentProfile) {
-        showToast("❌ Cannot delete the default or active profile.", "danger");
+    if (profileName === "default") {
+        showToast("❌ Cannot delete the default profile.", "danger");
         return;
     }
 
     if (!confirm(`Are you sure you want to permanently delete profile "${profileName}"? This will nuke all its data.`)) {
         return;
+    }
+    
+    // If deleting the active profile, switch to default first
+    if (profileName === state.currentProfile) {
+        switchProfile("default");
     }
 
     // Remove from profiles list
