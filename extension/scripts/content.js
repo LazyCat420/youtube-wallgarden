@@ -27,7 +27,9 @@ let settings = {
     blockAllCaps: true,
     blockPunctuation: true,
     // Smart Blocklist
-    enableSmartBlock: true
+    enableSmartBlock: true,
+    // Bypass
+    enableAgeBypass: true
 };
 
 // Persistent blocklist data
@@ -52,6 +54,7 @@ chrome.storage.local.get(null, (data) => {
     applyBlockingCSS();
     startObserver();
     startMenuInterceptor();
+    injectBypassScriptIfEnabled();
 });
 
 // Re-apply if settings change
@@ -65,8 +68,26 @@ chrome.storage.onChanged.addListener((changes, area) => {
             }
         }
         applyBlockingCSS();
+        
+        if (changes.enableAgeBypass && changes.enableAgeBypass.newValue) {
+            injectBypassScriptIfEnabled();
+        }
     }
 });
+
+function injectBypassScriptIfEnabled() {
+    if (settings.enableAgeBypass && !document.getElementById('wallgarden-bypass-script')) {
+        const script = document.createElement('script');
+        script.id = 'wallgarden-bypass-script';
+        script.src = chrome.runtime.getURL('scripts/bypass.js');
+        script.onload = function() {
+            // keep it in the DOM or remove it, standard is to remove after execution
+            this.remove();
+        };
+        (document.head || document.documentElement).appendChild(script);
+        console.log('[Wallgarden] Age Restriction Bypass injected');
+    }
+}
 
 // ============================================================
 //  SMART BLOCKLIST: "Not Interested" / "Don't Recommend" Interceptor

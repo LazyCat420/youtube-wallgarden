@@ -9,7 +9,7 @@ const SETTING_KEYS = [
     'blockMerch', 'blockDonations', 'blockShortsRemix', 'blockChatReplay',
     'blockInfoCards', 'blockClipThanks',
     // Global
-    'blockPremiumUpsell', 'blockNotifPopup', 'blockMusicUpsell',
+    'blockPremiumUpsell', 'blockNotifPopup', 'blockMusicUpsell', 'enableAgeBypass',
     // Heuristics
     'blockAllCaps', 'blockPunctuation'
 ];
