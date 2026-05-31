@@ -205,12 +205,26 @@ function getProfileKey(key) {
 // Load profiles list and current profile
 function initProfiles() {
     const rawProfiles = localStorage.getItem("wallgarden_profiles");
-    state.profiles = rawProfiles ? JSON.parse(rawProfiles) : ["default"];
+    let parsed = rawProfiles ? JSON.parse(rawProfiles) : ["default"];
+    
+    // Sanitize profiles: ensure they are strings and remove corrupted "[object Object]" entries
+    state.profiles = parsed.filter(p => typeof p === "string" && p !== "[object Object]");
+    
+    if (state.profiles.length === 0) {
+        state.profiles = ["default"];
+    } else if (!state.profiles.includes("default")) {
+        state.profiles.unshift("default");
+    }
+    
+    // Save sanitized list back to storage
+    localStorage.setItem("wallgarden_profiles", JSON.stringify(state.profiles));
     
     const rawCurrentProfile = localStorage.getItem("wallgarden_current_profile");
     state.currentProfile = rawCurrentProfile || "default";
+    
     if (!state.profiles.includes(state.currentProfile)) {
         state.currentProfile = "default";
+        localStorage.setItem("wallgarden_current_profile", "default");
     }
 }
 
