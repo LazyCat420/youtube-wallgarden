@@ -3930,14 +3930,8 @@ const TOPIC_TOOL_DEFINITION = {
                 topics: {
                     type: "array",
                     items: {
-                        type: "object",
-                        properties: {
-                            phrase: { type: "string", description: "1-3 word topic name, e.g. 'container orchestration'" },
-                            category: { type: "string", enum: ["sub_category", "similar", "interesting_tangent", "unrelated_but_interesting"] },
-                            reason: { type: "string", description: "Short explanation of why this topic is suggested" },
-                            associated_with: { type: "string", description: "Existing topic this connects to" }
-                        },
-                        required: ["phrase", "category", "reason", "associated_with"]
+                        type: "string",
+                        description: "A 1-3 word topic phrase, representing a broader genre, theme, or tangential subject."
                     },
                     minItems: 50,
                     maxItems: 100
@@ -3949,11 +3943,19 @@ const TOPIC_TOOL_DEFINITION = {
 };
 
 const BRAINSTORM_SYSTEM_PROMPT = `/no_think
-You are a creative topic brainstorming assistant. Call the suggest_topics tool with 50 to 100 new topics related to the user's interests.
-CRITICAL: Even if the user has very few interests or only a single interest topic, you must brainstorm and generate 50 to 100 diverse, highly-related topics, subcategories, intellectual tangents, and interesting adjacent subjects. Do not fail or return few topics just because the interest graph is small. Expand from what is provided.`;
+You are a creative topic brainstorming discovery engine. Call the suggest_topics tool with 50 to 100 new topics related to the user's interests.
+CRITICAL INSTRUCTIONS:
+1. Act as a lateral-thinking discovery algorithm. We want to find interesting YouTube videos.
+2. Provide a balanced mix: roughly 30% Similar Media, 40% Broader Genres/Themes, and 30% Intellectual Tangents.
+3. ABSOLUTELY DO NOT generate narrow subcategories, specific character names, episode titles, or cast members. (e.g., If the user likes "The Simpsons", DO NOT suggest "Homer Simpson". DO suggest "90s Sitcoms", "Adult Animation").
+4. Expand broadly from what is provided.`;
 
 const SIMILAR_SYSTEM_PROMPT = `/no_think
-You are a search query assistant. Call the suggest_topics tool with 50 to 100 topics related to the user's search query.`;
+You are a creative topic brainstorming discovery engine. Call the suggest_topics tool with 50 to 100 topics related to the user's search query.
+CRITICAL INSTRUCTIONS:
+1. Act as a lateral-thinking discovery algorithm. We want to find interesting YouTube videos.
+2. Provide a balanced mix: roughly 30% Similar Media, 40% Broader Genres/Themes, and 30% Intellectual Tangents.
+3. ABSOLUTELY DO NOT generate narrow subcategories, specific character names, episode titles, or cast members. (e.g., If the user searches "The Simpsons", DO NOT suggest "Homer Simpson". DO suggest "90s Sitcoms", "Adult Animation").`;
 
 async function fetchLlmModel() {
     try {
@@ -4077,7 +4079,7 @@ Suggest 50 to 100 new topics.`;
                         tools: [TOPIC_TOOL_DEFINITION],
                         tool_choice: { type: "function", function: { name: "suggest_topics" } },
                         temperature: 0.1 + (attempt * 0.15),
-                        max_tokens: 1500,
+                        max_tokens: 2500,
                         chat_template_kwargs: { "enable_thinking": false }
                     }),
                     signal: controller.signal
@@ -4110,7 +4112,7 @@ Suggest 50 to 100 new topics.`;
                 const topicsArray = extractTopicsFromLlmResponse(message);
                 
                 topicsArray.forEach(item => {
-                    const phrase = (item.phrase || item.topic || item.keyword || "")?.trim().toLowerCase();
+                    const phrase = (typeof item === "string" ? item : (item.phrase || item.topic || item.keyword || ""))?.trim().toLowerCase();
                     if (!phrase) return;
                     
                     // Safety net: skip burned queries even if the LLM re-suggests them
@@ -4225,7 +4227,7 @@ Suggest 50 to 100 topics related to "${searchQuery}".`;
                     tools: [TOPIC_TOOL_DEFINITION],
                     tool_choice: { type: "function", function: { name: "suggest_topics" } },
                     temperature: 0.1 + (attempt * 0.15),
-                    max_tokens: 1500,
+                    max_tokens: 2500,
                     chat_template_kwargs: { "enable_thinking": false }
                 }),
                 signal: controller.signal
@@ -4247,7 +4249,7 @@ Suggest 50 to 100 topics related to "${searchQuery}".`;
             const topicsArray = extractTopicsFromLlmResponse(message);
             
             topicsArray.forEach(item => {
-                const phrase = (item.phrase || item.topic || item.keyword || "")?.trim().toLowerCase();
+                const phrase = (typeof item === "string" ? item : (item.phrase || item.topic || item.keyword || ""))?.trim().toLowerCase();
                 if (!phrase) return;
                 
                 // Safety net: skip burned queries even if the LLM re-suggests them
