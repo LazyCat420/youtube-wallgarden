@@ -238,10 +238,13 @@
                         </div>
                         <p id="dashboard-status-text" class="status-subtitle">Loading feeds...</p>
                     </div>
-                    <div class="header-actions" style="display: flex; gap: 0.75rem; align-items: center;">
+                    <div class="header-actions" style="display: flex; gap: 0.5rem; align-items: center;">
                         <select id="profile-selector" style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--card-border); color: var(--text-primary); padding: 0.5rem 0.75rem; border-radius: 4px; font-family: var(--font-stack); outline: none; cursor: pointer;">
                             <option value="default">General</option>
                         </select>
+                        <button id="btn-manage-profiles" class="btn btn-secondary" style="padding: 0.5rem; border-radius: 4px; min-width: 38px; height: 38px; display: flex; align-items: center; justify-content: center;" title="Manage Profiles">
+                            ⚙️
+                        </button>
                         <button id="btn-sync-now" class="btn btn-primary btn-icon-only" title="Sync RSS Feeds">
                             <span class="btn-text">Sync Feeds</span>
                             <span class="sync-spinner">🔄</span>
@@ -400,6 +403,7 @@
                     <button class="tab-btn active" data-tab="tab-channels">Channels</button>
                     <button class="tab-btn" data-tab="tab-topics">Topics & Filters</button>
                     <button class="tab-btn" data-tab="tab-export">Backup & Restore</button>
+                    <button class="tab-btn" data-tab="tab-profiles">Profiles</button>
                 </div>
 
                 <!-- Channels Tab Content -->
@@ -605,6 +609,30 @@
                         <div class="restore-zone">
                             <label for="input-restore-json" class="btn btn-secondary">📤 Import Settings JSON</label>
                             <input type="file" id="input-restore-json" accept=".json" hidden>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Profiles Tab Content -->
+                <div id="tab-profiles" class="tab-content">
+                    <p class="tab-desc">Manage your custom tracking profiles. Switch profiles to isolate topic preferences, blocklists, and search histories.</p>
+                    
+                    <div class="profiles-list-section" style="margin-bottom: 2rem;">
+                        <h3 style="font-size: 1rem; margin-bottom: 1rem;">Active Profiles</h3>
+                        <div id="profiles-list-container" style="display: flex; flex-direction: column; gap: 0.75rem; background: rgba(0, 0, 0, 0.1); border: 1px solid var(--card-border); border-radius: 6px; padding: 1rem; max-height: 250px; overflow-y: auto;">
+                            <!-- Dynamically populated profile rows -->
+                        </div>
+                    </div>
+
+                    <div class="create-profile-section" style="border-top: 1px solid var(--card-border); padding-top: 1.5rem;">
+                        <h3 style="font-size: 1rem; margin-bottom: 1rem;">Create New Profile</h3>
+                        <div class="input-inline" style="flex-wrap: wrap;">
+                            <input type="text" id="input-new-profile-name" placeholder="e.g. Stocks, Gaming, Cooking" style="flex: 2; min-width: 200px;">
+                            <select id="select-new-profile-type" style="background: rgba(0,0,0,0.3); border: 1px solid var(--card-border); color: var(--text-primary); padding: 0.75rem; border-radius: 4px; font-family: var(--font-stack); font-size: 0.95rem; outline: none; flex: 1; min-width: 150px;">
+                                <option value="normal">Normal Profile</option>
+                                <option value="incognito">🕵️ Incognito Profile</option>
+                            </select>
+                            <button id="btn-create-profile" class="btn btn-primary" style="flex-shrink: 0;">Create Profile</button>
                         </div>
                     </div>
                 </div>
