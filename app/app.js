@@ -3948,19 +3948,21 @@ const TOPIC_TOOL_DEFINITION = {
 };
 
 const BRAINSTORM_SYSTEM_PROMPT = `/no_think
-You are a creative topic brainstorming discovery engine. Call the suggest_topics tool with 50 to 100 new topics related to the user's interests.
+You are a creative topic brainstorming discovery engine. You must call the suggest_topics tool to provide exactly 50 to 100 new topics related to the user's interests.
 CRITICAL INSTRUCTIONS:
 1. Act as a lateral-thinking discovery algorithm. We want to find interesting YouTube videos.
 2. Provide a balanced mix: roughly 30% Similar Media, 40% Broader Genres/Themes, and 30% Intellectual Tangents.
 3. ABSOLUTELY DO NOT generate narrow subcategories, specific character names, episode titles, or cast members. (e.g., If the user likes "The Simpsons", DO NOT suggest "Homer Simpson". DO suggest "90s Sitcoms", "Adult Animation").
-4. Expand broadly from what is provided.`;
+4. Expand broadly from what is provided.
+5. YOU MUST RETURN VALID JSON matching the suggest_topics schema. Do not return markdown. Do not return plain text.`;
 
 const SIMILAR_SYSTEM_PROMPT = `/no_think
-You are a creative topic brainstorming discovery engine. Call the suggest_topics tool with 50 to 100 topics related to the user's search query.
+You are a creative topic brainstorming discovery engine. You must call the suggest_topics tool to provide exactly 50 to 100 topics related to the user's search query.
 CRITICAL INSTRUCTIONS:
 1. Act as a lateral-thinking discovery algorithm. We want to find interesting YouTube videos.
 2. Provide a balanced mix: roughly 30% Similar Media, 40% Broader Genres/Themes, and 30% Intellectual Tangents.
-3. ABSOLUTELY DO NOT generate narrow subcategories, specific character names, episode titles, or cast members. (e.g., If the user searches "The Simpsons", DO NOT suggest "Homer Simpson". DO suggest "90s Sitcoms", "Adult Animation").`;
+3. ABSOLUTELY DO NOT generate narrow subcategories, specific character names, episode titles, or cast members. (e.g., If the user searches "The Simpsons", DO NOT suggest "Homer Simpson". DO suggest "90s Sitcoms", "Adult Animation").
+4. YOU MUST RETURN VALID JSON matching the suggest_topics schema. Do not return markdown. Do not return plain text.`;
 
 async function fetchLlmModel() {
     try {
@@ -4149,15 +4151,17 @@ Suggest 50 to 100 new topics.`;
                 }
             } else {
                 console.warn(`[Smart Feed] Brainstorming returned no new topics on attempt ${attempt + 1}.`);
-                attempt++;
+                throw new Error("No topics parsed from response");
             }
         } catch (err) {
             console.error(`Brainstorm error on attempt ${attempt + 1}:`, err);
             attempt++;
-            if (attempt > MAX_RETRIES && !append) {
-                showToast("❌ Failed to brainstorm topics: " + err.message, "danger");
-            }
         }
+    }
+    
+    if (!success) {
+        console.error(`[Smart Feed] Background brainstorming completely failed after ${MAX_RETRIES + 1} attempts.`);
+        // Queue will be evaluated again on next interaction
     }
     
     state.brainstormLoading = false;
@@ -4285,12 +4289,16 @@ Suggest 50 to 100 topics related to "${searchQuery}".`;
                 fillSmartFeedPreloadBuffer();
             } else {
                 console.warn(`[Smart Feed] Similar brainstorm returned no new topics on attempt ${attempt + 1}.`);
-                attempt++;
+                throw new Error("No topics parsed from similar topics response");
             }
         } catch (err) {
             console.error(`Similar search topics brainstorm error on attempt ${attempt + 1}:`, err);
             attempt++;
         }
+    }
+    
+    if (!success) {
+        console.error(`[Smart Feed] Background similar brainstorming completely failed after ${MAX_RETRIES + 1} attempts.`);
     }
 }
 
