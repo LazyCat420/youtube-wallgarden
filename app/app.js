@@ -207,26 +207,59 @@ function renderSearchSuggestions() {
     });
 }
 
+// Profiles Management
+let currentProfileId = 'default';
+let allProfiles = [
+    { id: 'default', name: 'General', type: 'normal' },
+    { id: 'incognito', name: 'Incognito', type: 'incognito' }
+];
+
+function getStoreKey(base) {
+    if (currentProfileId === 'default') return `wallgarden_${base}`; // backwards compatibility
+    return `wallgarden_${currentProfileId}_${base}`;
+}
+
 // Load variables from Local Storage
 function loadState() {
-    const rawChannels = localStorage.getItem("wallgarden_channels");
-    const rawTopics = localStorage.getItem("wallgarden_topics");
-    const rawBlocked = localStorage.getItem("wallgarden_blocked_channels");
-    const rawCache = localStorage.getItem("wallgarden_cache");
-    const rawSettings = localStorage.getItem("wallgarden_settings");
-    const rawSearchHistory = localStorage.getItem("wallgarden_search_history");
-    const rawBrainstorm = localStorage.getItem("wallgarden_brainstorm_topics");
-    const rawVideoRatings = localStorage.getItem("wallgarden_video_ratings");
-    const rawDiscovered = localStorage.getItem("wallgarden_discovered_channels");
-    const rawPool = localStorage.getItem("wallgarden_smart_feed_pool");
+    // Load Profiles first
+    const rawActiveProfile = localStorage.getItem("wallgarden_active_profile_id");
+    const rawProfiles = localStorage.getItem("wallgarden_profiles");
+    
+    if (rawProfiles) allProfiles = JSON.parse(rawProfiles);
+    currentProfileId = rawActiveProfile || 'default';
+    
+    // Set UI
+    const profileSelector = document.getElementById("profile-selector");
+    if (profileSelector) {
+        profileSelector.innerHTML = "";
+        allProfiles.forEach(p => {
+            const opt = document.createElement("option");
+            opt.value = p.id;
+            opt.textContent = p.name;
+            if (p.type === 'incognito') opt.textContent = '🕵️ ' + p.name;
+            if (p.id === currentProfileId) opt.selected = true;
+            profileSelector.appendChild(opt);
+        });
+    }
 
-    const rawLiked = localStorage.getItem("wallgarden_liked_topics");
-    const rawDisliked = localStorage.getItem("wallgarden_disliked_topics");
-    const rawBurned = localStorage.getItem("wallgarden_burned_queries");
-    const rawPlaylists = localStorage.getItem("wallgarden_playlists");
-    const rawLikedVideos = localStorage.getItem("wallgarden_liked_videos");
-    const rawNewsRatings = localStorage.getItem("wallgarden_news_ratings");
-    const rawQueue = localStorage.getItem("wallgarden_queue");
+    const rawChannels = localStorage.getItem(getStoreKey("channels"));
+    const rawTopics = localStorage.getItem(getStoreKey("topics"));
+    const rawBlocked = localStorage.getItem(getStoreKey("blocked_channels"));
+    const rawCache = localStorage.getItem(getStoreKey("cache"));
+    const rawSettings = localStorage.getItem(getStoreKey("settings"));
+    const rawSearchHistory = localStorage.getItem(getStoreKey("search_history"));
+    const rawBrainstorm = localStorage.getItem(getStoreKey("brainstorm_topics"));
+    const rawVideoRatings = localStorage.getItem(getStoreKey("video_ratings"));
+    const rawDiscovered = localStorage.getItem(getStoreKey("discovered_channels"));
+    const rawPool = localStorage.getItem(getStoreKey("smart_feed_pool"));
+
+    const rawLiked = localStorage.getItem(getStoreKey("liked_topics"));
+    const rawDisliked = localStorage.getItem(getStoreKey("disliked_topics"));
+    const rawBurned = localStorage.getItem(getStoreKey("burned_queries"));
+    const rawPlaylists = localStorage.getItem(getStoreKey("playlists"));
+    const rawLikedVideos = localStorage.getItem(getStoreKey("liked_videos"));
+    const rawNewsRatings = localStorage.getItem(getStoreKey("news_ratings"));
+    const rawQueue = localStorage.getItem(getStoreKey("queue"));
 
     state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
     state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
@@ -302,69 +335,84 @@ function loadState() {
     document.getElementById("toggle-mute-shorts").checked = state.settings.muteShorts;
 }
 
+function isIncognito() {
+    return allProfiles.find(p => p.id === currentProfileId)?.type === 'incognito';
+}
+
 function saveSettings() {
-    localStorage.setItem("wallgarden_settings", JSON.stringify(state.settings));
+    localStorage.setItem(getStoreKey("settings"), JSON.stringify(state.settings));
 }
 
 function saveBlocked() {
-    localStorage.setItem("wallgarden_blocked_channels", JSON.stringify(state.blockedChannels));
+    if (isIncognito()) return;
+    localStorage.setItem(getStoreKey("blocked_channels"), JSON.stringify(state.blockedChannels));
     document.getElementById("blocked-count").textContent = state.blockedChannels.length;
 }
 
 // Save helpers
 function saveChannels() {
-    localStorage.setItem("wallgarden_channels", JSON.stringify(state.channels));
+    if (isIncognito()) return;
+    localStorage.setItem(getStoreKey("channels"), JSON.stringify(state.channels));
     document.getElementById("subscribed-count").textContent = state.channels.length;
 }
 
 function saveTopics() {
-    localStorage.setItem("wallgarden_topics", JSON.stringify(state.topics));
+    if (isIncognito()) return;
+    localStorage.setItem(getStoreKey("topics"), JSON.stringify(state.topics));
 }
 
 function saveLikedTopics() {
-    localStorage.setItem("wallgarden_liked_topics", JSON.stringify(state.likedTopics));
+    if (isIncognito()) return;
+    localStorage.setItem(getStoreKey("liked_topics"), JSON.stringify(state.likedTopics));
 }
 
 function saveDislikedTopics() {
-    localStorage.setItem("wallgarden_disliked_topics", JSON.stringify(state.dislikedTopics));
+    if (isIncognito()) return;
+    localStorage.setItem(getStoreKey("disliked_topics"), JSON.stringify(state.dislikedTopics));
 }
 
 function saveCache() {
-    localStorage.setItem("wallgarden_cache", JSON.stringify(state.cache));
+    localStorage.setItem(getStoreKey("cache"), JSON.stringify(state.cache));
 }
 
 function saveVideoRatings() {
-    localStorage.setItem("wallgarden_video_ratings", JSON.stringify(state.videoRatings));
+    if (isIncognito()) return;
+    localStorage.setItem(getStoreKey("video_ratings"), JSON.stringify(state.videoRatings));
 }
 function saveNewsRatings() {
-    localStorage.setItem("wallgarden_news_ratings", JSON.stringify(state.newsSourceRatings));
+    if (isIncognito()) return;
+    localStorage.setItem(getStoreKey("news_ratings"), JSON.stringify(state.newsSourceRatings));
 }
 function saveLikedVideos() {
-    localStorage.setItem("wallgarden_liked_videos", JSON.stringify(state.likedVideos));
+    if (isIncognito()) return;
+    localStorage.setItem(getStoreKey("liked_videos"), JSON.stringify(state.likedVideos));
 }
 
 function saveSearchHistory() {
-    localStorage.setItem("wallgarden_search_history", JSON.stringify(state.searchHistory));
+    if (isIncognito()) return;
+    localStorage.setItem(getStoreKey("search_history"), JSON.stringify(state.searchHistory));
 }
 
 function saveSmartFeedSuggestionPool() {
-    localStorage.setItem("wallgarden_smart_feed_pool", JSON.stringify(state.smartFeedSuggestionPool));
+    localStorage.setItem(getStoreKey("smart_feed_pool"), JSON.stringify(state.smartFeedSuggestionPool));
 }
 
 function saveBurnedQueries() {
-    localStorage.setItem("wallgarden_burned_queries", JSON.stringify(state.burnedQueries));
+    if (isIncognito()) return;
+    localStorage.setItem(getStoreKey("burned_queries"), JSON.stringify(state.burnedQueries));
 }
 function savePlaylists() {
+    if (isIncognito()) return;
     if (state.playlists) {
         Object.values(state.playlists).forEach(pl => {
             if (pl && !pl.videos) pl.videos = [];
         });
     }
-    localStorage.setItem("wallgarden_playlists", JSON.stringify(state.playlists));
+    localStorage.setItem(getStoreKey("playlists"), JSON.stringify(state.playlists));
 }
 
 function saveQueue() {
-    localStorage.setItem("wallgarden_queue", JSON.stringify(state.queue));
+    localStorage.setItem(getStoreKey("queue"), JSON.stringify(state.queue));
 }
 
 function getCachedVideosCount() {
@@ -432,6 +480,35 @@ function setupEventListeners() {
     }
     if (sidebarOverlay) {
         sidebarOverlay.addEventListener("click", closeMobileSidebar);
+    }
+
+    // Profile Selector
+    const profileSelector = document.getElementById("profile-selector");
+    if (profileSelector) {
+        profileSelector.addEventListener("change", (e) => {
+            if (e.target.value === "add_new") {
+                const name = prompt('Enter new profile name:');
+                if (name && name.trim()) {
+                    const id = 'profile_' + Date.now();
+                    allProfiles.push({ id, name: name.trim(), type: 'normal' });
+                    localStorage.setItem("wallgarden_profiles", JSON.stringify(allProfiles));
+                    localStorage.setItem("wallgarden_active_profile_id", id);
+                    location.reload();
+                } else {
+                    e.target.value = currentProfileId;
+                }
+                return;
+            }
+            
+            localStorage.setItem("wallgarden_active_profile_id", e.target.value);
+            location.reload();
+        });
+        
+        // Add the "Create New Profile" option at the bottom
+        const addOpt = document.createElement("option");
+        addOpt.value = "add_new";
+        addOpt.textContent = "+ Create New Profile";
+        profileSelector.appendChild(addOpt);
     }
 
     // Sync button
