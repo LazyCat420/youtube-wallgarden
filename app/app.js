@@ -100,7 +100,7 @@ function initSmartFeed() {
     
     state.smartFeedTopicsQueue = [...randomizedTopics];
     if (state.smartFeedTopicsQueue.length === 0) {
-        state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
+        state.smartFeedTopicsQueue = (currentProfileId === 'default' || currentProfileId === 'incognito') ? ["coding", "programming", "ai", "science", "physics"] : [];
     }
     console.log("[Smart Feed] Initialized with topics queue:", state.smartFeedTopicsQueue);
     
@@ -4539,7 +4539,7 @@ async function fillSmartFeedPreloadBuffer() {
         const randomizedTopics = getWeightedRandomTopics(state.topics);
         state.smartFeedTopicsQueue = [...randomizedTopics];
         if (state.smartFeedTopicsQueue.length === 0) {
-            state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
+            state.smartFeedTopicsQueue = (currentProfileId === 'default' || currentProfileId === 'incognito') ? ["coding", "programming", "ai", "science", "physics"] : [];
         }
     }
     
@@ -4693,7 +4693,7 @@ async function loadNextSmartFeedBatch() {
         
         state.smartFeedTopicsQueue = [...randomizedTopics];
         if (state.smartFeedTopicsQueue.length === 0) {
-            state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
+            state.smartFeedTopicsQueue = (currentProfileId === 'default' || currentProfileId === 'incognito') ? ["coding", "programming", "ai", "science", "physics"] : [];
         }
         
         generateBrainstormTopics(true);
