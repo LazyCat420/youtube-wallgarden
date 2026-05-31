@@ -39,6 +39,9 @@ let blocklist = {
     rejectionLog: []    // Array of { channel, title, timestamp }
 };
 
+let currentProfileId = 'default';
+let allProfiles = [];
+
 // State tracker to avoid re-evaluating the same elements
 const evaluatedVideos = new Set();
 
@@ -50,7 +53,16 @@ chrome.storage.local.get(null, (data) => {
         data.blockShorts = true;
     }
     Object.assign(settings, data);
-    if (data.blocklist) blocklist = data.blocklist;
+
+    currentProfileId = data.activeProfileId || 'default';
+    allProfiles = data.profiles || [];
+
+    if (data[`blocklist_${currentProfileId}`]) {
+        blocklist = data[`blocklist_${currentProfileId}`];
+    } else if (data.blocklist) {
+        blocklist = data.blocklist;
+    }
+
     applyBlockingCSS();
     startObserver();
     startMenuInterceptor();
@@ -60,10 +72,16 @@ chrome.storage.local.get(null, (data) => {
 // Re-apply if settings change
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local') {
+        let reloadNeeded = false;
+        
+        if (changes.activeProfileId && changes.activeProfileId.newValue !== changes.activeProfileId.oldValue) {
+            reloadNeeded = true;
+        }
+
         for (let [key, { newValue }] of Object.entries(changes)) {
-            if (key === 'blocklist') {
-                blocklist = newValue;
-            } else {
+            if (key === `blocklist_${currentProfileId}`) {
+                blocklist = newValue || { channels: [], keywords: {}, rejectionLog: [] };
+            } else if (!key.startsWith('blocklist_') && key !== 'activeProfileId' && key !== 'profiles') {
                 settings[key] = newValue;
             }
         }
@@ -71,6 +89,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
         
         if (changes.enableAgeBypass && changes.enableAgeBypass.newValue) {
             injectBypassScriptIfEnabled();
+        }
+
+        if (reloadNeeded) {
+            location.reload();
         }
     }
 });
@@ -538,7 +560,11 @@ function extractKeywords(title) {
 }
 
 function saveBlocklist() {
-    chrome.storage.local.set({ blocklist });
+    const isIncognito = allProfiles.find(p => p.id === currentProfileId)?.type === 'incognito';
+    if (isIncognito) return; // Do not save tracking data in incognito mode
+    
+    const key = `blocklist_${currentProfileId}`;
+    chrome.storage.local.set({ [key]: blocklist });
 }
 
 /**
