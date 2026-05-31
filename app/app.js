@@ -3785,12 +3785,13 @@ function showToast(message, type) {
 }
 
 // Infinite scroll for search/topic/brainstorm views
-// Infinite scroll using highly-optimized IntersectionObserver (eliminates layout thrashing)
+// Dual mechanism: IntersectionObserver (primary) + scroll listener (backup)
 let infiniteScrollObserver = null;
-let smartFeedScrollDebounce = null;
+let smartFeedScrollThrottle = false;
 
 function setupInfiniteScroll() {
     const trigger = document.getElementById("infinite-scroll-trigger");
+    const feedSection = document.querySelector(".feed-section");
     if (!trigger) return;
     
     // Disconnect old observer if any
@@ -3798,37 +3799,47 @@ function setupInfiniteScroll() {
         infiniteScrollObserver.disconnect();
     }
     
+    // Primary: IntersectionObserver
     infiniteScrollObserver = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
             if (entry.isIntersecting) {
+                console.log("[Infinite Scroll] IO triggered");
                 handleTriggerIntersection();
             }
         });
     }, {
-        root: document.querySelector(".feed-section") || null,
-        rootMargin: "600px" // Start loading 600px before the user reaches the bottom
+        root: feedSection || null,
+        rootMargin: "800px"
     });
     
     infiniteScrollObserver.observe(trigger);
+    
+    // Backup: Throttled scroll listener on the feed-section
+    // This guarantees infinite scroll works even if the IO fails to re-fire
+    if (feedSection) {
+        // Remove any previously attached listener to avoid duplicates
+        feedSection.removeEventListener("scroll", handleFeedScroll);
+        feedSection.addEventListener("scroll", handleFeedScroll, { passive: true });
+    }
 }
 
-// Check if the infinite scroll trigger is currently visible in the feed-section viewport
-function isTriggerVisible() {
-    const trigger = document.getElementById("infinite-scroll-trigger");
+function handleFeedScroll() {
+    if (smartFeedScrollThrottle) return;
+    smartFeedScrollThrottle = true;
+    setTimeout(() => { smartFeedScrollThrottle = false; }, 200);
+    
     const feedSection = document.querySelector(".feed-section");
-    if (!trigger || !feedSection) return false;
-    const triggerRect = trigger.getBoundingClientRect();
-    const feedRect = feedSection.getBoundingClientRect();
-    // Trigger is "visible" if its top is within 600px of the feed-section bottom
-    return triggerRect.top < feedRect.bottom + 600;
+    if (!feedSection) return;
+    
+    const distanceFromBottom = feedSection.scrollHeight - feedSection.scrollTop - feedSection.clientHeight;
+    if (distanceFromBottom < 800) {
+        handleTriggerIntersection();
+    }
 }
 
 function handleTriggerIntersection() {
     // Handle Smart Feed scroll discovery
     if (state.currentView === "smart-feed") {
-        // Debounce rapid observer firings to 150ms
-        if (smartFeedScrollDebounce) return;
-        smartFeedScrollDebounce = setTimeout(() => { smartFeedScrollDebounce = null; }, 150);
         loadNextSmartFeedBatch();
         return;
     }
@@ -4752,15 +4763,22 @@ async function loadNextSmartFeedBatch() {
         state.smartFeedLoading = false;
         updateStatusText("Ready");
         
+        console.log(`[Smart Feed Batch] Rendered ${deduplicated.length} cards (pool: ${state.smartFeedSuggestionPool.length}, total rendered: ${state.smartFeedVideos.length})`);
+        
         // Trigger preloader asynchronously in background to replenish pool
         fillSmartFeedPreloadBuffer();
         
-        // Re-check: if the infinite scroll trigger is still visible (12 cards wasn't
-        // enough to push it off-screen), schedule another batch immediately.
-        // This creates a self-feeding loop that fills the viewport, then stops.
+        // Re-check: if the user is still near the bottom after rendering,
+        // schedule another batch immediately. This self-feeds until content
+        // fills the viewport, then stops naturally.
         requestAnimationFrame(() => {
-            if (state.currentView === "smart-feed" && !state.smartFeedLoading && isTriggerVisible()) {
-                loadNextSmartFeedBatch();
+            const feedSection = document.querySelector(".feed-section");
+            if (feedSection && state.currentView === "smart-feed" && !state.smartFeedLoading) {
+                const distFromBottom = feedSection.scrollHeight - feedSection.scrollTop - feedSection.clientHeight;
+                if (distFromBottom < 1200) {
+                    console.log(`[Smart Feed Batch] Still near bottom (${distFromBottom}px), loading another batch...`);
+                    loadNextSmartFeedBatch();
+                }
             }
         });
         return;
@@ -4841,10 +4859,14 @@ async function loadNextSmartFeedBatch() {
         
         fillSmartFeedPreloadBuffer();
         
-        // Re-check: if trigger is still visible, load another batch
+        // Re-check: if user is still near the bottom, load another batch
         requestAnimationFrame(() => {
-            if (state.currentView === "smart-feed" && !state.smartFeedLoading && isTriggerVisible()) {
-                loadNextSmartFeedBatch();
+            const feedSection = document.querySelector(".feed-section");
+            if (feedSection && state.currentView === "smart-feed" && !state.smartFeedLoading) {
+                const distFromBottom = feedSection.scrollHeight - feedSection.scrollTop - feedSection.clientHeight;
+                if (distFromBottom < 1200) {
+                    loadNextSmartFeedBatch();
+                }
             }
         });
     }
