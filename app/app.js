@@ -272,9 +272,12 @@ function loadState() {
     state.blockedChannels = rawBlocked ? JSON.parse(rawBlocked) : [];
     state.likedTopics = rawLiked ? JSON.parse(rawLiked) : [];
     state.dislikedTopics = rawDisliked ? JSON.parse(rawDisliked) : [];
-    state.settings = rawSettings ? JSON.parse(rawSettings) : { useYtdlp: true, muteShorts: false, altPlayerInstance: "https://yewtu.be" };
+    state.settings = rawSettings ? JSON.parse(rawSettings) : { useYtdlp: true, muteShorts: false, altPlayerInstance: "https://yewtu.be", discoverySortOrder: "relevance" };
     if (!state.settings.altPlayerInstance) {
         state.settings.altPlayerInstance = "https://yewtu.be";
+    }
+    if (!state.settings.discoverySortOrder) {
+        state.settings.discoverySortOrder = "relevance";
     }
     state.searchHistory = rawSearchHistory ? JSON.parse(rawSearchHistory) : [];
     state.brainstormTopics = rawBrainstorm ? JSON.parse(rawBrainstorm) : [];
@@ -1719,7 +1722,9 @@ function createVideoCard(video) {
         </div>
     `;
     
-    const openAction = () => window.open(`https://www.youtube.com/watch?v=${video.id}`, "_blank");
+    const openAction = () => {
+        openFloatingPlayer(video.id, video.title);
+    };
     card.querySelector(".thumbnail-play-overlay").addEventListener("click", openAction);
     card.querySelector(".video-title").addEventListener("click", openAction);
     
@@ -2253,6 +2258,26 @@ function renderFeed() {
         return;
     }
     
+    // Inject sort dropdown for discovery and topics
+    const topHeaderActions = document.querySelector(".header-actions");
+    if (topHeaderActions) topHeaderActions.innerHTML = "";
+
+    if (state.currentView === "smart-feed" || state.currentView.startsWith("topic_") || state.currentView.startsWith("search_")) {
+        if (topHeaderActions) {
+            topHeaderActions.innerHTML = `
+                <select id="discovery-sort-select" class="form-select" style="padding: 0.25rem 0.5rem; border-radius: 4px; background: var(--bg-secondary); color: var(--text); border: 1px solid var(--border); font-size: 0.85rem;">
+                    <option value="relevance" ${state.settings.discoverySortOrder === 'relevance' ? 'selected' : ''}>Sort by Relevance</option>
+                    <option value="date" ${state.settings.discoverySortOrder === 'date' ? 'selected' : ''}>Sort by Date</option>
+                </select>
+            `;
+            document.getElementById("discovery-sort-select").addEventListener("change", (e) => {
+                state.settings.discoverySortOrder = e.target.value;
+                saveSettings();
+                renderFeed();
+            });
+        }
+    }
+
     // Handle Smart Feed (Discovery)
     if (state.currentView === "smart-feed") {
         if (state.topics.filter(t => t.weight > 0).length === 0) {
@@ -2293,6 +2318,16 @@ function renderFeed() {
         grid.appendChild(suggestionsGrid);
         
         if (state.smartFeedVideos.length > 0) {
+            if (state.settings.discoverySortOrder === 'date') {
+                state.smartFeedVideos.sort((a, b) => b.published - a.published);
+            } else {
+                state.smartFeedVideos.sort((a, b) => {
+                    const scoreA = a.score !== undefined ? a.score : getScoreAndMatches(a).score;
+                    const scoreB = b.score !== undefined ? b.score : getScoreAndMatches(b).score;
+                    return scoreB - scoreA;
+                });
+            }
+            
             const fragment = document.createDocumentFragment();
             state.smartFeedVideos.forEach(video => {
                 renderCard(video, fragment);
@@ -2367,7 +2402,11 @@ function renderFeed() {
             });
             
             discoverVideos = discoverVideos.filter(dv => !allVideos.some(sv => sv.id === dv.id));
-            discoverVideos.sort((a, b) => b.score - a.score);
+            if (state.settings.discoverySortOrder === 'date') {
+                discoverVideos.sort((a, b) => b.published - a.published);
+            } else {
+                discoverVideos.sort((a, b) => b.score - a.score);
+            }
         }
         
         let allShorts = [];
@@ -2460,6 +2499,93 @@ function renderFeed() {
 }
 }
 
+// Floating Player (Picture-in-Picture)
+function openFloatingPlayer(videoId, title = "YouTube Video") {
+    let player = document.getElementById("floating-player-popup");
+    if (!player) {
+        player = document.createElement("div");
+        player.id = "floating-player-popup";
+        player.className = "floating-player";
+        
+        player.innerHTML = `
+            <div class="floating-player-header" id="floating-player-header">
+                <div class="floating-player-title" id="floating-player-title"></div>
+                <div class="floating-player-actions">
+                    <button class="btn-popout" title="Open in new window">↗</button>
+                    <button class="btn-close" title="Close">✕</button>
+                </div>
+            </div>
+            <div class="floating-player-content">
+                <iframe id="floating-player-iframe" src="" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+            </div>
+        `;
+        document.body.appendChild(player);
+        
+        // Drag logic
+        const header = player.querySelector("#floating-player-header");
+        let isDragging = false;
+        let startX, startY, initialX, initialY;
+        
+        header.addEventListener("mousedown", (e) => {
+            if (e.target.closest("button")) return;
+            isDragging = true;
+            player.classList.add("is-dragging");
+            startX = e.clientX;
+            startY = e.clientY;
+            
+            const rect = player.getBoundingClientRect();
+            player.style.transform = "none";
+            player.style.left = rect.left + "px";
+            player.style.top = rect.top + "px";
+            player.style.margin = "0";
+            
+            initialX = rect.left;
+            initialY = rect.top;
+        });
+        
+        document.addEventListener("mousemove", (e) => {
+            if (!isDragging) return;
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            player.style.left = (initialX + dx) + "px";
+            player.style.top = (initialY + dy) + "px";
+        });
+        
+        document.addEventListener("mouseup", () => {
+            if (isDragging) {
+                isDragging = false;
+                player.classList.remove("is-dragging");
+            }
+        });
+        
+        // Buttons
+        player.querySelector(".btn-close").addEventListener("click", () => {
+            player.style.display = "none";
+            player.querySelector("#floating-player-iframe").src = "";
+        });
+        
+        player.querySelector(".btn-popout").addEventListener("click", () => {
+            const currentVideoId = player.dataset.videoId;
+            if (currentVideoId) {
+                window.open(`https://www.youtube.com/watch?v=${currentVideoId}`, "_blank");
+                player.style.display = "none";
+                player.querySelector("#floating-player-iframe").src = "";
+            }
+        });
+    }
+    
+    player.dataset.videoId = videoId;
+    player.querySelector("#floating-player-title").textContent = title;
+    player.querySelector("#floating-player-iframe").src = `https://www.youtube.com/embed/${videoId}?autoplay=1`;
+    player.style.display = "flex";
+    
+    if (!player.style.transform && !player.style.left) {
+        player.style.transform = "translate(-50%, -50%)";
+        player.style.left = "50%";
+        player.style.top = "50%";
+    }
+}
+
 // Display Video in Inline Player (above feed, no overlay)
 function playVideo(video) {
     // Get or create the inline player element
@@ -2506,7 +2632,9 @@ function playVideo(video) {
         if (btnOpenYoutube) {
             btnOpenYoutube.addEventListener("click", () => {
                 if (state.currentlyPlayingId) {
-                    window.open(`https://www.youtube.com/watch?v=${state.currentlyPlayingId}`, "_blank");
+                    const title = inlinePlayer.querySelector(".player-title") ? inlinePlayer.querySelector(".player-title").textContent : "YouTube Video";
+                    openFloatingPlayer(state.currentlyPlayingId, title);
+                    closePlayer();
                 }
             });
         }
@@ -3745,7 +3873,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
             </div>
         `;
         
-        const openAction = () => window.open(`https://www.youtube.com/watch?v=${enrichedVideo.id}`, "_blank");
+        const openAction = () => openFloatingPlayer(enrichedVideo.id, enrichedVideo.title);
         card.querySelector(".thumbnail-area").addEventListener("click", openAction);
         card.querySelector(".video-title").addEventListener("click", openAction);
         
@@ -3800,7 +3928,9 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
             </div>
         `;
         
-        const openAction = () => window.open(`https://www.youtube.com/watch?v=${enrichedVideo.id}`, "_blank");
+        const openAction = () => {
+            openFloatingPlayer(enrichedVideo.id, enrichedVideo.title);
+        };
         card.querySelector(".thumbnail-area").addEventListener("click", openAction);
         card.querySelector(".video-title").addEventListener("click", openAction);
         
