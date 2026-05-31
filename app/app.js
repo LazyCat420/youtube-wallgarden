@@ -2481,7 +2481,6 @@ function playVideo(video) {
             '        <p class="player-channel"></p>',
             '      </div>',
             '      <div class="player-bar-actions" style="display: flex; gap: 0.75rem; align-items: center;">',
-            '        <button class="btn btn-secondary btn-sm btn-play-alternate" title="Play via Invidious (Bypass Age Restriction)">🌐 Alternate Player</button>',
             '        <button class="btn btn-primary btn-sm btn-open-youtube" title="Open Video on YouTube (New Tab)">📺 Watch on YouTube</button>',
             '        <button class="inline-player-close" title="Close Player">✕ Close</button>',
             '      </div>',
@@ -2501,14 +2500,6 @@ function playVideo(video) {
         }
         // Bind close button using querySelector on the element itself
         inlinePlayer.querySelector(".inline-player-close").addEventListener("click", closePlayer);
-        
-        // Bind alternate player button
-        const btnAltPlay = inlinePlayer.querySelector(".btn-play-alternate");
-        if (btnAltPlay) {
-            btnAltPlay.addEventListener("click", () => {
-                playAlternateVideo({ id: state.currentlyPlayingId });
-            });
-        }
 
         // Bind open on YouTube button
         const btnOpenYoutube = inlinePlayer.querySelector(".btn-open-youtube");
@@ -2815,39 +2806,13 @@ function playViaYouTubeEmbed(videoId, playerWrapper) {
                 },
                 onError: (event) => {
                     console.warn(`[Player] YouTube embed failed with error code ${event.data} for ${videoId}`);
-                    showToast("YouTube embed restricted. Trying Alternate Player...", "warning");
-                    playAlternateVideo({ id: videoId });
+                    showToast("YouTube embed restricted. Opening on YouTube...", "warning");
+                    window.open(`https://www.youtube.com/watch?v=${videoId}`, "_blank");
+                    closePlayer();
                 }
             }
         });
     });
-}
-
-function playAlternateVideo(video) {
-    let inlinePlayer = document.getElementById("inline-player");
-    if (!inlinePlayer) return;
-    
-    const playerWrapper = inlinePlayer.querySelector(".player-wrapper-box");
-    if (playerWrapper) {
-        // Destroy YT Player if active
-        if (window.ytPlayer) {
-            try { window.ytPlayer.destroy(); } catch (e) {}
-            window.ytPlayer = null;
-        }
-        
-        const instance = state.settings.altPlayerInstance || "https://yewtu.be";
-        const cleanInstance = instance.replace(/\/$/, "");
-        
-        playerWrapper.innerHTML = `
-            <iframe id="yt-player-element" 
-                    src="${cleanInstance}/embed/${video.id}?autoplay=1" 
-                    style="width: 100%; height: 100%; min-height: 360px; border: none; background: #000;" 
-                    allow="autoplay; encrypted-media; picture-in-picture" 
-                    allowfullscreen>
-            </iframe>`;
-            
-        showToast("Playing via alternative Invidious player...", "info");
-    }
 }
 
 function closePlayer() {
