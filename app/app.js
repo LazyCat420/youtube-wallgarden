@@ -3787,6 +3787,7 @@ function showToast(message, type) {
 // Infinite scroll for search/topic/brainstorm views
 // Infinite scroll using highly-optimized IntersectionObserver (eliminates layout thrashing)
 let infiniteScrollObserver = null;
+let smartFeedScrollDebounce = null;
 
 function setupInfiniteScroll() {
     const trigger = document.getElementById("infinite-scroll-trigger");
@@ -3805,15 +3806,29 @@ function setupInfiniteScroll() {
         });
     }, {
         root: document.querySelector(".feed-section") || null,
-        rootMargin: "300px" // Start loading 300px before the user reaches the bottom
+        rootMargin: "600px" // Start loading 600px before the user reaches the bottom
     });
     
     infiniteScrollObserver.observe(trigger);
 }
 
+// Check if the infinite scroll trigger is currently visible in the feed-section viewport
+function isTriggerVisible() {
+    const trigger = document.getElementById("infinite-scroll-trigger");
+    const feedSection = document.querySelector(".feed-section");
+    if (!trigger || !feedSection) return false;
+    const triggerRect = trigger.getBoundingClientRect();
+    const feedRect = feedSection.getBoundingClientRect();
+    // Trigger is "visible" if its top is within 600px of the feed-section bottom
+    return triggerRect.top < feedRect.bottom + 600;
+}
+
 function handleTriggerIntersection() {
     // Handle Smart Feed scroll discovery
     if (state.currentView === "smart-feed") {
+        // Debounce rapid observer firings to 150ms
+        if (smartFeedScrollDebounce) return;
+        smartFeedScrollDebounce = setTimeout(() => { smartFeedScrollDebounce = null; }, 150);
         loadNextSmartFeedBatch();
         return;
     }
@@ -4072,7 +4087,7 @@ Suggest 50 to 100 new topics.`;
             const fetchPromises = [];
             for (let i = 0; i < numRequests; i++) {
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 30000);
+                const timeoutId = setTimeout(() => controller.abort(), 120000);
                 
                 const req = fetch("/vllm/v1/chat/completions", {
                     method: "POST",
@@ -4739,6 +4754,15 @@ async function loadNextSmartFeedBatch() {
         
         // Trigger preloader asynchronously in background to replenish pool
         fillSmartFeedPreloadBuffer();
+        
+        // Re-check: if the infinite scroll trigger is still visible (12 cards wasn't
+        // enough to push it off-screen), schedule another batch immediately.
+        // This creates a self-feeding loop that fills the viewport, then stops.
+        requestAnimationFrame(() => {
+            if (state.currentView === "smart-feed" && !state.smartFeedLoading && isTriggerVisible()) {
+                loadNextSmartFeedBatch();
+            }
+        });
         return;
     }
     
@@ -4816,6 +4840,13 @@ async function loadNextSmartFeedBatch() {
         updateStatusText("Ready");
         
         fillSmartFeedPreloadBuffer();
+        
+        // Re-check: if trigger is still visible, load another batch
+        requestAnimationFrame(() => {
+            if (state.currentView === "smart-feed" && !state.smartFeedLoading && isTriggerVisible()) {
+                loadNextSmartFeedBatch();
+            }
+        });
     }
 }
 
