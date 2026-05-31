@@ -2516,7 +2516,7 @@ function openFloatingPlayer(videoId, title = "YouTube Video") {
                 </div>
             </div>
             <div class="floating-player-content">
-                <iframe id="floating-player-iframe" src="" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+                <div id="floating-player-iframe-container" style="width: 100%; height: 100%;"></div>
             </div>
         `;
         document.body.appendChild(player);
@@ -2561,22 +2561,32 @@ function openFloatingPlayer(videoId, title = "YouTube Video") {
         // Buttons
         player.querySelector(".btn-close").addEventListener("click", () => {
             player.style.display = "none";
-            player.querySelector("#floating-player-iframe").src = "";
+            if (window.floatingYtPlayer) {
+                try { window.floatingYtPlayer.destroy(); } catch (e) {}
+                window.floatingYtPlayer = null;
+            }
         });
         
         player.querySelector(".btn-popout").addEventListener("click", () => {
             const currentVideoId = player.dataset.videoId;
             if (currentVideoId) {
-                window.open(`https://www.youtube.com/watch?v=${currentVideoId}`, "_blank");
+                const popupWidth = 800;
+                const popupHeight = 800;
+                const left = window.screenX + window.outerWidth;
+                const top = window.screenY;
+                window.open(`https://www.youtube.com/watch?v=${currentVideoId}`, "YouTubePopup", `width=${popupWidth},height=${popupHeight},left=${left},top=${top},resizable=yes,scrollbars=yes`);
+                
                 player.style.display = "none";
-                player.querySelector("#floating-player-iframe").src = "";
+                if (window.floatingYtPlayer) {
+                    try { window.floatingYtPlayer.destroy(); } catch (e) {}
+                    window.floatingYtPlayer = null;
+                }
             }
         });
     }
     
     player.dataset.videoId = videoId;
     player.querySelector("#floating-player-title").textContent = title;
-    player.querySelector("#floating-player-iframe").src = `https://www.youtube.com/embed/${videoId}?autoplay=1`;
     player.style.display = "flex";
     
     if (!player.style.transform && !player.style.left) {
@@ -2584,6 +2594,46 @@ function openFloatingPlayer(videoId, title = "YouTube Video") {
         player.style.left = "50%";
         player.style.top = "50%";
     }
+    
+    const contentDiv = player.querySelector(".floating-player-content");
+    contentDiv.innerHTML = '<div id="floating-player-iframe-container" style="width: 100%; height: 100%;"></div>';
+    
+    loadYouTubeApi().then((YT) => {
+        if (window.floatingYtPlayer) {
+            try { window.floatingYtPlayer.destroy(); } catch (e) {}
+            window.floatingYtPlayer = null;
+        }
+
+        window.floatingYtPlayer = new YT.Player('floating-player-iframe-container', {
+            height: '100%',
+            width: '100%',
+            videoId: videoId,
+            playerVars: {
+                autoplay: 1,
+                rel: 0,
+                modestbranding: 1,
+                playsinline: 1
+            },
+            events: {
+                onError: (event) => {
+                    console.warn(`[Floating Player] YouTube embed failed with error code ${event.data} for ${videoId}`);
+                    showToast("YouTube embed restricted. Auto-opening in new window...", "warning");
+                    
+                    const popupWidth = 800;
+                    const popupHeight = 800;
+                    const left = window.screenX + window.outerWidth;
+                    const top = window.screenY;
+                    window.open(`https://www.youtube.com/watch?v=${videoId}`, "YouTubePopup", `width=${popupWidth},height=${popupHeight},left=${left},top=${top},resizable=yes,scrollbars=yes`);
+                    
+                    player.style.display = "none";
+                    if (window.floatingYtPlayer) {
+                        try { window.floatingYtPlayer.destroy(); } catch (e) {}
+                        window.floatingYtPlayer = null;
+                    }
+                }
+            }
+        });
+    });
 }
 
 // Display Video in Inline Player (above feed, no overlay)
