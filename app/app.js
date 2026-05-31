@@ -649,6 +649,16 @@ function setupEventListeners() {
         saveTopics();
         document.getElementById("input-topic-phrase").value = "";
         renderTopicsList();
+        
+        // If a positive topic was added, seed the smart feed pipeline
+        if (weight > 0) {
+            if (!state.smartFeedTopicsQueue.includes(phrase)) {
+                state.smartFeedTopicsQueue.push(phrase);
+            }
+            // Kick the preloader + brainstormer if this is among the first topics
+            fillSmartFeedPreloadBuffer();
+            generateBrainstormTopics(true, 1);
+        }
     });
 
     // Block channel input
@@ -4138,6 +4148,24 @@ async function generateSimilarTopicsFromSearch(searchQuery) {
     if (!searchQuery) return;
     console.log(`[Smart Feed] Background similar topics generation started for query: "${searchQuery}"`);
     
+    // On a fresh profile, the search query itself becomes the first positive topic
+    const searchNormalized = searchQuery.trim().toLowerCase();
+    const existsAsPositive = state.topics.some(t => t.phrase.toLowerCase() === searchNormalized && t.weight > 0);
+    if (!existsAsPositive) {
+        const existingIdx = state.topics.findIndex(t => t.phrase.toLowerCase() === searchNormalized);
+        if (existingIdx !== -1) {
+            state.topics[existingIdx].weight = Math.max(state.topics[existingIdx].weight, 5);
+        } else {
+            state.topics.push({ phrase: searchNormalized, weight: 5 });
+        }
+        // Add search query to the smart feed queue as well
+        if (!state.smartFeedTopicsQueue.includes(searchNormalized)) {
+            state.smartFeedTopicsQueue.push(searchNormalized);
+        }
+        saveTopics();
+        console.log(`[Smart Feed] Auto-added search query "${searchNormalized}" as a positive topic for this profile.`);
+    }
+    
     // Truncated context: top 15 liked, last 20 used
     const liked = state.topics.filter(t => t.weight > 0).sort((a, b) => b.weight - a.weight).slice(0, 15).map(t => t.phrase).join(", ");
     const disliked = state.topics.filter(t => t.weight < 0).slice(0, 10).map(t => t.phrase).join(", ");
@@ -4150,7 +4178,7 @@ Disliked: [${disliked}]
 Recently used (avoid these): [${recentUsed}]
 Failed queries (don't reuse these exact phrases): [${burnedList}]
 
-Suggest 5 topics related to "${searchQuery}".`;
+Suggest 50 to 100 topics related to "${searchQuery}".`;
 
     const MAX_RETRIES = 2;
     let attempt = 0;
@@ -4168,7 +4196,7 @@ Suggest 5 topics related to "${searchQuery}".`;
             }
             
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 30000);
+            const timeoutId = setTimeout(() => controller.abort(), 60000);
             const response = await fetch("/vllm/v1/chat/completions", {
                 method: "POST",
                 headers: {
