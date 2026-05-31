@@ -49,7 +49,8 @@ let state = {
     likedVideos: [], // array of video objects liked by the user
     settings: {
         useYtdlp: true,
-        muteShorts: false
+        muteShorts: false,
+        altPlayerInstance: "https://yewtu.be"
     },
     discoverBatchIndex: 0,
     discoverMaxReached: false,
@@ -270,7 +271,10 @@ function loadState() {
     state.blockedChannels = rawBlocked ? JSON.parse(rawBlocked) : [];
     state.likedTopics = rawLiked ? JSON.parse(rawLiked) : [];
     state.dislikedTopics = rawDisliked ? JSON.parse(rawDisliked) : [];
-    state.settings = rawSettings ? JSON.parse(rawSettings) : { useYtdlp: true, muteShorts: false };
+    state.settings = rawSettings ? JSON.parse(rawSettings) : { useYtdlp: true, muteShorts: false, altPlayerInstance: "https://yewtu.be" };
+    if (!state.settings.altPlayerInstance) {
+        state.settings.altPlayerInstance = "https://yewtu.be";
+    }
     state.searchHistory = rawSearchHistory ? JSON.parse(rawSearchHistory) : [];
     state.brainstormTopics = rawBrainstorm ? JSON.parse(rawBrainstorm) : [];
     state.videoRatings = rawVideoRatings ? JSON.parse(rawVideoRatings) : {};
@@ -339,6 +343,10 @@ function loadState() {
     // Set settings toggles UI
     document.getElementById("toggle-use-ytdlp").checked = state.settings.useYtdlp;
     document.getElementById("toggle-mute-shorts").checked = state.settings.muteShorts;
+    const altPlayerInput = document.getElementById("input-alt-player-instance");
+    if (altPlayerInput) {
+        altPlayerInput.value = state.settings.altPlayerInstance || "https://yewtu.be";
+    }
     
     // Update profiles settings UI dropdowns
     renderProfileDropdowns();
@@ -709,6 +717,13 @@ function setupEventListeners() {
         saveSettings();
         renderFeed();
     });
+    const altPlayerInput = document.getElementById("input-alt-player-instance");
+    if (altPlayerInput) {
+        altPlayerInput.addEventListener("input", (e) => {
+            state.settings.altPlayerInstance = e.target.value.trim() || "https://yewtu.be";
+            saveSettings();
+        });
+    }
 
     // Search input handlers
     const searchForm = document.getElementById("search-form");
@@ -2442,7 +2457,10 @@ function playVideo(video) {
             '        <h2 class="player-title"></h2>',
             '        <p class="player-channel"></p>',
             '      </div>',
-            '      <button class="inline-player-close" title="Close Player">✕ Close</button>',
+            '      <div class="player-bar-actions" style="display: flex; gap: 0.75rem; align-items: center;">',
+            '        <button class="btn btn-secondary btn-sm btn-play-alternate" title="Play via Invidious (Bypass Age Restriction)">🌐 Alternate Player</button>',
+            '        <button class="inline-player-close" title="Close Player">✕ Close</button>',
+            '      </div>',
             '    </div>',
             '  </div>',
             '  <div class="inline-player-sidebar">',
@@ -2459,6 +2477,14 @@ function playVideo(video) {
         }
         // Bind close button using querySelector on the element itself
         inlinePlayer.querySelector(".inline-player-close").addEventListener("click", closePlayer);
+        
+        // Bind alternate player button
+        const btnAltPlay = inlinePlayer.querySelector(".btn-play-alternate");
+        if (btnAltPlay) {
+            btnAltPlay.addEventListener("click", () => {
+                playAlternateVideo({ id: state.currentlyPlayingId });
+            });
+        }
     }
 
     // Use querySelector on the player element - never document.getElementById
@@ -2662,6 +2688,33 @@ function playVideo(video) {
     }
 
     renderQueueUI();
+}
+
+function playAlternateVideo(video) {
+    let inlinePlayer = document.getElementById("inline-player");
+    if (!inlinePlayer) return;
+    
+    const playerWrapper = inlinePlayer.querySelector(".player-wrapper-box");
+    if (playerWrapper) {
+        // Destroy YT Player if active
+        if (window.ytPlayer) {
+            try { window.ytPlayer.destroy(); } catch (e) {}
+            window.ytPlayer = null;
+        }
+        
+        const instance = state.settings.altPlayerInstance || "https://yewtu.be";
+        const cleanInstance = instance.replace(/\/$/, "");
+        
+        playerWrapper.innerHTML = `
+            <iframe id="yt-player-element" 
+                    src="${cleanInstance}/embed/${video.id}?autoplay=1" 
+                    style="width: 100%; height: 100%; min-height: 360px; border: none; background: #000;" 
+                    allow="autoplay; encrypted-media; picture-in-picture" 
+                    allowfullscreen>
+            </iframe>`;
+            
+        showToast("Playing via alternative Invidious player...", "info");
+    }
 }
 
 function closePlayer() {
