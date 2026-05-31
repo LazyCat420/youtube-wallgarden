@@ -265,8 +265,8 @@ function loadState() {
     const rawNewsRatings = localStorage.getItem(getStoreKey("news_ratings"));
     const rawQueue = localStorage.getItem(getStoreKey("queue"));
 
-    state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
-    state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
+    state.channels = rawChannels ? JSON.parse(rawChannels) : (currentProfileId === 'default' || currentProfileId === 'incognito' ? JSON.parse(JSON.stringify(DEFAULT_CHANNELS)) : []);
+    state.topics = rawTopics ? JSON.parse(rawTopics) : (currentProfileId === 'default' || currentProfileId === 'incognito' ? JSON.parse(JSON.stringify(DEFAULT_TOPICS)) : []);
     state.blockedChannels = rawBlocked ? JSON.parse(rawBlocked) : [];
     state.likedTopics = rawLiked ? JSON.parse(rawLiked) : [];
     state.dislikedTopics = rawDisliked ? JSON.parse(rawDisliked) : [];
@@ -4946,7 +4946,8 @@ async function editDiscoverTopic(topic) {
 // ============================================================
 
 function saveDiscovered() {
-    localStorage.setItem("wallgarden_discovered_channels", JSON.stringify(state.discoveredChannels));
+    if (isIncognito()) return;
+    localStorage.setItem(getStoreKey("discovered_channels"), JSON.stringify(state.discoveredChannels));
 }
 
 function initDiscoverChannels() {
