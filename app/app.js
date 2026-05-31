@@ -1757,6 +1757,7 @@ function createVideoCard(video) {
             </div>
             <button data-action="play-next">⏳ Play Next</button>
             <button data-action="add-to-queue">➕ Add to Queue</button>
+            <button data-action="open-youtube">📺 Watch on YouTube</button>
             <button data-action="subscribe">${isSubscribed ? '➖ Unsubscribe' : '➕ Subscribe to Channel'}</button>
             <button class="danger" data-action="block">🚫 Block Channel</button>
             <button data-action="remove-topic"${videoTopic ? '' : ' disabled'}>🗑️ Remove Topic${videoTopic ? ': ' + capitalizePhrase(videoTopic) : ''}</button>
@@ -1806,6 +1807,12 @@ function createVideoCard(video) {
             ev.stopPropagation();
             addToQueue(video, false);
             dropdown.remove();
+        });
+
+        dropdown.querySelector('[data-action="open-youtube"]').addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            dropdown.remove();
+            window.open(`https://www.youtube.com/watch?v=${video.id}`, "_blank");
         });
 
         dropdown.querySelector('[data-action="block"]').addEventListener("click", (ev) => {
@@ -2475,6 +2482,7 @@ function playVideo(video) {
             '      </div>',
             '      <div class="player-bar-actions" style="display: flex; gap: 0.75rem; align-items: center;">',
             '        <button class="btn btn-secondary btn-sm btn-play-alternate" title="Play via Invidious (Bypass Age Restriction)">🌐 Alternate Player</button>',
+            '        <button class="btn btn-primary btn-sm btn-open-youtube" title="Open Video on YouTube (New Tab)">📺 Watch on YouTube</button>',
             '        <button class="inline-player-close" title="Close Player">✕ Close</button>',
             '      </div>',
             '    </div>',
@@ -2499,6 +2507,16 @@ function playVideo(video) {
         if (btnAltPlay) {
             btnAltPlay.addEventListener("click", () => {
                 playAlternateVideo({ id: state.currentlyPlayingId });
+            });
+        }
+
+        // Bind open on YouTube button
+        const btnOpenYoutube = inlinePlayer.querySelector(".btn-open-youtube");
+        if (btnOpenYoutube) {
+            btnOpenYoutube.addEventListener("click", () => {
+                if (state.currentlyPlayingId) {
+                    window.open(`https://www.youtube.com/watch?v=${state.currentlyPlayingId}`, "_blank");
+                }
             });
         }
     }
