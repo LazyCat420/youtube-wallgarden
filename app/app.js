@@ -225,7 +225,11 @@ function loadState() {
     const rawActiveProfile = localStorage.getItem("wallgarden_active_profile_id");
     const rawProfiles = localStorage.getItem("wallgarden_profiles");
     
-    if (rawProfiles) allProfiles = JSON.parse(rawProfiles);
+    if (rawProfiles) {
+        allProfiles = JSON.parse(rawProfiles);
+    } else {
+        localStorage.setItem("wallgarden_profiles", JSON.stringify(allProfiles));
+    }
     currentProfileId = rawActiveProfile || 'default';
     
     // Set UI
@@ -337,6 +341,110 @@ function loadState() {
 
 function isIncognito() {
     return allProfiles.find(p => p.id === currentProfileId)?.type === 'incognito';
+}
+
+function renderProfilesList() {
+    const container = document.getElementById("profiles-list-container");
+    if (!container) return;
+    container.innerHTML = "";
+
+    allProfiles.forEach(p => {
+        const row = document.createElement("div");
+        row.style.display = "flex";
+        row.style.justifyContent = "space-between";
+        row.style.alignItems = "center";
+        row.style.padding = "0.75rem";
+        row.style.background = "rgba(255, 255, 255, 0.02)";
+        row.style.border = "1px solid var(--card-border)";
+        row.style.borderRadius = "4px";
+        row.style.gap = "1rem";
+
+        const leftDiv = document.createElement("div");
+        leftDiv.style.display = "flex";
+        leftDiv.style.alignItems = "center";
+        leftDiv.style.gap = "0.5rem";
+
+        const nameSpan = document.createElement("span");
+        nameSpan.textContent = p.name;
+        nameSpan.style.fontWeight = "600";
+        nameSpan.style.fontSize = "0.9rem";
+        if (p.id === currentProfileId) {
+            nameSpan.style.color = "var(--accent)";
+            nameSpan.textContent += " (Active)";
+        }
+        leftDiv.appendChild(nameSpan);
+
+        const typeBadge = document.createElement("span");
+        typeBadge.style.fontSize = "0.75rem";
+        typeBadge.style.padding = "0.2rem 0.5rem";
+        typeBadge.style.borderRadius = "3px";
+        if (p.type === 'incognito') {
+            typeBadge.textContent = "🕵️ Incognito";
+            typeBadge.style.background = "rgba(139, 92, 246, 0.2)";
+            typeBadge.style.color = "#C084FC";
+            typeBadge.style.border = "1px solid rgba(139, 92, 246, 0.4)";
+        } else {
+            typeBadge.textContent = "Normal";
+            typeBadge.style.background = "rgba(16, 185, 129, 0.2)";
+            typeBadge.style.color = "#34D399";
+            typeBadge.style.border = "1px solid rgba(16, 185, 129, 0.4)";
+        }
+        leftDiv.appendChild(typeBadge);
+
+        row.appendChild(leftDiv);
+
+        const rightDiv = document.createElement("div");
+        rightDiv.style.display = "flex";
+        rightDiv.style.gap = "0.5rem";
+
+        // Rename Button (disabled for General and Incognito defaults)
+        if (p.id !== 'default' && p.id !== 'incognito') {
+            const btnRename = document.createElement("button");
+            btnRename.className = "btn btn-sm btn-secondary";
+            btnRename.textContent = "✏️ Rename";
+            btnRename.addEventListener("click", () => {
+                const newName = prompt("Enter new name for profile:", p.name);
+                if (newName && newName.trim() && newName.trim() !== p.name) {
+                    p.name = newName.trim();
+                    localStorage.setItem("wallgarden_profiles", JSON.stringify(allProfiles));
+                    renderProfilesList();
+                    loadState(); 
+                }
+            });
+            rightDiv.appendChild(btnRename);
+
+            // Delete Button (disabled for General, Incognito, and active profile)
+            if (p.id !== currentProfileId) {
+                const btnDelete = document.createElement("button");
+                btnDelete.className = "btn btn-sm btn-danger";
+                btnDelete.textContent = "🗑️ Delete";
+                btnDelete.addEventListener("click", () => {
+                    if (confirm(`Are you sure you want to delete profile "${p.name}"? This will permanently wipe all its blocked channels, topics, history, and settings.`)) {
+                        // Clean up localStorage for this profile
+                        const storageBases = [
+                            "channels", "topics", "blocked_channels", "cache", "settings",
+                            "search_history", "brainstorm_topics", "video_ratings", "discovered_channels",
+                            "smart_feed_pool", "liked_topics", "disliked_topics", "burned_queries",
+                            "playlists", "liked_videos", "news_ratings", "queue"
+                        ];
+                        storageBases.forEach(base => {
+                            localStorage.removeItem(`wallgarden_${p.id}_${base}`);
+                        });
+
+                        allProfiles = allProfiles.filter(prof => prof.id !== p.id);
+                        localStorage.setItem("wallgarden_profiles", JSON.stringify(allProfiles));
+                        
+                        renderProfilesList();
+                        loadState();
+                    }
+                });
+                rightDiv.appendChild(btnDelete);
+            }
+        }
+
+        row.appendChild(rightDiv);
+        container.appendChild(row);
+    });
 }
 
 function saveSettings() {
@@ -487,16 +595,9 @@ function setupEventListeners() {
     if (profileSelector) {
         profileSelector.addEventListener("change", (e) => {
             if (e.target.value === "add_new") {
-                const name = prompt('Enter new profile name:');
-                if (name && name.trim()) {
-                    const id = 'profile_' + Date.now();
-                    allProfiles.push({ id, name: name.trim(), type: 'normal' });
-                    localStorage.setItem("wallgarden_profiles", JSON.stringify(allProfiles));
-                    localStorage.setItem("wallgarden_active_profile_id", id);
-                    location.reload();
-                } else {
-                    e.target.value = currentProfileId;
-                }
+                e.target.value = currentProfileId; // reset selector
+                const manageBtn = document.getElementById("btn-manage-profiles");
+                if (manageBtn) manageBtn.click();
                 return;
             }
             
@@ -526,9 +627,74 @@ function setupEventListeners() {
         renderTopicsList();
         renderBlockedList();
         renderPreferencesLists();
+        renderProfilesList();
         document.getElementById("search-results-container").classList.add("hidden");
         settingsModal.classList.remove("hidden");
     });
+
+    // Manage Profiles Button (Gear icon next to selector)
+    const btnManageProfiles = document.getElementById("btn-manage-profiles");
+    if (btnManageProfiles) {
+        btnManageProfiles.addEventListener("click", () => {
+            closeMobileSidebar();
+            renderChannelsList();
+            renderTopicsList();
+            renderBlockedList();
+            renderPreferencesLists();
+            renderProfilesList();
+            document.getElementById("search-results-container").classList.add("hidden");
+            if (settingsModal) settingsModal.classList.remove("hidden");
+            
+            // Switch tab to profiles tab
+            document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+            document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
+            
+            const profilesTabBtn = document.querySelector('[data-tab="tab-profiles"]');
+            if (profilesTabBtn) profilesTabBtn.classList.add("active");
+            const profilesTabContent = document.getElementById("tab-profiles");
+            if (profilesTabContent) profilesTabContent.classList.add("active");
+        });
+    }
+
+    // Profiles Tab button click to refresh list
+    const profilesTabBtn = document.querySelector('[data-tab="tab-profiles"]');
+    if (profilesTabBtn) {
+        profilesTabBtn.addEventListener("click", () => {
+            renderProfilesList();
+        });
+    }
+
+    // Create Profile Button in tab-profiles
+    const btnCreateProfile = document.getElementById("btn-create-profile");
+    if (btnCreateProfile) {
+        btnCreateProfile.addEventListener("click", () => {
+            const nameInput = document.getElementById("input-new-profile-name");
+            const typeSelect = document.getElementById("select-new-profile-type");
+            if (!nameInput || !typeSelect) return;
+
+            const name = nameInput.value.trim();
+            const type = typeSelect.value;
+
+            if (!name) {
+                alert("Please enter a profile name.");
+                return;
+            }
+
+            // Check for duplicate names
+            if (allProfiles.some(p => p.name.toLowerCase() === name.toLowerCase())) {
+                alert("A profile with that name already exists. Please choose a different name.");
+                return;
+            }
+
+            const id = 'profile_' + Date.now();
+            allProfiles.push({ id, name, type });
+            localStorage.setItem("wallgarden_profiles", JSON.stringify(allProfiles));
+            localStorage.setItem("wallgarden_active_profile_id", id);
+            
+            nameInput.value = "";
+            location.reload();
+        });
+    }
     btnCloseSettings.addEventListener("click", () => {
         settingsModal.classList.add("hidden");
         document.getElementById("search-results-container").classList.add("hidden");
