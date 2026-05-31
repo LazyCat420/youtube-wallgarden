@@ -2511,7 +2511,7 @@ function openFloatingPlayer(videoId, title = "YouTube Video") {
             <div class="floating-player-header" id="floating-player-header">
                 <div class="floating-player-title" id="floating-player-title"></div>
                 <div class="floating-player-actions">
-                    <button class="btn-popout" title="Open in new window">↗</button>
+                    <button class="btn-popout" title="Open full YouTube site (use if restricted)">↗ Popout</button>
                     <button class="btn-close" title="Close">✕</button>
                 </div>
             </div>
