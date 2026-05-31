@@ -64,7 +64,9 @@ let state = {
     smartFeedPreloadedVideos: [], // kept as reference/compat if needed
     smartFeedPreloadLoading: false,
     smartFeedSuggestionPool: [],
-    burnedQueries: [] // Rolling list of nuked topic queries the LLM should avoid re-suggesting
+    burnedQueries: [], // Rolling list of nuked topic queries the LLM should avoid re-suggesting
+    profiles: ["default"],
+    currentProfile: "default"
 };
 
 const DISCOVER_BATCH_SIZE = 30;
@@ -131,10 +133,12 @@ document.addEventListener("DOMContentLoaded", () => {
     // Unconditionally auto-sync feeds when the page is loaded/refreshed
     syncFeeds();
 
-    // Unconditionally run background brainstorm topics on load to populate the feed and hit vLLM
+    // Run background brainstorm topics on load to populate the feed and hit vLLM (if positive topics exist)
     setTimeout(() => {
-        console.log("[Smart Feed] Launch brainstorm started...");
-        generateBrainstormTopics(true, 1); // Appends new topics with 1 request
+        if (state.topics.filter(t => t.weight > 0).length > 0) {
+            console.log("[Smart Feed] Launch brainstorm started...");
+            generateBrainstormTopics(true, 1); // Appends new topics with 1 request
+        }
     }, 1000);
 });
 
@@ -202,29 +206,67 @@ function renderSearchSuggestions() {
     });
 }
 
+// Helper to get profile-prefixed key for localstorage
+function getProfileKey(key) {
+    if (!state.currentProfile || state.currentProfile === "default") {
+        return `wallgarden_default_${key}`;
+    }
+    return `wallgarden_${state.currentProfile}_${key}`;
+}
+
+// Load profiles list and current profile
+function initProfiles() {
+    const rawProfiles = localStorage.getItem("wallgarden_profiles");
+    state.profiles = rawProfiles ? JSON.parse(rawProfiles) : ["default"];
+    
+    const rawCurrentProfile = localStorage.getItem("wallgarden_current_profile");
+    state.currentProfile = rawCurrentProfile || "default";
+    if (!state.profiles.includes(state.currentProfile)) {
+        state.currentProfile = "default";
+    }
+}
+
 // Load variables from Local Storage
 function loadState() {
-    const rawChannels = localStorage.getItem("wallgarden_channels");
-    const rawTopics = localStorage.getItem("wallgarden_topics");
-    const rawBlocked = localStorage.getItem("wallgarden_blocked_channels");
-    const rawCache = localStorage.getItem("wallgarden_cache");
-    const rawSettings = localStorage.getItem("wallgarden_settings");
-    const rawSearchHistory = localStorage.getItem("wallgarden_search_history");
-    const rawBrainstorm = localStorage.getItem("wallgarden_brainstorm_topics");
-    const rawVideoRatings = localStorage.getItem("wallgarden_video_ratings");
-    const rawDiscovered = localStorage.getItem("wallgarden_discovered_channels");
-    const rawPool = localStorage.getItem("wallgarden_smart_feed_pool");
+    initProfiles();
+    
+    // Migration helper
+    function getStoredItem(key) {
+        const prefixedKey = getProfileKey(key);
+        let val = localStorage.getItem(prefixedKey);
+        if (val === null && state.currentProfile === "default") {
+            // Check legacy un-prefixed key
+            const legacyVal = localStorage.getItem(`wallgarden_${key}`);
+            if (legacyVal !== null) {
+                console.log(`[Profile Migration] Migrating legacy key wallgarden_${key} to ${prefixedKey}`);
+                localStorage.setItem(prefixedKey, legacyVal);
+                val = legacyVal;
+            }
+        }
+        return val;
+    }
 
-    const rawLiked = localStorage.getItem("wallgarden_liked_topics");
-    const rawDisliked = localStorage.getItem("wallgarden_disliked_topics");
-    const rawBurned = localStorage.getItem("wallgarden_burned_queries");
-    const rawPlaylists = localStorage.getItem("wallgarden_playlists");
-    const rawLikedVideos = localStorage.getItem("wallgarden_liked_videos");
-    const rawNewsRatings = localStorage.getItem("wallgarden_news_ratings");
-    const rawQueue = localStorage.getItem("wallgarden_queue");
+    const rawChannels = getStoredItem("channels");
+    const rawTopics = getStoredItem("topics");
+    const rawBlocked = getStoredItem("blocked_channels");
+    const rawCache = getStoredItem("cache");
+    const rawSettings = getStoredItem("settings");
+    const rawSearchHistory = getStoredItem("search_history");
+    const rawBrainstorm = getStoredItem("brainstorm_topics");
+    const rawVideoRatings = getStoredItem("video_ratings");
+    const rawDiscovered = getStoredItem("discovered_channels");
+    const rawPool = getStoredItem("smart_feed_pool");
+    const rawLiked = getStoredItem("liked_topics");
+    const rawDisliked = getStoredItem("disliked_topics");
+    const rawBurned = getStoredItem("burned_queries");
+    const rawPlaylists = getStoredItem("playlists");
+    const rawLikedVideos = getStoredItem("liked_videos");
+    const rawNewsRatings = getStoredItem("news_ratings");
+    const rawQueue = getStoredItem("queue");
 
-    state.channels = rawChannels ? JSON.parse(rawChannels) : [...DEFAULT_CHANNELS];
-    state.topics = rawTopics ? JSON.parse(rawTopics) : [...DEFAULT_TOPICS];
+    // Standard profile initialization - a fresh profile has NO topics and NO channels!
+    state.channels = rawChannels ? JSON.parse(rawChannels) : (state.currentProfile === "default" ? [...DEFAULT_CHANNELS] : []);
+    state.topics = rawTopics ? JSON.parse(rawTopics) : (state.currentProfile === "default" ? [...DEFAULT_TOPICS] : []);
     state.blockedChannels = rawBlocked ? JSON.parse(rawBlocked) : [];
     state.likedTopics = rawLiked ? JSON.parse(rawLiked) : [];
     state.dislikedTopics = rawDisliked ? JSON.parse(rawDisliked) : [];
@@ -247,8 +289,10 @@ function loadState() {
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
+    } else {
+        state.cache = { videos: {}, lastSync: 0 };
     }
-
+    
     // Discard expired cached suggestions older than 14 days
     const fourteenDaysAgo = Date.now() - (14 * 24 * 60 * 60 * 1000);
     const initialPoolSize = state.smartFeedSuggestionPool.length;
@@ -284,10 +328,10 @@ function loadState() {
         saveCache();
     }
     
-    // Save defaults back to storage if they were missing
-    if (!rawChannels) saveChannels();
-    if (!rawTopics) saveTopics();
-    if (!rawBlocked) saveBlocked();
+    // Save defaults back to storage if they were missing (only for default profile or custom profile with values)
+    if (!rawChannels && state.currentProfile === "default") saveChannels();
+    if (!rawTopics && state.currentProfile === "default") saveTopics();
+    if (!rawBlocked && state.currentProfile === "default") saveBlocked();
 
     document.getElementById("subscribed-count").textContent = state.channels.length;
     document.getElementById("blocked-count").textContent = state.blockedChannels.length;
@@ -295,59 +339,62 @@ function loadState() {
     // Set settings toggles UI
     document.getElementById("toggle-use-ytdlp").checked = state.settings.useYtdlp;
     document.getElementById("toggle-mute-shorts").checked = state.settings.muteShorts;
+    
+    // Update profiles settings UI dropdowns
+    renderProfileDropdowns();
 }
 
 function saveSettings() {
-    localStorage.setItem("wallgarden_settings", JSON.stringify(state.settings));
+    localStorage.setItem(getProfileKey("settings"), JSON.stringify(state.settings));
 }
 
 function saveBlocked() {
-    localStorage.setItem("wallgarden_blocked_channels", JSON.stringify(state.blockedChannels));
+    localStorage.setItem(getProfileKey("blocked_channels"), JSON.stringify(state.blockedChannels));
     document.getElementById("blocked-count").textContent = state.blockedChannels.length;
 }
 
 // Save helpers
 function saveChannels() {
-    localStorage.setItem("wallgarden_channels", JSON.stringify(state.channels));
+    localStorage.setItem(getProfileKey("channels"), JSON.stringify(state.channels));
     document.getElementById("subscribed-count").textContent = state.channels.length;
 }
 
 function saveTopics() {
-    localStorage.setItem("wallgarden_topics", JSON.stringify(state.topics));
+    localStorage.setItem(getProfileKey("topics"), JSON.stringify(state.topics));
 }
 
 function saveLikedTopics() {
-    localStorage.setItem("wallgarden_liked_topics", JSON.stringify(state.likedTopics));
+    localStorage.setItem(getProfileKey("liked_topics"), JSON.stringify(state.likedTopics));
 }
 
 function saveDislikedTopics() {
-    localStorage.setItem("wallgarden_disliked_topics", JSON.stringify(state.dislikedTopics));
+    localStorage.setItem(getProfileKey("disliked_topics"), JSON.stringify(state.dislikedTopics));
 }
 
 function saveCache() {
-    localStorage.setItem("wallgarden_cache", JSON.stringify(state.cache));
+    localStorage.setItem(getProfileKey("cache"), JSON.stringify(state.cache));
 }
 
 function saveVideoRatings() {
-    localStorage.setItem("wallgarden_video_ratings", JSON.stringify(state.videoRatings));
+    localStorage.setItem(getProfileKey("video_ratings"), JSON.stringify(state.videoRatings));
 }
 function saveNewsRatings() {
-    localStorage.setItem("wallgarden_news_ratings", JSON.stringify(state.newsSourceRatings));
+    localStorage.setItem(getProfileKey("news_ratings"), JSON.stringify(state.newsSourceRatings));
 }
 function saveLikedVideos() {
-    localStorage.setItem("wallgarden_liked_videos", JSON.stringify(state.likedVideos));
+    localStorage.setItem(getProfileKey("liked_videos"), JSON.stringify(state.likedVideos));
 }
 
 function saveSearchHistory() {
-    localStorage.setItem("wallgarden_search_history", JSON.stringify(state.searchHistory));
+    localStorage.setItem(getProfileKey("search_history"), JSON.stringify(state.searchHistory));
 }
 
 function saveSmartFeedSuggestionPool() {
-    localStorage.setItem("wallgarden_smart_feed_pool", JSON.stringify(state.smartFeedSuggestionPool));
+    localStorage.setItem(getProfileKey("smart_feed_pool"), JSON.stringify(state.smartFeedSuggestionPool));
 }
 
 function saveBurnedQueries() {
-    localStorage.setItem("wallgarden_burned_queries", JSON.stringify(state.burnedQueries));
+    localStorage.setItem(getProfileKey("burned_queries"), JSON.stringify(state.burnedQueries));
 }
 function savePlaylists() {
     if (state.playlists) {
@@ -355,11 +402,16 @@ function savePlaylists() {
             if (pl && !pl.videos) pl.videos = [];
         });
     }
-    localStorage.setItem("wallgarden_playlists", JSON.stringify(state.playlists));
+    localStorage.setItem(getProfileKey("playlists"), JSON.stringify(state.playlists));
+}
+
+// Save discovered channels helper (profile-aware)
+function saveDiscovered() {
+    localStorage.setItem(getProfileKey("discovered_channels"), JSON.stringify(state.discoveredChannels));
 }
 
 function saveQueue() {
-    localStorage.setItem("wallgarden_queue", JSON.stringify(state.queue));
+    localStorage.setItem(getProfileKey("queue"), JSON.stringify(state.queue));
 }
 
 function getCachedVideosCount() {
@@ -782,6 +834,186 @@ function setupEventListeners() {
             legacyTopicSearchInput.value = "";
             clearLegacyTopicSearchBtn.classList.add("hidden");
             renderTopicsList();
+        });
+    }
+
+    // Setup Profiles UI Event Listeners
+    setupProfilesUI();
+}
+
+// Render profile options inside Settings tab dropdowns
+function renderProfileDropdowns() {
+    const selectActive = document.getElementById("select-active-profile");
+    const selectDelete = document.getElementById("select-delete-profile");
+    if (!selectActive || !selectDelete) return;
+
+    selectActive.innerHTML = "";
+    selectDelete.innerHTML = "";
+
+    state.profiles.forEach(p => {
+        const optActive = document.createElement("option");
+        optActive.value = p;
+        optActive.textContent = p === "default" ? "Default Profile" : p;
+        optActive.selected = (p === state.currentProfile);
+        selectActive.appendChild(optActive);
+
+        if (p !== state.currentProfile) {
+            const optDelete = document.createElement("option");
+            optDelete.value = p;
+            optDelete.textContent = p === "default" ? "Default Profile" : p;
+            selectDelete.appendChild(optDelete);
+        }
+    });
+}
+
+// Switch active profile
+function switchProfile(profileName) {
+    if (!state.profiles.includes(profileName)) return;
+    
+    console.log(`[Profiles] Switching from ${state.currentProfile} to ${profileName}`);
+    
+    // Save current profile settings/state
+    saveSettings();
+    saveBlocked();
+    saveChannels();
+    saveTopics();
+    saveLikedTopics();
+    saveDislikedTopics();
+    saveCache();
+    saveVideoRatings();
+    saveNewsRatings();
+    saveLikedVideos();
+    saveSearchHistory();
+    saveSmartFeedSuggestionPool();
+    saveBurnedQueries();
+    savePlaylists();
+    saveQueue();
+    saveDiscovered();
+
+    // Set new current profile
+    state.currentProfile = profileName;
+    localStorage.setItem("wallgarden_current_profile", profileName);
+
+    // Reset Smart Feed transient state
+    state.smartFeedVideos = [];
+    state.smartFeedSuggestionPool = [];
+    state.smartFeedTopicsQueue = [];
+    state.smartFeedUsedTopics = [];
+    state.smartFeedInitialized = false;
+
+    // Load new profile state
+    loadState();
+
+    // Reset views and clear grid
+    state.currentView = "smart-feed";
+    state.searchQuery = "";
+    const searchInput = document.getElementById("input-search-videos");
+    if (searchInput) searchInput.value = "";
+    
+    document.querySelectorAll(".nav-item").forEach(btn => {
+        if (btn.dataset.view === "smart-feed") btn.classList.add("active");
+        else btn.classList.remove("active");
+    });
+    
+    const titleEl = document.getElementById("current-view-title");
+    if (titleEl) titleEl.textContent = "Smart Feed";
+
+    // Close settings modal to show the fresh feed
+    const modal = document.getElementById("settings-modal");
+    if (modal) modal.classList.add("hidden");
+
+    showToast(`👤 Switched profile to: ${profileName === "default" ? "Default" : profileName}`, "success");
+    
+    // Re-render feed and trigger background preload if there are topics
+    renderFeed();
+    renderSearchSuggestions();
+    
+    if (state.topics.filter(t => t.weight > 0).length > 0) {
+        initSmartFeed();
+    }
+}
+
+// Create new profile
+function createProfile(profileName) {
+    profileName = profileName.trim().replace(/[^a-zA-Z0-9_\s-]/g, "");
+    if (!profileName) {
+        showToast("❌ Profile name cannot be empty or contain special characters.", "danger");
+        return;
+    }
+    
+    const profileKey = profileName.toLowerCase();
+    if (state.profiles.includes(profileKey)) {
+        showToast(`❌ Profile "${profileName}" already exists.`, "danger");
+        return;
+    }
+
+    state.profiles.push(profileKey);
+    localStorage.setItem("wallgarden_profiles", JSON.stringify(state.profiles));
+    
+    // Switch to new profile
+    switchProfile(profileKey);
+    showToast(`🌱 Created and switched to profile: ${profileName}`, "success");
+}
+
+// Delete profile
+function deleteProfile(profileName) {
+    if (profileName === "default" || profileName === state.currentProfile) {
+        showToast("❌ Cannot delete the default or active profile.", "danger");
+        return;
+    }
+
+    if (!confirm(`Are you sure you want to permanently delete profile "${profileName}"? This will nuke all its data.`)) {
+        return;
+    }
+
+    // Remove from profiles list
+    state.profiles = state.profiles.filter(p => p !== profileName);
+    localStorage.setItem("wallgarden_profiles", JSON.stringify(state.profiles));
+
+    // Remove all associated keys from localStorage
+    const keysToRemove = [
+        "channels", "topics", "blocked_channels", "cache", "settings",
+        "search_history", "brainstorm_topics", "video_ratings",
+        "discovered_channels", "smart_feed_pool", "liked_topics",
+        "disliked_topics", "burned_queries", "playlists", "liked_videos",
+        "news_ratings", "queue"
+    ];
+    keysToRemove.forEach(k => {
+        localStorage.removeItem(`wallgarden_${profileName}_${k}`);
+    });
+
+    renderProfileDropdowns();
+    showToast(`🗑️ Deleted profile "${profileName}"`, "info");
+}
+
+// Setup Profiles Event Listeners
+function setupProfilesUI() {
+    const btnSwitch = document.getElementById("btn-switch-profile");
+    const btnCreate = document.getElementById("btn-create-profile");
+    const btnDelete = document.getElementById("btn-delete-profile");
+    const selectActive = document.getElementById("select-active-profile");
+    const selectDelete = document.getElementById("select-delete-profile");
+    const inputNew = document.getElementById("input-new-profile-name");
+
+    if (btnSwitch) {
+        btnSwitch.addEventListener("click", () => {
+            if (selectActive) switchProfile(selectActive.value);
+        });
+    }
+
+    if (btnCreate) {
+        btnCreate.addEventListener("click", () => {
+            if (inputNew) {
+                const name = inputNew.value;
+                createProfile(name);
+                inputNew.value = "";
+            }
+        });
+    }
+
+    if (btnDelete) {
+        btnDelete.addEventListener("click", () => {
+            if (selectDelete) deleteProfile(selectDelete.value);
         });
     }
 }
@@ -1985,6 +2217,22 @@ function renderFeed() {
     
     // Handle Smart Feed (Discovery)
     if (state.currentView === "smart-feed") {
+        if (state.topics.filter(t => t.weight > 0).length === 0) {
+            // Show new profile CTA
+            emptyState.classList.remove("hidden");
+            const emptyIcon = emptyState.querySelector(".empty-icon");
+            const emptyH3 = emptyState.querySelector("h3");
+            const emptyP = emptyState.querySelector("p");
+            if (emptyIcon) emptyIcon.textContent = "🌱";
+            if (emptyH3) emptyH3.textContent = "Welcome to your new profile!";
+            if (emptyP) emptyP.textContent = "Add your first topic in Settings (Topics & Filters) to start discovering videos.";
+            
+            // Hide shelves
+            if (shortsShelf) shortsShelf.classList.add("hidden");
+            if (redditShelf) redditShelf.classList.add("hidden");
+            return;
+        }
+
         const suggestionsHeader = document.createElement("div");
         suggestionsHeader.className = "suggestions-section-header";
         suggestionsHeader.style.gridColumn = "1 / -1";
@@ -3637,7 +3885,8 @@ const TOPIC_TOOL_DEFINITION = {
 };
 
 const BRAINSTORM_SYSTEM_PROMPT = `/no_think
-You are a topic brainstorming assistant. Call the suggest_topics tool with 50 to 100 new topics related to the user's interests.`;
+You are a creative topic brainstorming assistant. Call the suggest_topics tool with 50 to 100 new topics related to the user's interests.
+CRITICAL: Even if the user has very few interests or only a single interest topic, you must brainstorm and generate 50 to 100 diverse, highly-related topics, subcategories, intellectual tangents, and interesting adjacent subjects. Do not fail or return few topics just because the interest graph is small. Expand from what is provided.`;
 
 const SIMILAR_SYSTEM_PROMPT = `/no_think
 You are a search query assistant. Call the suggest_topics tool with 50 to 100 topics related to the user's search query.`;
@@ -4224,6 +4473,11 @@ function pickDiverseBatch(pool, batchSize) {
 async function fillSmartFeedPreloadBuffer() {
     if (state.smartFeedPreloadLoading) return;
     
+    // Do not pre-load if there are no positive topics added yet
+    if (state.topics.filter(t => t.weight > 0).length === 0) {
+        return;
+    }
+    
     // Keep a larger buffer (1000 suggestions) for instant zero-lag loading
     const targetPreloadCount = 1000;
     if (state.smartFeedSuggestionPool.length >= targetPreloadCount) {
@@ -4657,7 +4911,7 @@ async function editDiscoverTopic(topic) {
 // ============================================================
 
 function saveDiscovered() {
-    localStorage.setItem("wallgarden_discovered_channels", JSON.stringify(state.discoveredChannels));
+    localStorage.setItem(getProfileKey("discovered_channels"), JSON.stringify(state.discoveredChannels));
 }
 
 function initDiscoverChannels() {
