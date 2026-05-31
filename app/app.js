@@ -99,9 +99,6 @@ function initSmartFeed() {
     const randomizedTopics = getWeightedRandomTopics(state.topics);
     
     state.smartFeedTopicsQueue = [...randomizedTopics];
-    if (state.smartFeedTopicsQueue.length === 0) {
-        state.smartFeedTopicsQueue = (currentProfileId === 'default' || currentProfileId === 'incognito') ? ["coding", "programming", "ai", "science", "physics"] : [];
-    }
     console.log("[Smart Feed] Initialized with topics queue:", state.smartFeedTopicsQueue);
     
     // Start background preloading
@@ -133,7 +130,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // Unconditionally run background brainstorm topics on load to populate the feed and hit vLLM
     setTimeout(() => {
         console.log("[Smart Feed] Launch brainstorm started...");
-        generateBrainstormTopics(true, 1); // Appends new topics with 1 request
+        generateBrainstormTopics(true, 3); // Appends new topics with 3 parallel requests
     }, 1000);
 });
 
@@ -4014,7 +4011,7 @@ function extractTopicsFromLlmResponse(message) {
     return [];
 }
 
-async function generateBrainstormTopics(append, numRequests = 1) {
+async function generateBrainstormTopics(append, numRequests = 3) {
     if (!state.searchHistory || state.searchHistory.length === 0) {
         console.log("[Smart Feed] Skipping AI brainstorming: Search history is empty on this profile.");
         return;
@@ -4559,7 +4556,7 @@ async function fillSmartFeedPreloadBuffer() {
 
     if (totalUpcoming < 150 && !state.brainstormLoading && !isCooldownActive) {
         console.log("[Smart Feed] Total upcoming topics low, triggering background LLM brainstorm...");
-        generateBrainstormTopics(true, 1).then(() => {
+        generateBrainstormTopics(true, 3).then(() => {
             fillSmartFeedPreloadBuffer();
         });
     }
@@ -4568,9 +4565,6 @@ async function fillSmartFeedPreloadBuffer() {
         console.log("[Smart Feed] Queue is empty! Repopulating from positive topics...");
         const randomizedTopics = getWeightedRandomTopics(state.topics);
         state.smartFeedTopicsQueue = [...randomizedTopics];
-        if (state.smartFeedTopicsQueue.length === 0) {
-            state.smartFeedTopicsQueue = (currentProfileId === 'default' || currentProfileId === 'incognito') ? ["coding", "programming", "ai", "science", "physics"] : [];
-        }
     }
     
     // On cold start (pool empty), fetch multiple topics in parallel for faster population
@@ -4722,9 +4716,6 @@ async function loadNextSmartFeedBatch() {
         const randomizedTopics = getWeightedRandomTopics(state.topics);
         
         state.smartFeedTopicsQueue = [...randomizedTopics];
-        if (state.smartFeedTopicsQueue.length === 0) {
-            state.smartFeedTopicsQueue = (currentProfileId === 'default' || currentProfileId === 'incognito') ? ["coding", "programming", "ai", "science", "physics"] : [];
-        }
         
         generateBrainstormTopics(true);
     }
