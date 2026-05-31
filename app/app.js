@@ -1719,7 +1719,7 @@ function createVideoCard(video) {
         </div>
     `;
     
-    const openAction = () => playVideo(video);
+    const openAction = () => window.open(`https://www.youtube.com/watch?v=${video.id}`, "_blank");
     card.querySelector(".thumbnail-play-overlay").addEventListener("click", openAction);
     card.querySelector(".video-title").addEventListener("click", openAction);
     
@@ -1757,7 +1757,7 @@ function createVideoCard(video) {
             </div>
             <button data-action="play-next">⏳ Play Next</button>
             <button data-action="add-to-queue">➕ Add to Queue</button>
-            <button data-action="open-youtube">📺 Watch on YouTube</button>
+            <button data-action="play-inline">📺 Play Inline</button>
             <button data-action="subscribe">${isSubscribed ? '➖ Unsubscribe' : '➕ Subscribe to Channel'}</button>
             <button class="danger" data-action="block">🚫 Block Channel</button>
             <button data-action="remove-topic"${videoTopic ? '' : ' disabled'}>🗑️ Remove Topic${videoTopic ? ': ' + capitalizePhrase(videoTopic) : ''}</button>
@@ -1809,10 +1809,10 @@ function createVideoCard(video) {
             dropdown.remove();
         });
 
-        dropdown.querySelector('[data-action="open-youtube"]').addEventListener("click", (ev) => {
+        dropdown.querySelector('[data-action="play-inline"]').addEventListener("click", (ev) => {
             ev.stopPropagation();
             dropdown.remove();
-            window.open(`https://www.youtube.com/watch?v=${video.id}`, "_blank");
+            playVideo(video);
         });
 
         dropdown.querySelector('[data-action="block"]').addEventListener("click", (ev) => {
@@ -3780,7 +3780,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
             </div>
         `;
         
-        const openAction = () => playVideo(enrichedVideo);
+        const openAction = () => window.open(`https://www.youtube.com/watch?v=${enrichedVideo.id}`, "_blank");
         card.querySelector(".thumbnail-area").addEventListener("click", openAction);
         card.querySelector(".video-title").addEventListener("click", openAction);
         
@@ -3835,7 +3835,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
             </div>
         `;
         
-        const openAction = () => playVideo(enrichedVideo);
+        const openAction = () => window.open(`https://www.youtube.com/watch?v=${enrichedVideo.id}`, "_blank");
         card.querySelector(".thumbnail-area").addEventListener("click", openAction);
         card.querySelector(".video-title").addEventListener("click", openAction);
         
