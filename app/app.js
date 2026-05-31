@@ -128,13 +128,8 @@ document.addEventListener("DOMContentLoaded", () => {
     // Render cached feed immediately so the UI is active and loads discovery videos
     renderFeed();
     
-    // Auto-sync in the background if cache is empty or older than 1 hour (3600 seconds)
-    const cacheAge = (Date.now() - state.cache.lastSync) / 1000;
-    if (cacheAge > 3600 || getCachedVideosCount() === 0) {
-        syncFeeds(true); // silent background sync
-    } else {
-        updateStatusText(`Loaded from cache (${Math.round(cacheAge/60)}m ago)`);
-    }
+    // Unconditionally auto-sync feeds when the page is loaded/refreshed
+    syncFeeds();
 
     // Unconditionally run background brainstorm topics on load to populate the feed and hit vLLM
     setTimeout(() => {
@@ -436,7 +431,9 @@ function setupEventListeners() {
 
     // Sync button
     const btnSync = document.getElementById("btn-sync-now");
-    btnSync.addEventListener("click", () => syncFeeds());
+    if (btnSync) {
+        btnSync.addEventListener("click", () => syncFeeds());
+    }
 
     // Settings Modal toggles
     const btnOpenSettings = document.getElementById("btn-open-settings");
@@ -995,12 +992,19 @@ function renderFuzzySearchResults(channels) {
     container.classList.remove("hidden");
 }
 
+let isSyncingFeeds = false;
+
 // Fetch Feeds in parallel via Nginx proxy and parse XML
 async function syncFeeds() {
+    if (isSyncingFeeds) {
+        console.log("syncFeeds is already running. Skipping concurrent request.");
+        return;
+    }
     if (state.channels.length === 0) {
         updateStatusText("No channels to sync.");
         return;
     }
+    isSyncingFeeds = true;
 
     // Clear session topic search cache on sync to fetch fresh results next time, but preserve currently loading ones
     for (const key in sessionTopicSearchCache) {
@@ -1010,7 +1014,7 @@ async function syncFeeds() {
     }
 
     const btnSync = document.getElementById("btn-sync-now");
-    btnSync.classList.add("spinning");
+    if (btnSync) btnSync.classList.add("spinning");
     updateStatusText("Syncing RSS Feeds...");
     
     let activeSyncs = 0;
@@ -1178,21 +1182,29 @@ async function syncFeeds() {
         }
     };
     
-    const workers = Array(Math.min(maxConcurrency, channelsToSync.length))
-        .fill(null)
-        .map(() => worker());
+    try {
+        const workers = Array(Math.min(maxConcurrency, channelsToSync.length))
+            .fill(null)
+            .map(() => worker());
+            
+        await Promise.all(workers);
         
-    await Promise.all(workers);
-    
-    state.cache.videos = results;
-    state.cache.lastSync = Date.now();
-    saveCache();
-    saveChannels(); // Updates names if they changed
-    
-    btnSync.classList.remove("spinning");
-    updateStatusText("Synced successfully just now");
-    
-    renderFeed();
+        state.cache.videos = results;
+        state.cache.lastSync = Date.now();
+        saveCache();
+        saveChannels(); // Updates names if they changed
+        
+        updateStatusText("Synced successfully just now");
+        
+        renderFeed();
+    } catch (err) {
+        console.error("Error during syncFeeds:", err);
+        updateStatusText("Sync failed");
+    } finally {
+        isSyncingFeeds = false;
+        const btnSync = document.getElementById("btn-sync-now");
+        if (btnSync) btnSync.classList.remove("spinning");
+    }
 }
 
 // Compute custom interest score for a video
@@ -2633,6 +2645,9 @@ function triggerGlobalSearch(query) {
     
     // Trigger background similar topic generation using LLM
     generateSimilarTopicsFromSearch(query);
+
+    // Auto-sync feeds on search
+    syncFeeds();
 }
 
 // Parse OPML uploaded file and import channels

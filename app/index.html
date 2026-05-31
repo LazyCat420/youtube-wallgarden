@@ -165,8 +165,8 @@
     </style>
 
     <!-- Non-blocking full CSS via preload pattern -->
-    <link rel="preload" href="app.min.css?v=20260531-v33" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="app.min.css?v=20260531-v33"></noscript>
+    <link rel="preload" href="app.min.css?v=20260531-v34" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="app.min.css?v=20260531-v34"></noscript>
 </head>
 <body>
     <div class="app-layout">
@@ -239,10 +239,6 @@
                         <p id="dashboard-status-text" class="status-subtitle">Loading feeds...</p>
                     </div>
                     <div class="header-actions">
-                        <button id="btn-sync-now" class="btn btn-primary btn-icon-only" title="Sync RSS Feeds">
-                            <span class="btn-text">Sync Feeds</span>
-                            <span class="sync-spinner">🔄</span>
-                        </button>
                     </div>
                 </div>
                 <div class="header-search-row">
@@ -393,6 +389,7 @@
                 <div class="settings-tabs">
                     <button class="tab-btn active" data-tab="tab-channels">Channels</button>
                     <button class="tab-btn" data-tab="tab-topics">Topics & Filters</button>
+                    <button class="tab-btn" data-tab="tab-profiles">Profiles</button>
                     <button class="tab-btn" data-tab="tab-export">Backup & Restore</button>
                 </div>
 
@@ -589,6 +586,46 @@
                     </div>
                 </div>
 
+                <!-- Profiles Tab Content -->
+                <div id="tab-profiles" class="tab-content">
+                    <h3>Manage Profiles</h3>
+                    <p class="tab-desc">Switch between profiles or create a new one. Each profile has its own topics, subscriptions, search history, and curation data.</p>
+                    
+                    <div class="profile-actions" style="margin-bottom: 1.5rem;">
+                        <label for="select-active-profile" style="font-weight: 500; display: block; margin-bottom: 0.5rem;">Switch Active Profile</label>
+                        <div class="input-inline">
+                            <select id="select-active-profile" style="flex: 1; padding: 0.5rem; border-radius: 4px; border: 1px solid var(--card-border); background: rgba(0,0,0,0.2); color: var(--text-primary);">
+                                <!-- Populated dynamically -->
+                            </select>
+                            <button id="btn-switch-profile" class="btn btn-primary">Switch Profile</button>
+                        </div>
+                    </div>
+
+                    <hr style="border: none; border-top: 1px solid var(--card-border); margin: 1.5rem 0;">
+
+                    <div class="profile-creation" style="margin-bottom: 1.5rem;">
+                        <label for="input-new-profile-name" style="font-weight: 500; display: block; margin-bottom: 0.5rem;">Create New Profile</label>
+                        <div class="input-inline">
+                            <input type="text" id="input-new-profile-name" placeholder="e.g. Cooking, Gardening, Tech..." style="flex: 1; padding: 0.5rem; border-radius: 4px; border: 1px solid var(--card-border); background: rgba(0,0,0,0.2); color: var(--text-primary);">
+                            <button id="btn-create-profile" class="btn btn-primary">Create Profile</button>
+                        </div>
+                        <p class="input-hint">New profiles start completely fresh with no topics or subscriptions.</p>
+                    </div>
+
+                    <hr style="border: none; border-top: 1px solid var(--card-border); margin: 1.5rem 0;">
+
+                    <div class="profile-deletion">
+                        <label for="select-delete-profile" style="font-weight: 500; display: block; margin-bottom: 0.5rem;">Delete Profile</label>
+                        <div class="input-inline">
+                            <select id="select-delete-profile" style="flex: 1; padding: 0.5rem; border-radius: 4px; border: 1px solid var(--card-border); background: rgba(0,0,0,0.2); color: var(--text-primary);">
+                                <!-- Populated dynamically -->
+                            </select>
+                            <button id="btn-delete-profile" class="btn btn-danger">Delete Profile</button>
+                        </div>
+                        <p class="input-hint">Deleting a profile permanently removes all of its topics, subscriptions, and history. You cannot delete the active profile.</p>
+                    </div>
+                </div>
+
                 <!-- Backup & Restore Tab Content -->
                 <div id="tab-export" class="tab-content">
                     <p class="tab-desc">Export your configurations (channels, topic weights, settings) as a backup file, or restore them onto another device.</p>
@@ -626,6 +663,6 @@
         </div>
     </div>
 
-    <script src="app.min.js?v=20260531-v33" defer></script>
+    <script src="app.min.js?v=20260531-v34" defer></script>
 </body>
 </html>
