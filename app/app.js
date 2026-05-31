@@ -3948,10 +3948,10 @@ const SIMILAR_TOOL_DEFINITION = {
 };
 
 const BRAINSTORM_SYSTEM_PROMPT = `/no_think
-You are a topic brainstorming assistant. Call the suggest_topics tool with 10 to 100 new topics related to the user's interests.`;
+You are a topic brainstorming assistant. Call the suggest_topics tool with 10 to 100 new topics based on the user's interests and search history. Focus strictly on topics that align with the user's profile interests, and do not fall back to generic programming or AI topics unless they are directly related.`;
 
 const SIMILAR_SYSTEM_PROMPT = `/no_think
-You are a search query assistant. Call the suggest_topics tool with 5 to 10 topics related to the user's search query.`;
+You are a search query assistant. Call the suggest_topics tool to generate a list of 5 to 10 topics directly related to the user's search query. Focus strictly on synonyms, subcategories, closely related concepts, or branches of the search query. Do not suggest generic, unrelated topics (such as coding, programming, or AI) unless they are directly relevant to the query itself.`;
 
 async function fetchLlmModel() {
     try {
