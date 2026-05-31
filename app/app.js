@@ -3133,7 +3133,6 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                             grid.appendChild(endMsg);
                         }
                         console.log("[Search Debug] Infinite scroll batch complete. Skipping full renderFeed().");
-                        setTimeout(setupInfiniteScroll, 100);
                     } else {
                         // Initial batch — do a full render to set up the grid layout
                         console.log("[Search Debug] Initial batch complete. Performing final renderFeed().");
@@ -3534,66 +3533,8 @@ function handleTriggerIntersection() {
     fetchTopicSearchDiscovery(queryTerm, offset);
 }
 
-function setupFeedResizer() {
-    const resizer = document.getElementById("feed-resizer");
-    if (!resizer) return;
-
-    let isResizing = false;
-    
-    resizer.addEventListener("mousedown", (e) => {
-        isResizing = true;
-        document.body.style.cursor = "col-resize";
-        document.body.classList.add("is-resizing");
-        resizer.classList.add("active");
-        e.preventDefault();
-    });
-
-    window.addEventListener("mousemove", (e) => {
-        if (!isResizing) return;
-        const mainContent = document.querySelector(".main-content");
-        if (!mainContent) return;
-        
-        const containerRect = mainContent.getBoundingClientRect();
-        let newWidth = containerRect.right - e.clientX;
-        
-        if (newWidth < 300) newWidth = 300;
-        const maxWidth = containerRect.width * 0.7;
-        if (newWidth > maxWidth) newWidth = maxWidth;
-        
-        mainContent.style.setProperty("--feed-width", `${newWidth}px`);
-    });
-
-    window.addEventListener("mouseup", () => {
-        if (isResizing) {
-            isResizing = false;
-            document.body.style.cursor = "";
-            document.body.classList.remove("is-resizing");
-            resizer.classList.remove("active");
-            
-            const mainContent = document.querySelector(".main-content");
-            if (mainContent) {
-                const newWidth = mainContent.style.getPropertyValue("--feed-width");
-                if (newWidth) {
-                    localStorage.setItem("wallgarden_feed_width", newWidth);
-                }
-            }
-        }
-    });
-    
-    const savedWidth = localStorage.getItem("wallgarden_feed_width");
-    if (savedWidth) {
-        const mainContent = document.querySelector(".main-content");
-        if (mainContent) {
-            mainContent.style.setProperty("--feed-width", savedWidth);
-        }
-    }
-}
-
-// Initialize on load
-document.addEventListener("DOMContentLoaded", () => {
-    setupInfiniteScroll();
-    setupFeedResizer();
-});
+// Initialize infinite scroll on load
+document.addEventListener("DOMContentLoaded", setupInfiniteScroll);
 
 // Robust JSON Parsing Utilities for LLM Responses
 function extractJsonFromText(text) {
@@ -4430,7 +4371,6 @@ async function loadNextSmartFeedBatch() {
         
         // Trigger preloader asynchronously in background to replenish pool
         fillSmartFeedPreloadBuffer();
-        setTimeout(setupInfiniteScroll, 100);
         return;
     }
     
@@ -4510,7 +4450,6 @@ async function loadNextSmartFeedBatch() {
         updateStatusText("Ready");
         
         fillSmartFeedPreloadBuffer();
-        setTimeout(setupInfiniteScroll, 100);
     }
 }
 
