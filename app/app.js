@@ -3908,7 +3908,7 @@ const TOPIC_TOOL_DEFINITION = {
                         },
                         required: ["phrase", "category", "reason", "associated_with"]
                     },
-                    minItems: 50,
+                    minItems: 10,
                     maxItems: 100
                 }
             },
@@ -3917,11 +3917,41 @@ const TOPIC_TOOL_DEFINITION = {
     }
 };
 
+// Tool definition for structured search query topic generation
+const SIMILAR_TOOL_DEFINITION = {
+    type: "function",
+    function: {
+        name: "suggest_topics",
+        description: "Suggest new topics related to the search query. Each topic should be 1-3 words.",
+        parameters: {
+            type: "object",
+            properties: {
+                topics: {
+                    type: "array",
+                    items: {
+                        type: "object",
+                        properties: {
+                            phrase: { type: "string", description: "1-3 word topic name, e.g. 'citrus fruit'" },
+                            category: { type: "string", enum: ["sub_category", "similar", "interesting_tangent", "unrelated_but_interesting"] },
+                            reason: { type: "string", description: "Short explanation of why this topic is suggested" },
+                            associated_with: { type: "string", description: "The search query this connects to" }
+                        },
+                        required: ["phrase", "category", "reason", "associated_with"]
+                    },
+                    minItems: 5,
+                    maxItems: 10
+                }
+            },
+            required: ["topics"]
+        }
+    }
+};
+
 const BRAINSTORM_SYSTEM_PROMPT = `/no_think
-You are a topic brainstorming assistant. Call the suggest_topics tool with 50 to 100 new topics related to the user's interests.`;
+You are a topic brainstorming assistant. Call the suggest_topics tool with 10 to 100 new topics related to the user's interests.`;
 
 const SIMILAR_SYSTEM_PROMPT = `/no_think
-You are a search query assistant. Call the suggest_topics tool with 50 to 100 topics related to the user's search query.`;
+You are a search query assistant. Call the suggest_topics tool with 5 to 10 topics related to the user's search query.`;
 
 async function fetchLlmModel() {
     try {
@@ -4010,7 +4040,7 @@ Recent searches: [${searches}]
 Recently used (avoid these): [${recentUsed}]
 Failed queries (don't reuse these exact phrases, they returned bad results): [${burnedList}]
 
-Suggest 50 to 100 new topics.`;
+Suggest 10 to 100 new topics.`;
 
     const MAX_RETRIES = 2;
     let attempt = 0;
@@ -4171,7 +4201,7 @@ Suggest 5 topics related to "${searchQuery}".`;
                         { role: "system", content: SIMILAR_SYSTEM_PROMPT },
                         { role: "user", content: userMessage }
                     ],
-                    tools: [TOPIC_TOOL_DEFINITION],
+                    tools: [SIMILAR_TOOL_DEFINITION],
                     tool_choice: { type: "function", function: { name: "suggest_topics" } },
                     temperature: 0.1 + (attempt * 0.15),
                     max_tokens: 1500,
