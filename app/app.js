@@ -1,13 +1,7 @@
 // 🌿 Wallgarden - Dashboard Controller
 
 // Seeding Default Channels (if empty)
-const DEFAULT_CHANNELS = [
-    { name: "Fireship", id: "UCsBjURrPoezykLs9EqgamOA" },
-    { name: "3Blue1Brown", id: "UCYO_jab_esuFRV4b17AJtAw" },
-    { name: "The Primeagen", id: "UC8ENHE5xdFSwx71u3fDH5Xw" },
-    { name: "Veritasium", id: "UCHnyfMqiRRG1u-2MsSQLbXA" },
-    { name: "Lex Fridman", id: "UCSHZKyawb77ixDdsGog4iWA" }
-];
+const DEFAULT_CHANNELS = [];
 
 // Seeding Default Topics (if empty)
 const DEFAULT_TOPICS = [
