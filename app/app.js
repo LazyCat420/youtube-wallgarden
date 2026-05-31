@@ -3985,6 +3985,10 @@ function extractTopicsFromLlmResponse(message) {
 }
 
 async function generateBrainstormTopics(append, numRequests = 1) {
+    if (!state.searchHistory || state.searchHistory.length === 0) {
+        console.log("[Smart Feed] Skipping AI brainstorming: Search history is empty on this profile.");
+        return;
+    }
     append = append || false;
     if (state.brainstormLoading) return;
     state.brainstormLoading = true;
