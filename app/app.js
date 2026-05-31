@@ -2794,6 +2794,11 @@ function playViaYouTubeEmbed(videoId, playerWrapper) {
                     if (event.data === YT.PlayerState.ENDED) {
                         playNextFromQueue();
                     }
+                },
+                onError: (event) => {
+                    console.warn(`[Player] YouTube embed failed with error code ${event.data} for ${videoId}`);
+                    showToast("YouTube embed restricted. Trying Alternate Player...", "warning");
+                    playAlternateVideo({ id: videoId });
                 }
             }
         });
