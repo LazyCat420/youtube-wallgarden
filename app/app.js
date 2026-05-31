@@ -2516,36 +2516,12 @@ function playVideo(video) {
 
     if (playerWrapper && !isSameVideo) {
         // Clear previous player/iframe
-        playerWrapper.innerHTML = '<div id="yt-player-element" style="width: 100%; height: 100%; min-height: 360px;"></div>';
+        playerWrapper.innerHTML = '<div id="yt-player-element" style="width: 100%; height: 100%; min-height: 360px; display: flex; align-items: center; justify-content: center; background: #000; color: var(--text-muted); font-size: 0.9rem;">Loading player...</div>';
         
-        loadYouTubeApi().then((YT) => {
-            const playerEl = document.getElementById("yt-player-element");
-            if (!playerEl) return;
-            
-            // Clean up old player if it existed
-            if (window.ytPlayer) {
-                try { window.ytPlayer.destroy(); } catch (e) {}
-                window.ytPlayer = null;
-            }
-            
-            window.ytPlayer = new YT.Player('yt-player-element', {
-                height: '100%',
-                width: '100%',
-                videoId: video.id,
-                playerVars: {
-                    autoplay: 1,
-                    rel: 0,
-                    modestbranding: 1,
-                    playsinline: 1
-                },
-                events: {
-                    onStateChange: (event) => {
-                        if (event.data === YT.PlayerState.ENDED) {
-                            playNextFromQueue();
-                        }
-                    }
-                }
-            });
+        // Try stream proxy first (bypasses age restrictions), then fall back to YouTube embed
+        playViaStreamProxy(video.id, playerWrapper).catch(() => {
+            console.log("[Player] Stream proxy failed, falling back to YouTube embed");
+            playViaYouTubeEmbed(video.id, playerWrapper);
         });
     }
 
@@ -2704,6 +2680,124 @@ function playVideo(video) {
     }
 
     renderQueueUI();
+}
+
+// ── Stream Proxy Player (bypasses age restrictions) ─────────
+async function playViaStreamProxy(videoId, playerWrapper) {
+    console.log(`[Stream Proxy] Attempting direct stream for ${videoId}...`);
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+    
+    try {
+        const response = await fetch(`/scraper/stream/${videoId}`, {
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+            const errText = await response.text().catch(() => "");
+            throw new Error(`Stream proxy returned ${response.status}: ${errText.substring(0, 200)}`);
+        }
+        
+        const data = await response.json();
+        
+        if (!data.url) {
+            throw new Error("No stream URL in response");
+        }
+        
+        console.log(`[Stream Proxy] Got direct URL for ${videoId} (${data.width || "?"}x${data.height || "?"}, cached: ${data.cached})`);
+        
+        // Destroy any existing YT player
+        if (window.ytPlayer) {
+            try { window.ytPlayer.destroy(); } catch (e) {}
+            window.ytPlayer = null;
+        }
+        
+        // Create native HTML5 video player
+        playerWrapper.innerHTML = `
+            <video id="yt-player-element"
+                   src="${data.url}"
+                   autoplay
+                   controls
+                   playsinline
+                   style="width: 100%; height: 100%; min-height: 360px; background: #000; outline: none;"
+                   controlsList="nodownload">
+                Your browser does not support HTML5 video.
+            </video>`;
+        
+        const videoEl = playerWrapper.querySelector("video");
+        if (videoEl) {
+            // Handle video end -> play next from queue
+            videoEl.addEventListener("ended", () => {
+                playNextFromQueue();
+            });
+            
+            // Handle playback errors (likely CORS) -> fall back to YouTube embed
+            videoEl.addEventListener("error", (e) => {
+                console.warn(`[Stream Proxy] Video playback error for ${videoId}:`, e);
+                console.log("[Stream Proxy] Falling back to YouTube embed due to playback error");
+                playViaYouTubeEmbed(videoId, playerWrapper);
+            });
+            
+            // Attempt to start playback
+            videoEl.play().catch(err => {
+                console.warn(`[Stream Proxy] Autoplay blocked for ${videoId}:`, err.message);
+                // Don't fall back — user can click play manually
+            });
+        }
+        
+        showToast("Playing via direct stream (bypasses restrictions)", "info");
+        
+    } catch (err) {
+        clearTimeout(timeoutId);
+        console.warn(`[Stream Proxy] Failed for ${videoId}:`, err.message);
+        throw err; // Propagate so the caller falls back to YouTube embed
+    }
+}
+
+// ── YouTube IFrame API Embed (standard player) ──────────────
+function playViaYouTubeEmbed(videoId, playerWrapper) {
+    console.log(`[Player] Using YouTube IFrame embed for ${videoId}`);
+    
+    // Clean up any HTML5 video element
+    const existingVideo = playerWrapper.querySelector("video");
+    if (existingVideo) {
+        existingVideo.pause();
+        existingVideo.src = "";
+    }
+    
+    playerWrapper.innerHTML = '<div id="yt-player-element" style="width: 100%; height: 100%; min-height: 360px;"></div>';
+    
+    loadYouTubeApi().then((YT) => {
+        const playerEl = document.getElementById("yt-player-element");
+        if (!playerEl) return;
+        
+        // Clean up old player if it existed
+        if (window.ytPlayer) {
+            try { window.ytPlayer.destroy(); } catch (e) {}
+            window.ytPlayer = null;
+        }
+        
+        window.ytPlayer = new YT.Player('yt-player-element', {
+            height: '100%',
+            width: '100%',
+            videoId: videoId,
+            playerVars: {
+                autoplay: 1,
+                rel: 0,
+                modestbranding: 1,
+                playsinline: 1
+            },
+            events: {
+                onStateChange: (event) => {
+                    if (event.data === YT.PlayerState.ENDED) {
+                        playNextFromQueue();
+                    }
+                }
+            }
+        });
+    });
 }
 
 function playAlternateVideo(video) {
