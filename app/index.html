@@ -238,7 +238,10 @@
                         </div>
                         <p id="dashboard-status-text" class="status-subtitle">Loading feeds...</p>
                     </div>
-                    <div class="header-actions">
+                    <div class="header-actions" style="display: flex; gap: 0.75rem; align-items: center;">
+                        <select id="profile-selector" style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--card-border); color: var(--text-primary); padding: 0.5rem 0.75rem; border-radius: 4px; font-family: var(--font-stack); outline: none; cursor: pointer;">
+                            <option value="default">General</option>
+                        </select>
                         <button id="btn-sync-now" class="btn btn-primary btn-icon-only" title="Sync RSS Feeds">
                             <span class="btn-text">Sync Feeds</span>
                             <span class="sync-spinner">🔄</span>
