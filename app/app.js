@@ -11,16 +11,6 @@ const DEFAULT_CHANNELS = [
 
 // Seeding Default Topics (if empty)
 const DEFAULT_TOPICS = [
-    { phrase: "coding", weight: 5 },
-    { phrase: "programming", weight: 5 },
-    { phrase: "javascript", weight: 3 },
-    { phrase: "rust", weight: 4 },
-    { phrase: "ai", weight: 5 },
-    { phrase: "artificial intelligence", weight: 5 },
-    { phrase: "llm", weight: 5 },
-    { phrase: "math", weight: 3 },
-    { phrase: "science", weight: 3 },
-    { phrase: "physics", weight: 3 },
     { phrase: "gossip", weight: -10 },
     { phrase: "drama", weight: -10 },
     { phrase: "brainrot", weight: -10 }
@@ -108,9 +98,6 @@ function initSmartFeed() {
     const randomizedTopics = getWeightedRandomTopics(state.topics);
     
     state.smartFeedTopicsQueue = [...randomizedTopics];
-    if (state.smartFeedTopicsQueue.length === 0) {
-        state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
-    }
     console.log("[Smart Feed] Initialized with topics queue:", state.smartFeedTopicsQueue);
     
     // Start background preloading
@@ -4015,6 +4002,11 @@ async function generateBrainstormTopics(append, numRequests = 1) {
     
     // Truncated context: top 15 highest-weight topics, last 20 used
     const likedAll = state.topics.filter(t => t.weight > 0).sort((a, b) => b.weight - a.weight);
+    if (likedAll.length === 0) {
+        console.log("[Smart Feed] No positive topics to brainstorm from. Skipping brainstorm.");
+        state.brainstormLoading = false;
+        return;
+    }
     const liked = likedAll.slice(0, 15).map(t => t.phrase).join(", ");
     const disliked = state.topics.filter(t => t.weight < 0).slice(0, 10).map(t => t.phrase).join(", ");
     const searches = state.searchHistory.slice(-10).join(", ");
@@ -4560,9 +4552,6 @@ async function fillSmartFeedPreloadBuffer() {
         console.log("[Smart Feed] Queue is empty! Repopulating from positive topics...");
         const randomizedTopics = getWeightedRandomTopics(state.topics);
         state.smartFeedTopicsQueue = [...randomizedTopics];
-        if (state.smartFeedTopicsQueue.length === 0) {
-            state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
-        }
     }
     
     // On cold start (pool empty), fetch multiple topics in parallel for faster population
@@ -4709,15 +4698,13 @@ async function loadNextSmartFeedBatch() {
     }
     
     if (state.smartFeedTopicsQueue.length === 0) {
-        console.log("[Smart Feed] Queue is empty! Generating more topics first...");
-        const randomizedTopics = getWeightedRandomTopics(state.topics);
-        
-        state.smartFeedTopicsQueue = [...randomizedTopics];
-        if (state.smartFeedTopicsQueue.length === 0) {
-            state.smartFeedTopicsQueue = ["coding", "programming", "ai", "science", "physics"];
+        const positiveTopics = state.topics.filter(t => t.weight > 0);
+        if (positiveTopics.length > 0) {
+            console.log("[Smart Feed] Queue is empty! Generating more topics first...");
+            const randomizedTopics = getWeightedRandomTopics(state.topics);
+            state.smartFeedTopicsQueue = [...randomizedTopics];
+            generateBrainstormTopics(true);
         }
-        
-        generateBrainstormTopics(true);
     }
     
     const topic = state.smartFeedTopicsQueue.shift();
@@ -5182,24 +5169,22 @@ async function generateDiscoverChannels(force = false) {
                 .slice(0, 3)
                 .map(t => t.phrase);
                 
-            if (topTopics.length === 0) {
-                topTopics.push("programming", "science");
-            }
-            
-            for (const topic of topTopics) {
-                const results = await searchTopicsForChannels(topic);
-                results.forEach(rec => {
-                    if (rec.name) {
-                        addRecommendation({
-                            id: rec.id,
-                            name: rec.name,
-                            handle: rec.handle,
-                            reason: `Top matching creator for "${topic}"`,
-                            source: "topic",
-                            sourceLabel: `Topic: ${capitalizePhrase(topic)}`
-                        });
-                    }
-                });
+            if (topTopics.length > 0) {
+                for (const topic of topTopics) {
+                    const results = await searchTopicsForChannels(topic);
+                    results.forEach(rec => {
+                        if (rec.name) {
+                            addRecommendation({
+                                id: rec.id,
+                                name: rec.name,
+                                handle: rec.handle,
+                                reason: `Top matching creator for "${topic}"`,
+                                source: "topic",
+                                sourceLabel: `Topic: ${capitalizePhrase(topic)}`
+                            });
+                        }
+                    });
+                }
             }
         } catch (e) {
             console.error("Topic search discovery failed:", e);
