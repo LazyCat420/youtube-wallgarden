@@ -1312,7 +1312,7 @@ async function syncFeeds() {
                         entries.forEach(entry => {
                             const title = entry.querySelector("title")?.textContent || "";
                             const content = entry.querySelector("content")?.textContent || entry.querySelector("summary")?.textContent || "";
-                            const publishedStr = entry.querySelector("published")?.textContent || entry.querySelector("updated")?.textContent || "";
+                            // removed publishedStr
                             
                             const ytMatch = content.match(/href="https:\/\/(?:www\.)?youtube\.com\/watch\?v=([^"&?]+)/) || 
                                             content.match(/href="https:\/\/youtu\.be\/([^"&?]+)/);
@@ -1323,7 +1323,7 @@ async function syncFeeds() {
                                     title: title,
                                     channelName: channel.name,
                                     channelId: channel.id,
-                                    published: new Date(publishedStr).getTime(),
+                                    // removed published
                                     description: content || ""
                                 });
                             }
@@ -1356,8 +1356,7 @@ async function syncFeeds() {
                             const videoId = entry.querySelector("videoId")?.textContent || 
                                             entry.querySelector("id")?.textContent?.split(":")[2];
                             const title = entry.querySelector("title")?.textContent || "";
-                            const publishedStr = entry.querySelector("published")?.textContent || 
-                                                 entry.querySelector("updated")?.textContent || "";
+                            // removed publishedStr
                             
                             const mediaGroup = entry.getElementsByTagName("media:group")[0];
                             const description = mediaGroup ? mediaGroup.getElementsByTagName("media:description")[0]?.textContent : "";
@@ -1368,7 +1367,7 @@ async function syncFeeds() {
                                     title: title,
                                     channelName: feedTitle || channel.name,
                                     channelId: channel.id,
-                                    published: new Date(publishedStr).getTime(),
+                                    // removed published
                                     description: description || ""
                                 });
                             }
@@ -1411,7 +1410,7 @@ async function syncFeeds() {
                                     title: item.title,
                                     channelName: item.channel || channel.name,
                                     channelId: channel.id,
-                                    published: item.published_at ? new Date(item.published_at).getTime() : 0,
+                                    // removed published
                                     description: item.description || ""
                                 });
                             });
@@ -1437,7 +1436,7 @@ async function syncFeeds() {
                         merged.push(ev);
                     }
                 });
-                merged.sort((a, b) => b.published - a.published);
+                // removed sort by published
                 results[channel.id] = merged.slice(0, 50);
             } else {
                 console.warn(`All sync methods failed for channel ${channel.name}. Retaining cache.`);
@@ -1627,8 +1626,7 @@ async function fetchChannelFeedOnDemand(channelId, channelName) {
             const videoId = entry.querySelector("videoId")?.textContent || 
                             entry.querySelector("id")?.textContent?.split(":")[2];
             const title = entry.querySelector("title")?.textContent || "";
-            const publishedStr = entry.querySelector("published")?.textContent || 
-                                 entry.querySelector("updated")?.textContent || "";
+            // removed publishedStr
                                  
             if (videoId && title) {
                 videos.push({
@@ -1636,7 +1634,7 @@ async function fetchChannelFeedOnDemand(channelId, channelName) {
                     title: title,
                     channelName: feedTitle,
                     channelId: channelId,
-                    published: new Date(publishedStr).getTime()
+                    // removed published
                 });
             }
         });
@@ -1685,7 +1683,7 @@ function createVideoCard(video) {
     if (video.score >= 5) scoreClass = "high";
     if (video.score < 0) scoreClass = "low";
     
-    const displayDate = formatPublishDate(video.published, video.publishedStr);
+    // Publish date removed as requested
     const topMatchedTopic = video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:") && t !== "vintage" && t !== "viral-spam") : null;
     const categoryText = topMatchedTopic ? capitalizePhrase(topMatchedTopic) : "";
     
@@ -1718,7 +1716,7 @@ function createVideoCard(video) {
                 <button type="button" class="card-action-btn" title="Actions">⋮</button>
             </div>
             <p class="video-channel"><span class="channel-link" data-id="${video.channelId || ''}" data-name="${escapeHTML(video.channelName)}">${escapeHTML(video.channelName)}</span>${video.viewCount && video.viewCount > 0 ? ` • ${formatViews(video.viewCount)}` : ''}</p>
-            <p class="video-time">${displayDate}${displayDate && video.duration ? ' • ' : ''}${video.duration ? formatDuration(video.duration) : ""}</p>
+            <p class="video-time">${video.duration ? formatDuration(video.duration) : ""}</p>
         </div>
     `;
     
@@ -2176,7 +2174,7 @@ function renderFeed() {
             scored = scored.filter(v => !isShortVideo(v));
         }
         
-        scored.sort((a, b) => b.published - a.published);
+        scored.sort((a, b) => b.score - a.score);
         
         if (shorts.length > 0) {
             shortsShelf.classList.remove("hidden");
@@ -2229,7 +2227,7 @@ function renderFeed() {
         subVideos.sort((a, b) => {
             if (a.score >= 5 && b.score < 5) return -1;
             if (b.score >= 5 && a.score < 5) return 1;
-            return b.published - a.published;
+            return b.score - a.score;
         });
         
         const initialSubVideos = subVideos.slice(0, 50);
@@ -2244,7 +2242,7 @@ function renderFeed() {
         if (redditVideos.length > 0 && redditShelf && redditGrid) {
             redditShelf.classList.remove("hidden");
             const redditFragment = document.createDocumentFragment();
-            redditVideos.sort((a, b) => b.published - a.published).slice(0, 15).forEach(vid => renderCard(vid, redditFragment));
+            redditVideos.sort((a, b) => b.score - a.score).slice(0, 15).forEach(vid => renderCard(vid, redditFragment));
             redditGrid.appendChild(redditFragment);
         }
         
@@ -2263,19 +2261,7 @@ function renderFeed() {
     if (topHeaderActions) topHeaderActions.innerHTML = "";
 
     if (state.currentView === "smart-feed" || state.currentView.startsWith("topic_") || state.currentView.startsWith("search_")) {
-        if (topHeaderActions) {
-            topHeaderActions.innerHTML = `
-                <select id="discovery-sort-select" class="form-select" style="padding: 0.25rem 0.5rem; border-radius: 4px; background: var(--bg-secondary); color: var(--text); border: 1px solid var(--border); font-size: 0.85rem;">
-                    <option value="relevance" ${state.settings.discoverySortOrder === 'relevance' ? 'selected' : ''}>Sort by Relevance</option>
-                    <option value="date" ${state.settings.discoverySortOrder === 'date' ? 'selected' : ''}>Sort by Date</option>
-                </select>
-            `;
-            document.getElementById("discovery-sort-select").addEventListener("change", (e) => {
-                state.settings.discoverySortOrder = e.target.value;
-                saveSettings();
-                renderFeed();
-            });
-        }
+        // Sort order UI removed
     }
 
     // Handle Smart Feed (Discovery)
@@ -2318,15 +2304,11 @@ function renderFeed() {
         grid.appendChild(suggestionsGrid);
         
         if (state.smartFeedVideos.length > 0) {
-            if (state.settings.discoverySortOrder === 'date') {
-                state.smartFeedVideos.sort((a, b) => b.published - a.published);
-            } else {
-                state.smartFeedVideos.sort((a, b) => {
-                    const scoreA = a.score !== undefined ? a.score : getScoreAndMatches(a).score;
-                    const scoreB = b.score !== undefined ? b.score : getScoreAndMatches(b).score;
-                    return scoreB - scoreA;
-                });
-            }
+            state.smartFeedVideos.sort((a, b) => {
+                const scoreA = a.score !== undefined ? a.score : getScoreAndMatches(a).score;
+                const scoreB = b.score !== undefined ? b.score : getScoreAndMatches(b).score;
+                return scoreB - scoreA;
+            });
             
             const fragment = document.createDocumentFragment();
             state.smartFeedVideos.forEach(video => {
@@ -2377,7 +2359,7 @@ function renderFeed() {
         allVideos.sort((a, b) => {
             if (a.score >= 5 && b.score < 5) return -1;
             if (b.score >= 5 && a.score < 5) return 1;
-            return b.published - a.published;
+            return b.score - a.score;
         });
         
         if (sessionTopicSearchCache[queryTerm] === undefined && !topicSearchLoading[queryTerm]) {
@@ -2402,11 +2384,7 @@ function renderFeed() {
             });
             
             discoverVideos = discoverVideos.filter(dv => !allVideos.some(sv => sv.id === dv.id));
-            if (state.settings.discoverySortOrder === 'date') {
-                discoverVideos.sort((a, b) => b.published - a.published);
-            } else {
-                discoverVideos.sort((a, b) => b.score - a.score);
-            }
+            discoverVideos.sort((a, b) => b.score - a.score);
         }
         
         let allShorts = [];
@@ -2725,7 +2703,7 @@ function playVideo(video) {
         const videoTopic = video.discoveryTopic || (video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:")) : null) || "";
         const currentRating = state.videoRatings[video.id];
 
-        const pubDateStr = video.published ? (video.published > 999999999999 ? new Date(video.published) : new Date(video.published * 1000)).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }) : "Unknown Date";
+        // pubDateStr removed
 
         const isTopicActive = videoTopic ? state.topics.some(t => t.phrase.toLowerCase() === videoTopic.toLowerCase()) : false;
         let topicBtnHtml = '';
@@ -2738,8 +2716,8 @@ function playVideo(video) {
         }
 
         sidebar.innerHTML = `
-            <div class="sidebar-meta" style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem; border-bottom: 1px solid var(--card-border); padding-bottom: 0.5rem;">
-                📅 Published: ${pubDateStr}
+            <div class="sidebar-meta" style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem; border-bottom: 1px solid var(--card-border); padding-bottom: 0.5rem; display: none;">
+                <!-- Publish date removed -->
             </div>
             <div class="sidebar-description-box">
                 ${escapeHTML(video.description || "No description available.").replace(/\n/g, '<br>')}
@@ -3593,43 +3571,7 @@ function getRelativeTime(timestamp) {
     return "Just now";
 }
 
-// Smart date formatting: shows readable dates instead of useless "4380d ago"
-function formatPublishDate(timestamp, publishedStr) {
-    // If timestamp is missing/invalid or is basically "now" (fallback default)
-    if (!timestamp || timestamp <= 0) {
-        return publishedStr || "";
-    }
-    
-    const now = Date.now();
-    const diffMs = now - timestamp;
-    const diffDays = Math.floor(diffMs / (24 * 60 * 60 * 1000));
-    const date = new Date(timestamp);
-    
-    // Sanity check: if the date looks like the current time (within 1 hour), it's a fallback default
-    if (Math.abs(diffMs) < 3600000) {
-        return publishedStr || "";
-    }
-    
-    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    
-    if (diffDays < 1) {
-        // Today
-        return getRelativeTime(timestamp);
-    } else if (diffDays < 7) {
-        // This week
-        return `${diffDays}d ago`;
-    } else if (diffDays < 30) {
-        // This month
-        return `${months[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
-    } else if (diffDays < 730) {
-        // Within 2 years — show month + year
-        return `${months[date.getMonth()]} ${date.getFullYear()}`;
-    } else {
-        // Older than 2 years — just the year is the important info
-        return `${date.getFullYear()}`;
-    }
-}
-
+// Smart date formatting removed
 function updateStatusText(text) {
     document.getElementById("dashboard-status-text").textContent = text;
 }
@@ -3715,8 +3657,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                                     title: item.title,
                                     channelName: item.channel,
                                     channelId: "",
-                                    publishedStr: item.published_at ? getRelativeTime(new Date(item.published_at).getTime()) : "",
-                                    published: item.published_at ? new Date(item.published_at).getTime() : 0,
+                                    // removed publishedStr and published
                                     duration: item.duration_secs,
                                     viewCount: item.view_count,
                                     isDiscover: true
@@ -3843,7 +3784,6 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                             const title = vr.title?.runs?.[0]?.text || "";
                             const channelName = vr.ownerText?.runs?.[0]?.text || "Unknown Channel";
                             const channelId = vr.ownerText?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId || "";
-                            const publishedStr = vr.publishedTimeText?.simpleText || "";
                             
                             // Parse duration if available in raw search data
                             let durationSecs = 0;
@@ -3863,8 +3803,6 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                                     title: title,
                                     channelName: channelName,
                                     channelId: channelId,
-                                    publishedStr: publishedStr,
-                                    published: parseRelativeTime(publishedStr),
                                     duration: durationSecs,
                                     isDiscover: true
                                 });
@@ -3888,8 +3826,6 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                                         title: title,
                                         channelName: "YouTube Shorts",
                                         channelId: "",
-                                        publishedStr: "",
-                                        published: 0,
                                         duration: 30,
                                         isDiscover: true,
                                         isExplicitShort: true
@@ -3955,7 +3891,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         if (enrichedVideo.score >= 5) scoreClass = "high";
         if (enrichedVideo.score < 0) scoreClass = "low";
         
-        const relativeTime = enrichedVideo.publishedStr || "";
+        const relativeTime = "";
         
         card.innerHTML = `
             <div class="thumbnail-area">
@@ -4006,7 +3942,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         if (enrichedVideo.score >= 5) scoreClass = "high";
         if (enrichedVideo.score < 0) scoreClass = "low";
         
-        const relativeTime = enrichedVideo.publishedStr || "";
+        const relativeTime = "";
         let metaLine = enrichedVideo.channelName;
         if (enrichedVideo.viewCount && enrichedVideo.viewCount > 0) {
             metaLine += ` • ${formatViews(enrichedVideo.viewCount)}`;
@@ -4722,8 +4658,7 @@ async function fetchVideosForTopic(topic) {
                             title: item.title,
                             channelName: item.channel,
                             channelId: "",
-                            publishedStr: item.published_at ? getRelativeTime(new Date(item.published_at).getTime()) : "",
-                            published: item.published_at ? new Date(item.published_at).getTime() : 0,
+                            // removed publishedStr and published
                             duration: item.duration_secs,
                             viewCount: item.view_count,
                             isDiscover: true,
@@ -4811,15 +4746,12 @@ async function fetchVideosForTopic(topic) {
                                 const videoId = vr.videoId;
                                 const title = vr.title?.runs?.[0]?.text || "";
                                 const channelName = vr.ownerText?.runs?.[0]?.text || "Unknown Channel";
-                                const publishedStr = vr.publishedTimeText?.simpleText || "";
                                 if (videoId && title) {
                                     videos.push({
                                         id: videoId,
                                         title: title,
                                         channelName: channelName,
                                         channelId: "",
-                                        publishedStr: publishedStr,
-                                        published: parseRelativeTime(publishedStr),
                                         isDiscover: true,
                                         discoveryTopic: topic
                                     });
