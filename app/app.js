@@ -1411,7 +1411,7 @@ async function syncFeeds() {
                                     title: item.title,
                                     channelName: item.channel || channel.name,
                                     channelId: channel.id,
-                                    published: item.published_at ? new Date(item.published_at).getTime() : Date.now(),
+                                    published: item.published_at ? new Date(item.published_at).getTime() : 0,
                                     description: item.description || ""
                                 });
                             });
@@ -1718,7 +1718,7 @@ function createVideoCard(video) {
                 <button type="button" class="card-action-btn" title="Actions">⋮</button>
             </div>
             <p class="video-channel"><span class="channel-link" data-id="${video.channelId || ''}" data-name="${escapeHTML(video.channelName)}">${escapeHTML(video.channelName)}</span>${video.viewCount && video.viewCount > 0 ? ` • ${formatViews(video.viewCount)}` : ''}</p>
-            <p class="video-time">${displayDate}${video.duration ? ` • ${formatDuration(video.duration)}` : ""}</p>
+            <p class="video-time">${displayDate}${displayDate && video.duration ? ' • ' : ''}${video.duration ? formatDuration(video.duration) : ""}</p>
         </div>
     `;
     
@@ -3531,7 +3531,7 @@ function capitalizePhrase(str) {
 }
 
 function parseRelativeTime(str) {
-    if (!str || typeof str !== 'string') return Date.now();
+    if (!str || typeof str !== 'string') return 0;
     
     const cleanStr = str.toLowerCase().trim()
         .replace(/^(streamed|premiered)\s+/, '')
@@ -3541,7 +3541,7 @@ function parseRelativeTime(str) {
     if (cleanStr === 'yesterday') {
         return Date.now() - 24 * 60 * 60 * 1000;
     }
-    if (cleanStr === 'just now' || cleanStr === 'recently' || cleanStr === 'today') {
+    if (cleanStr === 'just now' || cleanStr === 'today') {
         return Date.now();
     }
     
@@ -3552,7 +3552,7 @@ function parseRelativeTime(str) {
     
     const match = cleanStr.match(/^(\d+)\s+(second|minute|hour|day|week|month|year)s?$/);
     if (!match) {
-        return Date.now();
+        return 0;
     }
     
     const value = parseInt(match[1], 10);
@@ -3597,7 +3597,7 @@ function getRelativeTime(timestamp) {
 function formatPublishDate(timestamp, publishedStr) {
     // If timestamp is missing/invalid or is basically "now" (fallback default)
     if (!timestamp || timestamp <= 0) {
-        return publishedStr || "Recently";
+        return publishedStr || "";
     }
     
     const now = Date.now();
@@ -3606,8 +3606,8 @@ function formatPublishDate(timestamp, publishedStr) {
     const date = new Date(timestamp);
     
     // Sanity check: if the date looks like the current time (within 1 hour), it's a fallback default
-    if (Math.abs(diffMs) < 3600000 && publishedStr) {
-        return publishedStr;
+    if (Math.abs(diffMs) < 3600000) {
+        return publishedStr || "";
     }
     
     const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -3715,8 +3715,8 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                                     title: item.title,
                                     channelName: item.channel,
                                     channelId: "",
-                                    publishedStr: item.published_at ? getRelativeTime(new Date(item.published_at).getTime()) : "Recently",
-                                    published: item.published_at ? new Date(item.published_at).getTime() : Date.now(),
+                                    publishedStr: item.published_at ? getRelativeTime(new Date(item.published_at).getTime()) : "",
+                                    published: item.published_at ? new Date(item.published_at).getTime() : 0,
                                     duration: item.duration_secs,
                                     viewCount: item.view_count,
                                     isDiscover: true
@@ -3843,7 +3843,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                             const title = vr.title?.runs?.[0]?.text || "";
                             const channelName = vr.ownerText?.runs?.[0]?.text || "Unknown Channel";
                             const channelId = vr.ownerText?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId || "";
-                            const publishedStr = vr.publishedTimeText?.simpleText || "Recently";
+                            const publishedStr = vr.publishedTimeText?.simpleText || "";
                             
                             // Parse duration if available in raw search data
                             let durationSecs = 0;
@@ -3888,8 +3888,8 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                                         title: title,
                                         channelName: "YouTube Shorts",
                                         channelId: "",
-                                        publishedStr: "Recently",
-                                        published: parseRelativeTime("Recently"),
+                                        publishedStr: "",
+                                        published: 0,
                                         duration: 30,
                                         isDiscover: true,
                                         isExplicitShort: true
@@ -3955,7 +3955,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         if (enrichedVideo.score >= 5) scoreClass = "high";
         if (enrichedVideo.score < 0) scoreClass = "low";
         
-        const relativeTime = enrichedVideo.publishedStr || "Recently";
+        const relativeTime = enrichedVideo.publishedStr || "";
         
         card.innerHTML = `
             <div class="thumbnail-area">
@@ -4006,7 +4006,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         if (enrichedVideo.score >= 5) scoreClass = "high";
         if (enrichedVideo.score < 0) scoreClass = "low";
         
-        const relativeTime = enrichedVideo.publishedStr || "Recently";
+        const relativeTime = enrichedVideo.publishedStr || "";
         let metaLine = enrichedVideo.channelName;
         if (enrichedVideo.viewCount && enrichedVideo.viewCount > 0) {
             metaLine += ` • ${formatViews(enrichedVideo.viewCount)}`;
@@ -4024,7 +4024,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
             <div class="card-details">
                 <h3 class="video-title">${escapeHTML(enrichedVideo.title)}</h3>
                 <p class="video-channel">${escapeHTML(metaLine)}</p>
-                <p class="video-time">${relativeTime}${enrichedVideo.duration ? ` • ${formatDuration(enrichedVideo.duration)}` : ""}</p>
+                <p class="video-time">${relativeTime}${relativeTime && enrichedVideo.duration ? ' • ' : ''}${enrichedVideo.duration ? formatDuration(enrichedVideo.duration) : ""}</p>
             </div>
         `;
         
@@ -4722,8 +4722,8 @@ async function fetchVideosForTopic(topic) {
                             title: item.title,
                             channelName: item.channel,
                             channelId: "",
-                            publishedStr: item.published_at ? getRelativeTime(new Date(item.published_at).getTime()) : "Recently",
-                            published: item.published_at ? new Date(item.published_at).getTime() : Date.now(),
+                            publishedStr: item.published_at ? getRelativeTime(new Date(item.published_at).getTime()) : "",
+                            published: item.published_at ? new Date(item.published_at).getTime() : 0,
                             duration: item.duration_secs,
                             viewCount: item.view_count,
                             isDiscover: true,
@@ -4811,7 +4811,7 @@ async function fetchVideosForTopic(topic) {
                                 const videoId = vr.videoId;
                                 const title = vr.title?.runs?.[0]?.text || "";
                                 const channelName = vr.ownerText?.runs?.[0]?.text || "Unknown Channel";
-                                const publishedStr = vr.publishedTimeText?.simpleText || "Recently";
+                                const publishedStr = vr.publishedTimeText?.simpleText || "";
                                 if (videoId && title) {
                                     videos.push({
                                         id: videoId,
