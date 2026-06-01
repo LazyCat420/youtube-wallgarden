@@ -3530,6 +3530,56 @@ function capitalizePhrase(str) {
     return str.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
 
+function parseRelativeTime(str) {
+    if (!str || typeof str !== 'string') return Date.now();
+    
+    const cleanStr = str.toLowerCase().trim()
+        .replace(/^(streamed|premiered)\s+/, '')
+        .replace(/s\s+ago$/, ' ago')
+        .replace(/\s+ago$/, '');
+    
+    if (cleanStr === 'yesterday') {
+        return Date.now() - 24 * 60 * 60 * 1000;
+    }
+    if (cleanStr === 'just now' || cleanStr === 'recently' || cleanStr === 'today') {
+        return Date.now();
+    }
+    
+    const parsed = Date.parse(cleanStr);
+    if (!isNaN(parsed)) {
+        return parsed;
+    }
+    
+    const match = cleanStr.match(/^(\d+)\s+(second|minute|hour|day|week|month|year)s?$/);
+    if (!match) {
+        return Date.now();
+    }
+    
+    const value = parseInt(match[1], 10);
+    const unit = match[2];
+    
+    const second = 1000;
+    const minute = 60 * second;
+    const hour = 60 * minute;
+    const day = 24 * hour;
+    const week = 7 * day;
+    const month = 30 * day;
+    const year = 365 * day;
+    
+    let msDiff = 0;
+    switch (unit) {
+        case 'second': msDiff = value * second; break;
+        case 'minute': msDiff = value * minute; break;
+        case 'hour': msDiff = value * hour; break;
+        case 'day': msDiff = value * day; break;
+        case 'week': msDiff = value * week; break;
+        case 'month': msDiff = value * month; break;
+        case 'year': msDiff = value * year; break;
+    }
+    
+    return Date.now() - msDiff;
+}
+
 function getRelativeTime(timestamp) {
     const diffMs = Date.now() - timestamp;
     const diffSec = Math.floor(diffMs / 1000);
@@ -3814,7 +3864,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                                     channelName: channelName,
                                     channelId: channelId,
                                     publishedStr: publishedStr,
-                                    published: Date.now(),
+                                    published: parseRelativeTime(publishedStr),
                                     duration: durationSecs,
                                     isDiscover: true
                                 });
@@ -3839,7 +3889,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                                         channelName: "YouTube Shorts",
                                         channelId: "",
                                         publishedStr: "Recently",
-                                        published: Date.now(),
+                                        published: parseRelativeTime("Recently"),
                                         duration: 30,
                                         isDiscover: true,
                                         isExplicitShort: true
@@ -4769,7 +4819,7 @@ async function fetchVideosForTopic(topic) {
                                         channelName: channelName,
                                         channelId: "",
                                         publishedStr: publishedStr,
-                                        published: Date.now(),
+                                        published: parseRelativeTime(publishedStr),
                                         isDiscover: true,
                                         discoveryTopic: topic
                                     });
