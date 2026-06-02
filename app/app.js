@@ -6099,6 +6099,49 @@ function showReconciliationPrompt(videoId) {
 }
 
 // ── Extension Sync Listener (Phase 4) ─────────────
+function findVideoById(videoId) {
+    if (!videoId) return null;
+    
+    // 1. Search in cache
+    if (state.cache && state.cache.videos) {
+        for (const channelId in state.cache.videos) {
+            const v = state.cache.videos[channelId].find(vid => vid.id === videoId);
+            if (v) return v;
+        }
+    }
+    
+    // 2. Search in smartFeedVideos
+    if (state.smartFeedVideos) {
+        const v = state.smartFeedVideos.find(vid => vid.id === videoId);
+        if (v) return v;
+    }
+    
+    // 3. Search in sessionTopicSearchCache
+    if (sessionTopicSearchCache) {
+        for (const query in sessionTopicSearchCache) {
+            const videos = sessionTopicSearchCache[query];
+            if (Array.isArray(videos)) {
+                const v = videos.find(vid => vid.id === videoId);
+                if (v) return v;
+            }
+        }
+    }
+    
+    // 4. Search in queue
+    if (state.queue) {
+        const v = state.queue.find(vid => vid.id === videoId);
+        if (v) return v;
+    }
+    
+    // 5. Search in likedVideos
+    if (state.likedVideos) {
+        const v = state.likedVideos.find(vid => vid.id === videoId);
+        if (v) return v;
+    }
+    
+    return null;
+}
+
 window.addEventListener("message", (event) => {
     // Make sure we only accept messages from our own domain/content script
     if (event.source !== window || !event.data || event.data.type !== 'WG_EXT_SYNC') return;
@@ -6110,7 +6153,36 @@ window.addEventListener("message", (event) => {
 
     if (payload.action === 'LIKE') {
         state.videoRatings[payload.videoId] = 5;
+        
+        // Find full video metadata and sync to state.likedVideos
+        const video = findVideoById(payload.videoId);
+        if (video) {
+            if (!state.likedVideos.some(v => v.id === video.id)) {
+                state.likedVideos.push(video);
+            }
+        } else {
+            // Fallback object if video is not in current caches
+            const fallbackVideo = {
+                id: payload.videoId,
+                title: "Liked Video (Synced)",
+                channelName: "YouTube Curation",
+                channelId: "",
+                published: Math.floor(Date.now() / 1000),
+                thumbnailUrl: `https://i.ytimg.com/vi/${payload.videoId}/hqdefault.jpg`,
+                description: "Synced from YouTube Likes."
+            };
+            if (!state.likedVideos.some(v => v.id === fallbackVideo.id)) {
+                state.likedVideos.push(fallbackVideo);
+            }
+        }
+        
         saveVideoRatings();
+        saveLikedVideos();
+        renderFeed();
+        if (state.currentView === "liked-videos") {
+            renderLikedVideosView();
+        }
+        
         showToast("👍 Synced Like from YouTube", "success");
         if (state.currentlyPlayingId === payload.videoId) {
             const likeBtn = document.querySelector(".sidebar-btn-like");
@@ -6120,7 +6192,15 @@ window.addEventListener("message", (event) => {
         }
     } else if (payload.action === 'DISLIKE') {
         state.videoRatings[payload.videoId] = -5;
+        state.likedVideos = state.likedVideos.filter(v => v.id !== payload.videoId);
+        
         saveVideoRatings();
+        saveLikedVideos();
+        renderFeed();
+        if (state.currentView === "liked-videos") {
+            renderLikedVideosView();
+        }
+        
         showToast("👎 Synced Dislike from YouTube", "info");
         if (state.currentlyPlayingId === payload.videoId) {
             const likeBtn = document.querySelector(".sidebar-btn-like");
