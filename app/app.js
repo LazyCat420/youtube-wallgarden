@@ -1721,7 +1721,7 @@ function createVideoCard(video) {
     `;
     
     const openAction = () => {
-        openFloatingPlayer(video.id, video.title);
+        playVideo(video);
     };
     card.querySelector(".thumbnail-play-overlay").addEventListener("click", openAction);
     card.querySelector(".video-title").addEventListener("click", openAction);
@@ -2660,9 +2660,8 @@ function playVideo(video) {
         if (btnOpenYoutube) {
             btnOpenYoutube.addEventListener("click", () => {
                 if (state.currentlyPlayingId) {
-                    const title = inlinePlayer.querySelector(".player-title") ? inlinePlayer.querySelector(".player-title").textContent : "YouTube Video";
-                    openFloatingPlayer(state.currentlyPlayingId, title);
-                    closePlayer();
+                    window.open(`https://www.youtube.com/watch?v=${state.currentlyPlayingId}`, "_blank");
+                    if (window.logYouTubeLaunch) window.logYouTubeLaunch(state.currentlyPlayingId);
                 }
             });
         }
@@ -2962,9 +2961,23 @@ function playViaYouTubeEmbed(videoId, playerWrapper) {
                 },
                 onError: (event) => {
                     console.warn(`[Player] YouTube embed failed with error code ${event.data} for ${videoId}`);
-                    showToast("YouTube embed restricted. Opening on YouTube...", "warning");
-                    window.open(`https://www.youtube.com/watch?v=${videoId}`, "_blank");
-                    closePlayer();
+                    showToast("YouTube embed restricted.", "warning");
+                    
+                    const playerEl = document.getElementById("yt-player-element");
+                    if (playerEl && playerEl.parentNode) {
+                        playerEl.parentNode.innerHTML = `
+                            <div class="restricted-mode-panel" style="display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; min-height: 360px; background: #111; border: 1px solid var(--card-border); border-radius: 8px; text-align: center; padding: 2rem;">
+                                <div style="font-size: 3rem; margin-bottom: 1rem;">🔒</div>
+                                <h3 style="margin-bottom: 0.5rem; color: var(--text-primary);">Playback Restricted</h3>
+                                <p style="color: var(--text-muted); margin-bottom: 1.5rem; max-width: 400px;">The creator of this video has disabled embedding. You must watch it directly on YouTube.</p>
+                                <a href="https://www.youtube.com/watch?v=${videoId}" target="_blank" class="btn btn-primary" style="text-decoration: none; padding: 0.75rem 1.5rem; font-size: 1.1rem; display: inline-flex; align-items: center; gap: 0.5rem;" onclick="if(window.logYouTubeLaunch) window.logYouTubeLaunch('${videoId}')">
+                                    📺 Watch on YouTube
+                                </a>
+                                <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 1.5rem;">After watching, you can still save to a playlist or rate the video here.</p>
+                            </div>
+                        `;
+                    }
+                    if (window.logYouTubeLaunch) window.logYouTubeLaunch(videoId);
                 }
             }
         });
@@ -3909,7 +3922,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
             </div>
         `;
         
-        const openAction = () => openFloatingPlayer(enrichedVideo.id, enrichedVideo.title);
+        const openAction = () => playVideo(enrichedVideo);
         card.querySelector(".thumbnail-area").addEventListener("click", openAction);
         card.querySelector(".video-title").addEventListener("click", openAction);
         
@@ -3965,7 +3978,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         `;
         
         const openAction = () => {
-            openFloatingPlayer(enrichedVideo.id, enrichedVideo.title);
+            playVideo(enrichedVideo);
         };
         card.querySelector(".thumbnail-area").addEventListener("click", openAction);
         card.querySelector(".video-title").addEventListener("click", openAction);
