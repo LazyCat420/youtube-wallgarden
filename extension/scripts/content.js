@@ -903,3 +903,100 @@ function hideVideo(element, reason) {
     console.log(`[Wallgarden] Hiding video. Reason: ${reason}`);
     element.style.display = 'none';
 }
+
+// ============================================================
+//  WALLGARDEN: Native Action Syncing (Phase 4)
+// ============================================================
+
+function getVideoIdFromUrl() {
+    const urlParams = new URLSearchParams(window.location.search);
+    return urlParams.get('v');
+}
+
+function sendSyncEvent(action, data = {}) {
+    const videoId = getVideoIdFromUrl();
+    if (!videoId) return;
+    try {
+        chrome.runtime.sendMessage({
+            type: 'WALLGARDEN_SYNC',
+            data: {
+                action,
+                videoId,
+                ...data
+            }
+        }, () => {
+            // Ignore runtime errors if background isn't listening
+            if (chrome.runtime.lastError) {}
+        });
+    } catch (e) {
+        // Handle context invalidated
+    }
+}
+
+function startSyncObservers() {
+    // 1. Watch Progress (Video Element)
+    let videoObserverAdded = false;
+    setInterval(() => {
+        const videoEl = document.querySelector('video.html5-main-video');
+        if (videoEl && !videoObserverAdded) {
+            videoObserverAdded = true;
+            
+            // Watch completion (ended or > 90%)
+            let watchedSynced = false;
+            
+            videoEl.addEventListener('ended', () => {
+                if (!watchedSynced) {
+                    sendSyncEvent('WATCHED');
+                    watchedSynced = true;
+                }
+            });
+            
+            videoEl.addEventListener('timeupdate', () => {
+                if (!watchedSynced && videoEl.duration > 0) {
+                    if (videoEl.currentTime / videoEl.duration > 0.9) {
+                        sendSyncEvent('WATCHED');
+                        watchedSynced = true;
+                    }
+                }
+            });
+            
+            // Reset state on new video load
+            videoEl.addEventListener('loadeddata', () => {
+                watchedSynced = false;
+            });
+        }
+    }, 2000);
+
+    // 2. DOM Observers for Clicks (Likes, Subscriptions, Playlists)
+    document.addEventListener('click', (e) => {
+        // LIKE
+        const likeBtn = e.target.closest('like-button-view-model button, ytd-toggle-button-renderer a:has(yt-icon.ytd-thumb-up)');
+        if (likeBtn) {
+            sendSyncEvent('LIKE');
+            return;
+        }
+
+        // DISLIKE
+        const dislikeBtn = e.target.closest('dislike-button-view-model button, ytd-toggle-button-renderer a:has(yt-icon.ytd-thumb-down)');
+        if (dislikeBtn) {
+            sendSyncEvent('DISLIKE');
+            return;
+        }
+
+        // SUBSCRIBE
+        const subBtn = e.target.closest('yt-subscribe-button-view-model button, ytd-subscribe-button-renderer button');
+        if (subBtn) {
+            sendSyncEvent('SUBSCRIBE');
+            return;
+        }
+        
+        // SAVE TO PLAYLIST (Clicking the "Save" menu item)
+        const saveBtn = e.target.closest('ytd-menu-service-item-renderer:has(yt-icon.ytd-playlist-add-icon), yt-button-view-model:has(svg path[d*="M14,10H2v2h12V10z M14,6H2v2h12V6z M18,14v-4h-2v4h-4v2h4v4h2v-4h4v-2H18z"])');
+        if (saveBtn) {
+            sendSyncEvent('PLAYLIST_SAVE');
+        }
+    }, true);
+}
+
+// Start sync observers
+startSyncObservers();
