@@ -970,15 +970,19 @@ function startSyncObservers() {
     // 2. DOM Observers for Clicks (Likes, Subscriptions, Playlists)
     document.addEventListener('click', (e) => {
         const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+        
+        // Log all clicks in DevTools to assist debugging
+        const pathTagNames = path.map(el => el.tagName ? el.tagName.toLowerCase() : '').filter(Boolean);
+        console.log("[Wallgarden Sync] Clicked path:", pathTagNames);
 
         const isLikeElement = (el) => {
             if (!el || !el.tagName) return false;
             const tag = el.tagName.toLowerCase();
             if (tag === 'like-button-view-model') return true;
             if (tag === 'button') {
-                const label = (el.getAttribute('aria-label') || '').toLowerCase();
-                const title = (el.getAttribute('title') || '').toLowerCase();
-                if (label.includes('like this video') || title.includes('i like this')) return true;
+                const label = (el.getAttribute('aria-label') || '').toLowerCase().trim();
+                const title = (el.getAttribute('title') || '').toLowerCase().trim();
+                if (label.includes('like this video') || title.includes('i like this') || label === 'like' || title === 'like') return true;
             }
             if (tag === 'a' && el.querySelector && el.querySelector('yt-icon.ytd-thumb-up')) return true;
             return false;
@@ -989,9 +993,9 @@ function startSyncObservers() {
             const tag = el.tagName.toLowerCase();
             if (tag === 'dislike-button-view-model') return true;
             if (tag === 'button') {
-                const label = (el.getAttribute('aria-label') || '').toLowerCase();
-                const title = (el.getAttribute('title') || '').toLowerCase();
-                if (label.includes('dislike this video') || title.includes('i dislike this')) return true;
+                const label = (el.getAttribute('aria-label') || '').toLowerCase().trim();
+                const title = (el.getAttribute('title') || '').toLowerCase().trim();
+                if (label.includes('dislike this video') || title.includes('i dislike this') || label === 'dislike' || title === 'dislike') return true;
             }
             if (tag === 'a' && el.querySelector && el.querySelector('yt-icon.ytd-thumb-down')) return true;
             return false;
