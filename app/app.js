@@ -2548,11 +2548,8 @@ function openFloatingPlayer(videoId, title = "YouTube Video") {
         player.querySelector(".btn-popout").addEventListener("click", () => {
             const currentVideoId = player.dataset.videoId;
             if (currentVideoId) {
-                const popupWidth = 800;
-                const popupHeight = 800;
-                const left = window.screenX + window.outerWidth;
-                const top = window.screenY;
-                window.open(`https://www.youtube.com/watch?v=${currentVideoId}`, "YouTubePopup", `width=${popupWidth},height=${popupHeight},left=${left},top=${top},resizable=yes,scrollbars=yes`);
+                window.open(`https://www.youtube.com/watch?v=${currentVideoId}`, "_blank");
+                if (window.logYouTubeLaunch) window.logYouTubeLaunch(currentVideoId);
                 
                 player.style.display = "none";
                 if (window.floatingYtPlayer) {
@@ -2597,11 +2594,8 @@ function openFloatingPlayer(videoId, title = "YouTube Video") {
                     console.warn(`[Floating Player] YouTube embed failed with error code ${event.data} for ${videoId}`);
                     showToast("YouTube embed restricted. Auto-opening in new window...", "warning");
                     
-                    const popupWidth = 800;
-                    const popupHeight = 800;
-                    const left = window.screenX + window.outerWidth;
-                    const top = window.screenY;
-                    window.open(`https://www.youtube.com/watch?v=${videoId}`, "YouTubePopup", `width=${popupWidth},height=${popupHeight},left=${left},top=${top},resizable=yes,scrollbars=yes`);
+                    window.open(`https://www.youtube.com/watch?v=${videoId}`, "_blank");
+                    if (window.logYouTubeLaunch) window.logYouTubeLaunch(videoId);
                     
                     player.style.display = "none";
                     if (window.floatingYtPlayer) {
@@ -2660,7 +2654,7 @@ function playVideo(video) {
         if (btnOpenYoutube) {
             btnOpenYoutube.addEventListener("click", () => {
                 if (state.currentlyPlayingId) {
-                    window.open(`https://www.youtube.com/watch?v=${state.currentlyPlayingId}`, "YouTubePopup", "width=1000,height=600,left=100,top=100");
+                    window.open(`https://www.youtube.com/watch?v=${state.currentlyPlayingId}`, "_blank");
                     if (window.logYouTubeLaunch) window.logYouTubeLaunch(state.currentlyPlayingId);
                 }
             });
@@ -2968,14 +2962,14 @@ function playViaYouTubeEmbed(videoId, playerWrapper) {
                         playerEl.parentNode.innerHTML = `
                             <div class="restricted-mode-panel" style="display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; min-height: 360px; background: #111; border: 1px solid var(--card-border); border-radius: 8px; text-align: center; padding: 2rem;">
                                 <div style="font-size: 3rem; margin-bottom: 1rem;">📺</div>
-                                <h3 style="margin-bottom: 0.5rem; color: var(--text-primary);">Playing in Popup</h3>
-                                <p style="color: var(--text-muted); margin-bottom: 1.5rem; max-width: 400px;">This video is restricted and has opened in a standalone window.</p>
-                                <button class="btn btn-primary" onclick="window.open('https://www.youtube.com/watch?v=${videoId}', 'YouTubePopup', 'width=1000,height=600,left=100,top=100'); if(window.logYouTubeLaunch) window.logYouTubeLaunch('${videoId}');">Re-open Popup</button>
+                                <h3 style="margin-bottom: 0.5rem; color: var(--text-primary);">Playing in New Tab</h3>
+                                <p style="color: var(--text-muted); margin-bottom: 1.5rem; max-width: 400px;">This video is restricted and has opened in a new tab.</p>
+                                <button class="btn btn-primary" onclick="window.open('https://www.youtube.com/watch?v=${videoId}', '_blank'); if(window.logYouTubeLaunch) window.logYouTubeLaunch('${videoId}');">Re-open Tab</button>
                             </div>
                         `;
                     }
                     if (window.logYouTubeLaunch) window.logYouTubeLaunch(videoId);
-                    window.open(`https://www.youtube.com/watch?v=${videoId}`, 'YouTubePopup', 'width=1000,height=600,left=100,top=100');
+                    window.open(`https://www.youtube.com/watch?v=${videoId}`, '_blank');
                 }
             }
         });
