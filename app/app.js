@@ -2845,7 +2845,7 @@ async function playViaStreamProxy(videoId, playerWrapper) {
     console.log(`[Stream Proxy] Attempting direct stream for ${videoId}...`);
     
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+    const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s timeout
     
     try {
         const response = await fetch(`/scraper/stream/${videoId}`, {
