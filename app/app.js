@@ -1755,8 +1755,8 @@ function createVideoCard(video) {
         
         dropdown.innerHTML = `
             <div class="card-rating-row">
-                <button class="rate-thumb-btn thumb-up${currentRating === 5 ? ' active' : ''}" data-rating="5" title="Like">👍 Like</button>
-                <button class="rate-thumb-btn thumb-down${currentRating === -5 ? ' active' : ''}" data-rating="-5" title="Dislike">👎 Dislike</button>
+                <button class="rate-thumb-btn thumb-up${currentRating === 5 ? ' active' : ''}" data-rating="5" title="Like (Wallgarden)">👍 Like (Wallgarden)</button>
+                <button class="rate-thumb-btn thumb-down${currentRating === -5 ? ' active' : ''}" data-rating="-5" title="Dislike (Wallgarden)">👎 Dislike (Wallgarden)</button>
             </div>
             <button data-action="play-next">⏳ Play Next</button>
             <button data-action="add-to-queue">➕ Add to Queue</button>
@@ -2722,10 +2722,10 @@ function playVideo(video) {
                 ${escapeHTML(video.description || "No description available.").replace(/\n/g, '<br>')}
             </div>
             <div class="sidebar-actions-grid" style="grid-template-columns: 1fr 1fr;">
-                <button type="button" class="btn sidebar-btn-like${currentRating === 5 ? ' active' : ''}">👍 Like</button>
-                <button type="button" class="btn sidebar-btn-dislike${currentRating === -5 ? ' active' : ''}">👎 Dislike</button>
+                <button type="button" class="btn sidebar-btn-like${currentRating === 5 ? ' active' : ''}">👍 Like (Wallgarden)</button>
+                <button type="button" class="btn sidebar-btn-dislike${currentRating === -5 ? ' active' : ''}">👎 Dislike (Wallgarden)</button>
                 <button type="button" class="btn sidebar-btn-subscribe${isSubscribed ? ' active' : ''}">${isSubscribed ? '➖ Unsubscribe' : '➕ Subscribe'}</button>
-                <button type="button" class="btn sidebar-btn-playlist">▶️ Add to Playlist</button>
+                <button type="button" class="btn sidebar-btn-playlist">▶️ Save to Wallgarden</button>
             </div>
             ${topicBtnHtml}
             <button type="button" class="btn sidebar-btn-block" style="margin-top: 0.75rem; width: 100%;">🚫 Block Channel</button>
@@ -6024,4 +6024,84 @@ function renderLikedVideosView() {
         fragment.appendChild(vCard);
     });
     grid.appendChild(fragment);
+}
+
+// ── Session Tracking & Reconciliation (Phase 2) ─────────────
+window.logYouTubeLaunch = function(videoId) {
+    console.log(`[Session Tracking] Launched video ${videoId} to YouTube`);
+    state.launchedVideoId = videoId;
+    state.launchTimestamp = Date.now();
+};
+
+window.addEventListener('focus', () => {
+    if (state.launchedVideoId && state.launchTimestamp) {
+        const timeAway = Date.now() - state.launchTimestamp;
+        // If they were away for more than 10 seconds, ask about the video
+        if (timeAway > 10000) {
+            const vId = state.launchedVideoId;
+            setTimeout(() => {
+                showReconciliationPrompt(vId);
+            }, 500);
+        }
+        // Clear state so we don't prompt again for this launch
+        state.launchedVideoId = null;
+        state.launchTimestamp = null;
+    }
+});
+
+function showReconciliationPrompt(videoId) {
+    // Look up the video from cache if possible
+    let videoTitle = "the video";
+    if (state.cache && state.cache.videos) {
+        for (const channelId in state.cache.videos) {
+            const v = state.cache.videos[channelId].find(vid => vid.id === videoId);
+            if (v) {
+                videoTitle = `"${v.title}"`;
+                break;
+            }
+        }
+    }
+
+    // Only show if the inline player is still open for THIS video
+    const inlinePlayer = document.getElementById("inline-player");
+    if (!inlinePlayer || inlinePlayer.classList.contains("hidden") || state.currentlyPlayingId !== videoId) {
+        return;
+    }
+
+    // Remove existing banner if any
+    const existing = inlinePlayer.querySelector(".reconciliation-banner");
+    if (existing) existing.remove();
+
+    // Create a banner inside the inline player
+    const banner = document.createElement("div");
+    banner.className = "reconciliation-banner";
+    banner.style.cssText = "background: rgba(74, 222, 128, 0.1); border: 1px solid var(--accent); padding: 1rem; border-radius: 8px; margin: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; animation: fadeIn 0.3s ease;";
+    banner.innerHTML = `
+        <div>
+            <h4 style="margin: 0 0 0.25rem 0; color: var(--accent);">Welcome back!</h4>
+            <p style="margin: 0; font-size: 0.9rem; color: var(--text-primary);">Did you finish watching ${escapeHTML(videoTitle)} on YouTube?</p>
+        </div>
+        <div style="display: flex; gap: 0.5rem;">
+            <button class="btn btn-primary btn-sm btn-mark-watched" style="padding: 0.4rem 0.8rem;">✅ Mark Watched</button>
+            <button class="btn btn-secondary btn-sm btn-dismiss" style="padding: 0.4rem 0.8rem;">Dismiss</button>
+        </div>
+    `;
+
+    banner.querySelector(".btn-mark-watched").onclick = () => {
+        if (!state.watchedHistory) state.watchedHistory = {};
+        state.watchedHistory[videoId] = Date.now();
+        localStorage.setItem("wallgarden_watched", JSON.stringify(state.watchedHistory));
+        showToast("Marked as watched in Wallgarden", "success");
+        banner.remove();
+    };
+
+    banner.querySelector(".btn-dismiss").onclick = () => {
+        banner.remove();
+    };
+
+    // Insert after the player main area
+    const playerInner = inlinePlayer.querySelector(".inline-player-main");
+    if (playerInner) {
+        playerInner.appendChild(banner);
+    }
 }
