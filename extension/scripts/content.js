@@ -1,6 +1,7 @@
 // ============================================================
 //  WALLGARDEN: Content Script — CSS + Heuristic + Smart Blocklist
 // ============================================================
+console.log("🌿 Wallgarden Extension content script loaded!");
 
 // Default settings (all ON by default, except blockClipThanks which is opt-in)
 let settings = {
@@ -915,7 +916,11 @@ function getVideoIdFromUrl() {
 
 function sendSyncEvent(action, data = {}) {
     const videoId = getVideoIdFromUrl();
-    if (!videoId) return;
+    if (!videoId) {
+        console.warn("[Wallgarden Sync] sendSyncEvent failed: videoId not found in URL");
+        return;
+    }
+    console.log(`[Wallgarden Sync] sendSyncEvent: Sending ${action} for ${videoId}`);
     try {
         chrome.runtime.sendMessage({
             type: 'WALLGARDEN_SYNC',
@@ -925,11 +930,14 @@ function sendSyncEvent(action, data = {}) {
                 ...data
             }
         }, () => {
-            // Ignore runtime errors if background isn't listening
-            if (chrome.runtime.lastError) {}
+            if (chrome.runtime.lastError) {
+                console.warn("[Wallgarden Sync] sendMessage error callback:", chrome.runtime.lastError.message);
+            } else {
+                console.log("[Wallgarden Sync] sendMessage success");
+            }
         });
     } catch (e) {
-        // Handle context invalidated
+        console.error("[Wallgarden Sync] sendMessage failed with exception:", e.message);
     }
 }
 
@@ -982,7 +990,7 @@ function startSyncObservers() {
             if (tag === 'button') {
                 const label = (el.getAttribute('aria-label') || '').toLowerCase().trim();
                 const title = (el.getAttribute('title') || '').toLowerCase().trim();
-                if (label.includes('like this video') || title.includes('i like this') || label === 'like' || title === 'like') return true;
+                if (label.startsWith('like') || title.startsWith('like') || title.startsWith('i like')) return true;
             }
             if (tag === 'a' && el.querySelector && el.querySelector('yt-icon.ytd-thumb-up')) return true;
             return false;
@@ -995,7 +1003,7 @@ function startSyncObservers() {
             if (tag === 'button') {
                 const label = (el.getAttribute('aria-label') || '').toLowerCase().trim();
                 const title = (el.getAttribute('title') || '').toLowerCase().trim();
-                if (label.includes('dislike this video') || title.includes('i dislike this') || label === 'dislike' || title === 'dislike') return true;
+                if (label.startsWith('dislike') || title.startsWith('dislike') || title.startsWith('i dislike')) return true;
             }
             if (tag === 'a' && el.querySelector && el.querySelector('yt-icon.ytd-thumb-down')) return true;
             return false;
