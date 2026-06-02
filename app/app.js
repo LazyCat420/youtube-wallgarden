@@ -6118,10 +6118,22 @@ window.addEventListener("message", (event) => {
         state.videoRatings[payload.videoId] = 5;
         saveVideoRatings();
         showToast("👍 Synced Like from YouTube", "success");
+        if (state.currentlyPlayingId === payload.videoId) {
+            const likeBtn = document.querySelector(".sidebar-btn-like");
+            const dislikeBtn = document.querySelector(".sidebar-btn-dislike");
+            if (likeBtn) likeBtn.classList.add("active");
+            if (dislikeBtn) dislikeBtn.classList.remove("active");
+        }
     } else if (payload.action === 'DISLIKE') {
         state.videoRatings[payload.videoId] = -5;
         saveVideoRatings();
         showToast("👎 Synced Dislike from YouTube", "info");
+        if (state.currentlyPlayingId === payload.videoId) {
+            const likeBtn = document.querySelector(".sidebar-btn-like");
+            const dislikeBtn = document.querySelector(".sidebar-btn-dislike");
+            if (likeBtn) likeBtn.classList.remove("active");
+            if (dislikeBtn) dislikeBtn.classList.add("active");
+        }
     } else if (payload.action === 'WATCHED') {
         if (!state.watchedHistory) state.watchedHistory = {};
         state.watchedHistory[payload.videoId] = Date.now();
