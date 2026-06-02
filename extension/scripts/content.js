@@ -969,30 +969,90 @@ function startSyncObservers() {
 
     // 2. DOM Observers for Clicks (Likes, Subscriptions, Playlists)
     document.addEventListener('click', (e) => {
-        // LIKE
-        const likeBtn = e.target.closest('like-button-view-model button, ytd-toggle-button-renderer a:has(yt-icon.ytd-thumb-up)');
-        if (likeBtn) {
+        const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+
+        const isLikeElement = (el) => {
+            if (!el || !el.tagName) return false;
+            const tag = el.tagName.toLowerCase();
+            if (tag === 'like-button-view-model') return true;
+            if (tag === 'button') {
+                const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                const title = (el.getAttribute('title') || '').toLowerCase();
+                if (label.includes('like this video') || title.includes('i like this')) return true;
+            }
+            if (tag === 'a' && el.querySelector && el.querySelector('yt-icon.ytd-thumb-up')) return true;
+            return false;
+        };
+
+        const isDislikeElement = (el) => {
+            if (!el || !el.tagName) return false;
+            const tag = el.tagName.toLowerCase();
+            if (tag === 'dislike-button-view-model') return true;
+            if (tag === 'button') {
+                const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                const title = (el.getAttribute('title') || '').toLowerCase();
+                if (label.includes('dislike this video') || title.includes('i dislike this')) return true;
+            }
+            if (tag === 'a' && el.querySelector && el.querySelector('yt-icon.ytd-thumb-down')) return true;
+            return false;
+        };
+
+        const isSubscribeElement = (el) => {
+            if (!el || !el.tagName) return false;
+            const tag = el.tagName.toLowerCase();
+            return tag === 'yt-subscribe-button-view-model' || tag === 'ytd-subscribe-button-renderer';
+        };
+
+        const isPlaylistSaveElement = (el) => {
+            if (!el || !el.tagName) return false;
+            const tag = el.tagName.toLowerCase();
+            if (tag === 'ytd-menu-service-item-renderer' && el.querySelector && el.querySelector('yt-icon.ytd-playlist-add-icon')) return true;
+            if (tag === 'yt-button-view-model') {
+                const pathEl = el.querySelector('svg path');
+                if (pathEl && (pathEl.getAttribute('d') || '').includes('M14,10H2v2h12V10z')) return true;
+            }
+            return false;
+        };
+
+        let hasLike = path.some(isLikeElement);
+        let hasDislike = path.some(isDislikeElement);
+        let hasSub = path.some(isSubscribeElement);
+        let hasPlaylist = path.some(isPlaylistSaveElement);
+
+        // Fallback to light DOM closest matching
+        if (!hasLike) {
+            hasLike = !!e.target.closest('like-button-view-model button, segmented-like-dislike-button-view-model button:first-child, ytd-toggle-button-renderer a:has(yt-icon.ytd-thumb-up), button[aria-label*="like this video" i], button[title^="I like this" i]');
+        }
+        if (!hasDislike) {
+            hasDislike = !!e.target.closest('dislike-button-view-model button, segmented-like-dislike-button-view-model button:last-child, ytd-toggle-button-renderer a:has(yt-icon.ytd-thumb-down), button[aria-label*="dislike this video" i], button[title^="I dislike this" i]');
+        }
+        if (!hasSub) {
+            hasSub = !!e.target.closest('yt-subscribe-button-view-model button, ytd-subscribe-button-renderer button');
+        }
+        if (!hasPlaylist) {
+            hasPlaylist = !!e.target.closest('ytd-menu-service-item-renderer:has(yt-icon.ytd-playlist-add-icon), yt-button-view-model:has(svg path[d*="M14,10H2v2h12V10z M14,6H2v2h12V6z M18,14v-4h-2v4h-4v2h4v4h2v-4h4v-2H18z"])');
+        }
+
+        if (hasLike) {
+            console.log("[Wallgarden Sync] LIKE clicked");
             sendSyncEvent('LIKE');
             return;
         }
 
-        // DISLIKE
-        const dislikeBtn = e.target.closest('dislike-button-view-model button, ytd-toggle-button-renderer a:has(yt-icon.ytd-thumb-down)');
-        if (dislikeBtn) {
+        if (hasDislike) {
+            console.log("[Wallgarden Sync] DISLIKE clicked");
             sendSyncEvent('DISLIKE');
             return;
         }
 
-        // SUBSCRIBE
-        const subBtn = e.target.closest('yt-subscribe-button-view-model button, ytd-subscribe-button-renderer button');
-        if (subBtn) {
+        if (hasSub) {
+            console.log("[Wallgarden Sync] SUBSCRIBE clicked");
             sendSyncEvent('SUBSCRIBE');
             return;
         }
-        
-        // SAVE TO PLAYLIST (Clicking the "Save" menu item)
-        const saveBtn = e.target.closest('ytd-menu-service-item-renderer:has(yt-icon.ytd-playlist-add-icon), yt-button-view-model:has(svg path[d*="M14,10H2v2h12V10z M14,6H2v2h12V6z M18,14v-4h-2v4h-4v2h4v4h2v-4h4v-2H18z"])');
-        if (saveBtn) {
+
+        if (hasPlaylist) {
+            console.log("[Wallgarden Sync] PLAYLIST_SAVE clicked");
             sendSyncEvent('PLAYLIST_SAVE');
         }
     }, true);
