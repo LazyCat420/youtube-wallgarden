@@ -40,7 +40,8 @@ let state = {
     settings: {
         useYtdlp: true,
         muteShorts: false,
-        altPlayerInstance: "https://yewtu.be"
+        altPlayerInstance: "https://yewtu.be",
+        weatherCity: ""
     },
     discoverBatchIndex: 0,
     discoverMaxReached: false,
@@ -350,6 +351,10 @@ function loadState() {
     const altPlayerInput = document.getElementById("input-alt-player-instance");
     if (altPlayerInput) {
         altPlayerInput.value = state.settings.altPlayerInstance || "https://yewtu.be";
+    }
+    const weatherCityInput = document.getElementById("input-weather-city");
+    if (weatherCityInput) {
+        weatherCityInput.value = state.settings.weatherCity || "";
     }
     
     // Update profiles settings UI dropdowns
@@ -736,6 +741,14 @@ function setupEventListeners() {
         altPlayerInput.addEventListener("input", (e) => {
             state.settings.altPlayerInstance = e.target.value.trim() || "https://yewtu.be";
             saveSettings();
+        });
+    }
+    const weatherCityInput = document.getElementById("input-weather-city");
+    if (weatherCityInput) {
+        weatherCityInput.addEventListener("change", (e) => {
+            state.settings.weatherCity = e.target.value.trim();
+            saveSettings();
+            fetchWeather();
         });
     }
 
@@ -5690,25 +5703,46 @@ function renderDiscoverChannelsView() {
 
 async function fetchWeather() {
     try {
-        const geoRes = await fetch("https://ipapi.co/json/");
-        if (!geoRes.ok) return;
-        const geoData = await geoRes.json();
+        let latitude, longitude, cityDisplay;
         
-        const weatherRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${geoData.latitude}&longitude=${geoData.longitude}&current_weather=true`);
-        if (!weatherRes.ok) return;
+        if (state.settings.weatherCity && state.settings.weatherCity.trim() !== "") {
+            const cityQuery = encodeURIComponent(state.settings.weatherCity.trim());
+            const geoRes = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${cityQuery}&count=1&language=en&format=json`);
+            if (!geoRes.ok) throw new Error("Geocoding failed");
+            const geoData = await geoRes.json();
+            if (!geoData.results || geoData.results.length === 0) throw new Error("City not found");
+            
+            latitude = geoData.results[0].latitude;
+            longitude = geoData.results[0].longitude;
+            cityDisplay = geoData.results[0].name;
+        } else {
+            const geoRes = await fetch("https://ipapi.co/json/");
+            if (!geoRes.ok) throw new Error("IP Geolocation failed");
+            const geoData = await geoRes.json();
+            latitude = geoData.latitude;
+            longitude = geoData.longitude;
+            cityDisplay = geoData.city;
+        }
+        
+        const weatherRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true`);
+        if (!weatherRes.ok) throw new Error("Weather fetch failed");
         const weatherData = await weatherRes.json();
         
         const widget = document.getElementById("weather-widget");
         if (widget) {
             const temp = Math.round(weatherData.current_weather.temperature);
             widget.innerHTML = `<div style="font-size: 0.85rem; color: var(--text-muted); padding: 0.5rem 1rem; border-top: 1px solid var(--card-border); border-bottom: 1px solid var(--card-border); margin: 0.5rem 0;">
-                🌤️ ${geoData.city}: ${temp}°C
+                🌤️ ${cityDisplay}: ${temp}°C
             </div>`;
         }
     } catch (e) {
         console.error("Weather fetch failed:", e);
         const widget = document.getElementById("weather-widget");
-        if (widget) widget.style.display = 'none';
+        if (widget) {
+            widget.innerHTML = `<div style="font-size: 0.85rem; color: #ff5555; padding: 0.5rem 1rem; border-top: 1px solid var(--card-border); border-bottom: 1px solid var(--card-border); margin: 0.5rem 0;">
+                🌤️ Weather unavailable
+            </div>`;
+        }
     }
 }
 
