@@ -1047,31 +1047,45 @@ function startSyncObservers() {
         const pathTagNames = path.map(el => el.tagName ? el.tagName.toLowerCase() : '').filter(Boolean);
         console.log("[Wallgarden Sync] Clicked path:", pathTagNames);
 
-        const isLikeElement = (el) => {
-            if (!el || !el.tagName) return false;
-            const tag = el.tagName.toLowerCase();
-            if (tag === 'like-button-view-model') return true;
-            if (tag === 'button') {
-                const label = (el.getAttribute('aria-label') || '').toLowerCase().trim();
-                const title = (el.getAttribute('title') || '').toLowerCase().trim();
-                if (label.startsWith('like') || title.startsWith('like') || title.startsWith('i like')) return true;
-            }
-            if (tag === 'a' && el.querySelector && el.querySelector('yt-icon.ytd-thumb-up')) return true;
-            return false;
-        };
+        // Let's use ultra-robust DOM closest targeting instead of path scanning
+        // Segmented button on modern Youtube: <segmented-like-dislike-button-view-model>
+        // It contains two yt-smartimation, the first is Like, the second is Dislike.
+        
+        let hasLike = false;
+        let hasDislike = false;
 
-        const isDislikeElement = (el) => {
-            if (!el || !el.tagName) return false;
-            const tag = el.tagName.toLowerCase();
-            if (tag === 'dislike-button-view-model') return true;
-            if (tag === 'button') {
-                const label = (el.getAttribute('aria-label') || '').toLowerCase().trim();
-                const title = (el.getAttribute('title') || '').toLowerCase().trim();
-                if (label.startsWith('dislike') || title.startsWith('dislike') || title.startsWith('i dislike')) return true;
+        const segmentedContainer = e.target.closest('segmented-like-dislike-button-view-model');
+        if (segmentedContainer) {
+            // If we clicked inside the segmented container, determine if it's the first button (like) or second (dislike)
+            const buttons = Array.from(segmentedContainer.querySelectorAll('button, yt-button-view-model'));
+            const clickedBtn = e.target.closest('button, yt-button-view-model');
+            if (clickedBtn && buttons.length >= 2) {
+                if (clickedBtn === buttons[0]) hasLike = true;
+                if (clickedBtn === buttons[1]) hasDislike = true;
             }
-            if (tag === 'a' && el.querySelector && el.querySelector('yt-icon.ytd-thumb-down')) return true;
-            return false;
-        };
+        }
+
+        // Fallbacks for standard DOM nodes
+        if (!hasLike && !hasDislike) {
+            const btn = e.target.closest('like-button-view-model, dislike-button-view-model, button');
+            if (btn) {
+                const tag = btn.tagName.toLowerCase();
+                const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+                const title = (btn.getAttribute('title') || '').toLowerCase();
+                
+                if (tag === 'like-button-view-model' || 
+                    aria.includes('like this video') || 
+                    (title.includes('like') && !title.includes('dislike')) ||
+                    btn.querySelector('yt-icon.ytd-thumb-up, path[d^="M3,11h3v10H3V11z M18.59,10"]')) {
+                    hasLike = true;
+                } else if (tag === 'dislike-button-view-model' || 
+                           aria.includes('dislike this video') || 
+                           title.includes('dislike') ||
+                           btn.querySelector('yt-icon.ytd-thumb-down, path[d^="M15,3H6c-0.83,0-1.54,0.5-1.84,1.22l-3.02,7.05C1.05,11.5"]')) {
+                    hasDislike = true;
+                }
+            }
+        }
 
         const isSubscribeElement = (el) => {
             if (!el || !el.tagName) return false;
@@ -1090,18 +1104,9 @@ function startSyncObservers() {
             return false;
         };
 
-        let hasLike = path.some(isLikeElement);
-        let hasDislike = path.some(isDislikeElement);
         let hasSub = path.some(isSubscribeElement);
         let hasPlaylist = path.some(isPlaylistSaveElement);
 
-        // Fallback to light DOM closest matching
-        if (!hasLike) {
-            hasLike = !!e.target.closest('like-button-view-model button, segmented-like-dislike-button-view-model button:first-child, ytd-toggle-button-renderer a:has(yt-icon.ytd-thumb-up), button[aria-label*="like this video" i], button[title^="I like this" i]');
-        }
-        if (!hasDislike) {
-            hasDislike = !!e.target.closest('dislike-button-view-model button, segmented-like-dislike-button-view-model button:last-child, ytd-toggle-button-renderer a:has(yt-icon.ytd-thumb-down), button[aria-label*="dislike this video" i], button[title^="I dislike this" i]');
-        }
         if (!hasSub) {
             hasSub = !!e.target.closest('yt-subscribe-button-view-model button, ytd-subscribe-button-renderer button');
         }
