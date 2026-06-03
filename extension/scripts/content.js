@@ -941,6 +941,70 @@ function sendSyncEvent(action, data = {}) {
     }
 }
 
+function scrapeVideoMetadata() {
+    let title = '';
+    const titleEl = document.querySelector(
+        'ytd-watch-metadata h1 yt-formatted-string, ' +
+        'h1.ytd-watch-metadata yt-formatted-string, ' +
+        'ytd-video-primary-info-renderer h1 yt-formatted-string, ' +
+        'h1.title yt-formatted-string'
+    );
+    if (titleEl) {
+        title = titleEl.textContent.trim();
+    }
+    if (!title) {
+        title = document.title.replace(/\s*-\s*YouTube$/, '').trim();
+    }
+
+    let channelName = '';
+    let channelId = '';
+    const channelEl = document.querySelector(
+        'ytd-watch-metadata #channel-name a, ' +
+        'ytd-video-owner-renderer #channel-name a, ' +
+        'ytd-channel-name a, ' +
+        '#owner-name a'
+    );
+    if (channelEl) {
+        channelName = channelEl.textContent.trim();
+        const href = channelEl.getAttribute('href') || '';
+        if (href.startsWith('/channel/')) {
+            channelId = href.replace('/channel/', '');
+        } else if (href.startsWith('/@')) {
+            channelId = href.replace('/', '');
+        }
+    }
+
+    // Extract duration if available
+    let duration = 0;
+    const progressEl = document.querySelector('.ytp-time-duration');
+    if (progressEl) {
+        const parts = progressEl.textContent.trim().split(':').map(Number);
+        if (parts.length === 2) {
+            duration = parts[0] * 60 + parts[1];
+        } else if (parts.length === 3) {
+            duration = parts[0] * 3600 + parts[1] * 60 + parts[2];
+        }
+    }
+
+    // Extract view count if available
+    let viewCount = 0;
+    const viewsEl = document.querySelector('ytd-watch-metadata #info-container span, ytd-video-primary-info-renderer #info-text span');
+    if (viewsEl) {
+        const match = viewsEl.textContent.replace(/,/g, '').match(/(\d+)\s*views/);
+        if (match) {
+            viewCount = parseInt(match[1], 10);
+        }
+    }
+
+    return {
+        title,
+        channelName,
+        channelId,
+        duration,
+        viewCount
+    };
+}
+
 function startSyncObservers() {
     // 1. Watch Progress (Video Element)
     let videoObserverAdded = false;
@@ -1047,13 +1111,15 @@ function startSyncObservers() {
 
         if (hasLike) {
             console.log("[Wallgarden Sync] LIKE clicked");
-            sendSyncEvent('LIKE');
+            const metadata = scrapeVideoMetadata();
+            sendSyncEvent('LIKE', metadata);
             return;
         }
 
         if (hasDislike) {
             console.log("[Wallgarden Sync] DISLIKE clicked");
-            sendSyncEvent('DISLIKE');
+            const metadata = scrapeVideoMetadata();
+            sendSyncEvent('DISLIKE', metadata);
             return;
         }
 

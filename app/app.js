@@ -1683,6 +1683,16 @@ function createVideoCard(video) {
     if (video.score >= 5) scoreClass = "high";
     if (video.score < 0) scoreClass = "low";
     
+    const userRating = state.videoRatings && state.videoRatings[video.id];
+    let ratingBadge = '';
+    if (userRating === 5) {
+        ratingBadge = `<div class="score-badge high">👍 Liked</div>`;
+    } else if (userRating === -5) {
+        ratingBadge = `<div class="score-badge low">👎 Disliked</div>`;
+    } else {
+        ratingBadge = `<div class="score-badge ${scoreClass}">★ ${video.score || 0}</div>`;
+    }
+    
     // Publish date removed as requested
     const topMatchedTopic = video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:") && t !== "vintage" && t !== "viral-spam") : null;
     const categoryText = topMatchedTopic ? capitalizePhrase(topMatchedTopic) : "";
@@ -1707,7 +1717,7 @@ function createVideoCard(video) {
             <div class="thumbnail-play-overlay">
                 <div class="play-icon-circle">▶</div>
             </div>
-            <div class="score-badge ${scoreClass}">★ ${video.score || 0}</div>
+            ${ratingBadge}
             ${video.isDiscover && video.discoveryTopic ? `<div class="category-badge" style="background:var(--accent);color:var(--bg)">✨ ${capitalizePhrase(video.discoveryTopic)}</div>` : (video.isDiscover ? `<div class="search-badge">🔍 Search</div>` : (categoryText ? `<div class="category-badge">${categoryText}</div>` : ""))}
         </div>
         <div class="card-details">
@@ -6161,15 +6171,17 @@ window.addEventListener("message", (event) => {
                 state.likedVideos.push(video);
             }
         } else {
-            // Fallback object if video is not in current caches
+            // Fallback object using metadata from payload if available
             const fallbackVideo = {
                 id: payload.videoId,
-                title: "Liked Video (Synced)",
-                channelName: "YouTube Curation",
-                channelId: "",
+                title: payload.title || "Liked Video (Synced)",
+                channelName: payload.channelName || "YouTube Curation",
+                channelId: payload.channelId || "",
                 published: Math.floor(Date.now() / 1000),
                 thumbnailUrl: `https://i.ytimg.com/vi/${payload.videoId}/hqdefault.jpg`,
-                description: "Synced from YouTube Likes."
+                description: payload.description || "Synced from YouTube Likes.",
+                duration: payload.duration || 0,
+                viewCount: payload.viewCount || 0
             };
             if (!state.likedVideos.some(v => v.id === fallbackVideo.id)) {
                 state.likedVideos.push(fallbackVideo);
