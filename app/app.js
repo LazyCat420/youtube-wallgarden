@@ -1930,6 +1930,11 @@ function createVideoCard(video) {
 
 function renderCard(video, targetContainer) {
     const card = createVideoCard(video);
+    const topic = (video.discoveryTopic || video._topic || video.topic || "").trim().toLowerCase();
+    if (topic) {
+        card.setAttribute("data-discover-topic", topic);
+    }
+    card.setAttribute("data-video-id", video.id);
     targetContainer.appendChild(card);
 }
 
@@ -3339,9 +3344,7 @@ function renderPreferencesLists(filterQuery) {
     };
 
     renderList("liked-topics-list", state.likedTopics, (phrase) => {
-        state.likedTopics = state.likedTopics.filter(t => t !== phrase);
-        saveLikedTopics();
-        renderPreferencesLists(q);
+        nukeDiscoverTopic(phrase);
     });
 
     renderList("disliked-topics-list", state.dislikedTopics, (phrase) => {
@@ -3423,16 +3426,7 @@ function renderTopicsList(filterQuery) {
 
         row.querySelector(".btn-remove-legacy").addEventListener("click", (e) => {
             const phrase = e.target.dataset.phrase;
-            state.topics = state.topics.filter(t => t.phrase !== phrase);
-            saveTopics();
-            
-            const normalized = phrase.trim().toLowerCase();
-            // Ensure it's not in liked
-            state.likedTopics = state.likedTopics.filter(t => t !== normalized);
-            saveLikedTopics();
-            
-            renderPreferencesLists(document.getElementById("input-topic-search")?.value || "");
-            renderTopicsList(document.getElementById("input-legacy-topic-search")?.value || "");
+            nukeDiscoverTopic(phrase);
         });
         list.appendChild(row);
     });
@@ -5144,6 +5138,58 @@ async function loadNextSmartFeedBatch() {
     }
 }
 
+// Replenish Smart Feed with diverse suggestions from pool when topics are removed
+function replenishSmartFeed(count, appendToDom = true) {
+    if (count <= 0) return;
+    
+    const pool = state.smartFeedSuggestionPool;
+    if (pool.length > 0) {
+        const videosToRender = pickDiverseBatch(pool, count);
+        saveSmartFeedSuggestionPool();
+        
+        // Filter allowed videos on-the-fly
+        const allowedVideos = videosToRender.filter(v => {
+            const evaluation = getScoreAndMatches(v);
+            v.score = evaluation.score;
+            v.matchedTopics = evaluation.matches;
+            
+            const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === v.channelId);
+            const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && v.channelName && v.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+            
+            return !isBlockedId && !isBlockedName && v.score > -10;
+        });
+        
+        const existingIds = new Set(state.smartFeedVideos.map(v => v.id));
+        const deduplicated = allowedVideos.filter(v => !existingIds.has(v.id));
+        
+        if (deduplicated.length > 0) {
+            state.smartFeedVideos.push(...deduplicated);
+            
+            if (appendToDom) {
+                const suggestionsGrid = document.getElementById("suggestions-grid") || document.getElementById("video-grid");
+                if (suggestionsGrid) {
+                    const fragment = document.createDocumentFragment();
+                    deduplicated.forEach(video => {
+                        renderCard(video, fragment);
+                    });
+                    suggestionsGrid.appendChild(fragment);
+                }
+            }
+        }
+        
+        // Kick off buffer preloader in background
+        fillSmartFeedPreloadBuffer();
+        
+        // If we got fewer than the requested count (due to filters), try to replenish more
+        const actualAdded = deduplicated.length;
+        if (actualAdded < count && pool.length > 0) {
+            replenishSmartFeed(count - actualAdded, appendToDom);
+        }
+    } else {
+        fillSmartFeedPreloadBuffer();
+    }
+}
+
 // Mute and remove a discovery topic completely
 function nukeDiscoverTopic(topic) {
     if (!topic) return;
@@ -5181,7 +5227,13 @@ function nukeDiscoverTopic(topic) {
     saveSmartFeedSuggestionPool();
     
     // 4. Remove videos of this topic from active smartFeedVideos state
-    state.smartFeedVideos = state.smartFeedVideos.filter(v => (v.discoveryTopic || "").toLowerCase() !== normalizedTopic);
+    const initialVideosCount = state.smartFeedVideos.length;
+    state.smartFeedVideos = state.smartFeedVideos.filter(v => 
+        (v.topic || "").toLowerCase() !== normalizedTopic &&
+        (v.discoveryTopic || "").toLowerCase() !== normalizedTopic &&
+        (v._topic || "").toLowerCase() !== normalizedTopic
+    );
+    const removedCount = initialVideosCount - state.smartFeedVideos.length;
     
     // 5. Locate and remove DOM elements
     const elements = [
@@ -5199,10 +5251,23 @@ function nukeDiscoverTopic(topic) {
     
     showToast(`🗑️ Burned query "${capitalizePhrase(topic)}" — LLM won't suggest this again`, "info");
     
-    // 6. Fill buffer and load next batch in background to keep feed populated
+    // 6. Replenish and load next batch in background
     setTimeout(() => {
+        if (removedCount > 0 && state.currentView === "smart-feed") {
+            replenishSmartFeed(removedCount, true);
+        }
         fillSmartFeedPreloadBuffer();
-    }, 500);
+    }, 400);
+    
+    // 7. Update settings list views if they are currently drawn
+    if (typeof renderPreferencesLists === "function") {
+        const inputTopicSearch = document.getElementById("input-topic-search");
+        renderPreferencesLists(inputTopicSearch ? inputTopicSearch.value : "");
+    }
+    if (typeof renderTopicsList === "function") {
+        const inputLegacyTopicSearch = document.getElementById("input-legacy-topic-search");
+        renderTopicsList(inputLegacyTopicSearch ? inputLegacyTopicSearch.value : "");
+    }
 }
 
 // Edit a discovery topic and replace its contents inline
