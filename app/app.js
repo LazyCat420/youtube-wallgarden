@@ -4808,6 +4808,7 @@ async function fetchVideosForTopic(topic) {
 }
 
 let smartFeedPreloadTimeout = null;
+let currentPreloadPromise = null;
 
 // Fisher-Yates shuffle for unbiased randomization
 function shuffleArray(arr) {
@@ -4865,17 +4866,19 @@ function pickDiverseBatch(pool, batchSize) {
 }
 
 async function fillSmartFeedPreloadBuffer() {
-    if (state.smartFeedPreloadLoading) return;
+    if (state.smartFeedPreloadLoading) {
+        return currentPreloadPromise || Promise.resolve();
+    }
     
     // Do not pre-load if there are no positive topics added yet
     if (state.topics.filter(t => t.weight > 0).length === 0) {
-        return;
+        return Promise.resolve();
     }
     
     // Keep a larger buffer (1000 suggestions) for instant zero-lag loading
     const targetPreloadCount = 1000;
     if (state.smartFeedSuggestionPool.length >= targetPreloadCount) {
-        return; // Suggestion pool is full
+        return Promise.resolve();
     }
     
     // Clear any pending timeout to prevent duplicate schedules
@@ -4903,15 +4906,17 @@ async function fillSmartFeedPreloadBuffer() {
         state.smartFeedTopicsQueue = [...randomizedTopics];
     }
     
-    // On cold start (pool empty), fetch multiple topics in parallel for faster population
+    // If pool is empty or low, fetch multiple topics in parallel for speed and topic diversity
+    const isPoolLow = state.smartFeedSuggestionPool.length < 24;
+    const parallelCount = isPoolLow ? 3 : 1;
     const isPoolEmpty = state.smartFeedSuggestionPool.length === 0;
-    const parallelCount = isPoolEmpty ? 5 : 1;
+    
     const topicsToFetch = [];
     for (let i = 0; i < parallelCount; i++) {
         const topic = state.smartFeedTopicsQueue.shift();
         if (topic) topicsToFetch.push(topic);
     }
-    if (topicsToFetch.length === 0) return;
+    if (topicsToFetch.length === 0) return Promise.resolve();
     
     state.smartFeedPreloadLoading = true;
     state.smartFeedUsedTopics.push(...topicsToFetch);
@@ -4919,68 +4924,68 @@ async function fillSmartFeedPreloadBuffer() {
     if (isPoolEmpty) {
         console.log(`[Smart Feed Preload] Cold start — parallel fetching ${topicsToFetch.length} topics: ${topicsToFetch.join(', ')}`);
     } else {
-        console.log(`[Smart Feed Preload] Pre-fetching discovery videos for topic: "${topicsToFetch[0]}"...`);
+        console.log(`[Smart Feed Preload] Pre-fetching discovery videos for ${topicsToFetch.length} topics: ${topicsToFetch.join(', ')}`);
     }
     
-    try {
-        // Fire all topic fetches in parallel
-        const fetchPromises = topicsToFetch.map(topic => 
-            fetchVideosForTopic(topic)
-                .then(videos => ({ topic, videos: videos || [] }))
-                .catch(err => {
-                    console.warn(`[Smart Feed Preload] Failed for "${topic}":`, err.message);
-                    return { topic, videos: [] };
-                })
-        );
-        
-        const results = await Promise.all(fetchPromises);
-        const timestamp = Date.now();
-        let totalAdded = 0;
-        
-        for (const { topic, videos } of results) {
-            if (videos.length > 0) {
-                videos.forEach(v => {
-                    v._topic = topic;
-                    v.crawledAt = timestamp;
-                });
+    currentPreloadPromise = (async () => {
+        try {
+            // Fire all topic fetches in parallel
+            const fetchPromises = topicsToFetch.map(topic => 
+                fetchVideosForTopic(topic)
+                    .then(videos => ({ topic, videos: videos || [] }))
+                    .catch(err => {
+                        console.warn(`[Smart Feed Preload] Failed for "${topic}":`, err.message);
+                        return { topic, videos: [] };
+                    })
+            );
+            
+            const results = await Promise.all(fetchPromises);
+            const timestamp = Date.now();
+            let totalAdded = 0;
+            
+            for (const { topic, videos } of results) {
+                if (videos.length > 0) {
+                    videos.forEach(v => {
+                        v._topic = topic;
+                        v.crawledAt = timestamp;
+                    });
+                    
+                    // Limit to a max of 8 videos per topic to ensure a diverse mix in the feed
+                    const limitedVideos = videos.slice(0, 8);
+                    state.smartFeedSuggestionPool.push(...limitedVideos);
+                    totalAdded += limitedVideos.length;
+                } else {
+                    console.warn(`[Smart Feed Preload] No videos found for topic "${topic}".`);
+                }
+            }
+            
+            if (totalAdded > 0) {
+                // Fisher-Yates shuffle to mix topics seamlessly
+                shuffleArray(state.smartFeedSuggestionPool);
+                saveSmartFeedSuggestionPool();
                 
-                // Limit to a max of 8 videos per topic to ensure a diverse mix in the feed
-                // and prevent one topic (e.g. 50 videos) from dominating the view at once
-                const limitedVideos = videos.slice(0, 8);
-                state.smartFeedSuggestionPool.push(...limitedVideos);
-                totalAdded += limitedVideos.length;
-            } else {
-                console.warn(`[Smart Feed Preload] No videos found for topic "${topic}".`);
+                console.log(`[Smart Feed Preload] Successfully preloaded ${totalAdded} videos from ${results.filter(r => r.videos.length > 0).length} topics. Pool size: ${state.smartFeedSuggestionPool.length}`);
+                
+                if (state.currentView === "smart-feed" && state.smartFeedVideos.length === 0 && !state.smartFeedLoading) {
+                    loadNextSmartFeedBatch();
+                }
+            }
+        } catch (err) {
+            console.error(`[Smart Feed Preload] Failed preloading:`, err);
+        } finally {
+            state.smartFeedPreloadLoading = false;
+            currentPreloadPromise = null;
+            
+            // Cooldown delay of 1.5 seconds between fetches to protect from rate-limiting
+            if (state.smartFeedSuggestionPool.length < targetPreloadCount) {
+                smartFeedPreloadTimeout = setTimeout(() => {
+                    fillSmartFeedPreloadBuffer();
+                }, 1500);
             }
         }
-        
-        if (totalAdded > 0) {
-            // Fisher-Yates shuffle to mix topics seamlessly
-            shuffleArray(state.smartFeedSuggestionPool);
-            
-            saveSmartFeedSuggestionPool();
-            
-            console.log(`[Smart Feed Preload] Successfully preloaded ${totalAdded} videos from ${results.filter(r => r.videos.length > 0).length} topics. Pool size: ${state.smartFeedSuggestionPool.length}`);
-            
-            // If the Smart Feed currently has no discovery videos rendered, and the user is waiting,
-            // we should instantly render this newly loaded batch!
-            if (state.currentView === "smart-feed" && state.smartFeedVideos.length === 0 && !state.smartFeedLoading) {
-                loadNextSmartFeedBatch();
-            }
-        }
-    } catch (err) {
-        console.error(`[Smart Feed Preload] Failed preloading:`, err);
-    } finally {
-        state.smartFeedPreloadLoading = false;
-        
-        // Cooldown delay of 1.5 seconds between fetches to protect from rate-limiting
-        // Only schedule if we are still below target preload count
-        if (state.smartFeedSuggestionPool.length < targetPreloadCount) {
-            smartFeedPreloadTimeout = setTimeout(() => {
-                fillSmartFeedPreloadBuffer();
-            }, 1500);
-        }
-    }
+    })();
+    
+    return currentPreloadPromise;
 }
 
 async function loadNextSmartFeedBatch() {
@@ -5139,10 +5144,15 @@ async function loadNextSmartFeedBatch() {
 }
 
 // Replenish Smart Feed with diverse suggestions from pool when topics are removed
-function replenishSmartFeed(count, appendToDom = true) {
+async function replenishSmartFeed(count, appendToDom = true) {
     if (count <= 0) return;
     
     const pool = state.smartFeedSuggestionPool;
+    if (pool.length < count) {
+        // Pool is low! We need to preload more videos right now and wait for them.
+        await fillSmartFeedPreloadBuffer();
+    }
+    
     if (pool.length > 0) {
         const videosToRender = pickDiverseBatch(pool, count);
         saveSmartFeedSuggestionPool();
@@ -5183,10 +5193,10 @@ function replenishSmartFeed(count, appendToDom = true) {
         // If we got fewer than the requested count (due to filters), try to replenish more
         const actualAdded = deduplicated.length;
         if (actualAdded < count && pool.length > 0) {
-            replenishSmartFeed(count - actualAdded, appendToDom);
+            await replenishSmartFeed(count - actualAdded, appendToDom);
         }
     } else {
-        fillSmartFeedPreloadBuffer();
+        await fillSmartFeedPreloadBuffer();
     }
 }
 
@@ -5252,9 +5262,9 @@ function nukeDiscoverTopic(topic) {
     showToast(`🗑️ Burned query "${capitalizePhrase(topic)}" — LLM won't suggest this again`, "info");
     
     // 6. Replenish and load next batch in background
-    setTimeout(() => {
+    setTimeout(async () => {
         if (removedCount > 0 && state.currentView === "smart-feed") {
-            replenishSmartFeed(removedCount, true);
+            await replenishSmartFeed(removedCount, true);
         }
         fillSmartFeedPreloadBuffer();
     }, 400);
