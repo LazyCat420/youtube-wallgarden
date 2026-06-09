@@ -1784,6 +1784,7 @@ function createVideoCard(video) {
             <button data-action="play-next">⏳ Play Next</button>
             <button data-action="add-to-queue">➕ Add to Queue</button>
             <button data-action="play-inline">📺 Play Inline</button>
+            <button data-action="add-to-playlist">📂 Add to Playlist</button>
             <button data-action="subscribe">${isSubscribed ? '➖ Unsubscribe' : '➕ Subscribe to Channel'}</button>
             <button class="danger" data-action="block">🚫 Block Channel</button>
             <button data-action="remove-topic"${videoTopic ? '' : ' disabled'}>🗑️ Remove Topic${videoTopic ? ': ' + capitalizePhrase(videoTopic) : ''}</button>
@@ -1839,6 +1840,12 @@ function createVideoCard(video) {
             ev.stopPropagation();
             dropdown.remove();
             playVideo(video);
+        });
+
+        dropdown.querySelector('[data-action="add-to-playlist"]').addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            dropdown.remove();
+            showPlaylistModal(video);
         });
 
         dropdown.querySelector('[data-action="block"]').addEventListener("click", (ev) => {
