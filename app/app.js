@@ -2697,14 +2697,64 @@ function playVideo(video) {
             '  </div>',
             '</div>'
         ].join("");
+        // Create resizer bar
+        const resizer = document.createElement("div");
+        resizer.id = "watch-resizer";
+        resizer.className = "watch-resizer";
+
         // Insert before .feed-section inside .main-content
         const feedSection = document.querySelector(".feed-section");
         if (feedSection && feedSection.parentNode) {
             feedSection.parentNode.insertBefore(inlinePlayer, feedSection);
+            feedSection.parentNode.insertBefore(resizer, feedSection);
         } else {
             const mainContent = document.querySelector(".main-content");
-            if (mainContent) mainContent.appendChild(inlinePlayer);
+            if (mainContent) {
+                mainContent.appendChild(inlinePlayer);
+                mainContent.appendChild(resizer);
+            }
         }
+
+        // Setup resizer dragging logic (pointer events)
+        let isDragging = false;
+        resizer.addEventListener("pointerdown", (e) => {
+            e.preventDefault();
+            isDragging = true;
+            resizer.classList.add("dragging");
+            resizer.setPointerCapture(e.pointerId);
+        });
+
+        resizer.addEventListener("pointermove", (e) => {
+            if (!isDragging) return;
+            const mainContent = document.querySelector(".main-content");
+            if (!mainContent) return;
+
+            const rect = mainContent.getBoundingClientRect();
+            const minRight = 300; // minimum width of feed-section in px
+            const minLeft = 400;  // minimum width of inline-player in px
+
+            let rightWidth = rect.right - e.clientX;
+
+            if (rightWidth < minRight) rightWidth = minRight;
+            if (rect.width - rightWidth < minLeft) rightWidth = rect.width - minLeft;
+
+            mainContent.style.gridTemplateColumns = `1fr 6px ${rightWidth}px`;
+            localStorage.setItem("watch-sidebar-width", rightWidth);
+        });
+
+        const stopDragging = (e) => {
+            if (isDragging) {
+                isDragging = false;
+                resizer.classList.remove("dragging");
+                try {
+                    resizer.releasePointerCapture(e.pointerId);
+                } catch (err) {}
+            }
+        };
+
+        resizer.addEventListener("pointerup", stopDragging);
+        resizer.addEventListener("pointercancel", stopDragging);
+
         // Bind close button using querySelector on the element itself
         inlinePlayer.querySelector(".inline-player-close").addEventListener("click", closePlayer);
 
@@ -2907,9 +2957,17 @@ function playVideo(video) {
     inlinePlayer.classList.remove("hidden", "closing");
     inlinePlayer.style.display = "";
 
-    // Scroll the main content area so player is visible
+    // Scroll the main content area so player is visible & apply custom width if saved
     const mainContent = document.querySelector(".main-content");
-    if (mainContent) mainContent.scrollTop = 0;
+    if (mainContent) {
+        mainContent.scrollTop = 0;
+        const savedWidth = localStorage.getItem("watch-sidebar-width");
+        if (savedWidth) {
+            mainContent.style.gridTemplateColumns = `1fr 6px ${savedWidth}px`;
+        } else {
+            mainContent.style.gridTemplateColumns = ""; // Use CSS default
+        }
+    }
 
     // Trigger background similar topic generation (deferred)
     if (video.title) {
@@ -3062,6 +3120,13 @@ function closePlayer() {
     const inlinePlayer = document.getElementById("inline-player");
     if (!inlinePlayer) return;
     document.body.classList.remove("watch-mode");
+    
+    // Reset gridTemplateColumns on close
+    const mainContent = document.querySelector(".main-content");
+    if (mainContent) {
+        mainContent.style.gridTemplateColumns = "";
+    }
+
     inlinePlayer.classList.add("closing");
     state.currentlyPlayingId = null;
     setTimeout(() => {
