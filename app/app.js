@@ -1704,8 +1704,6 @@ function createVideoCard(video) {
         ratingBadge = `<div class="score-badge high">${thumbUpSvg}Liked</div>`;
     } else if (userRating === -5) {
         ratingBadge = `<div class="score-badge low">${thumbDownSvg}Disliked</div>`;
-    } else {
-        ratingBadge = `<div class="score-badge ${scoreClass}">★ ${video.score || 0}</div>`;
     }
     
     // Publish date removed as requested
@@ -1732,12 +1730,28 @@ function createVideoCard(video) {
             <div class="thumbnail-play-overlay">
                 <div class="play-icon-circle">▶</div>
             </div>
+            <div class="thumbnail-actions">
+                <button class="thumbnail-action-btn" data-action="inline-add-to-queue" title="Watch Later">
+                    <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                </button>
+                <button class="thumbnail-action-btn" data-action="inline-add-to-playlist" title="Add to Playlist">
+                    <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                </button>
+            </div>
             ${ratingBadge}
             ${video.isDiscover && video.discoveryTopic ? `<div class="category-badge" style="background:var(--accent);color:var(--bg)">✨ ${capitalizePhrase(video.discoveryTopic)}</div>` : (video.isDiscover ? `<div class="search-badge">🔍 Search</div>` : (categoryText ? `<div class="category-badge">${categoryText}</div>` : ""))}
         </div>
         <div class="card-details">
             <div class="video-title-row">
                 <h3 class="video-title">${escapeHTML(video.title)}</h3>
+                <div class="title-rating-actions">
+                    <button class="title-rating-btn thumb-up${userRating === 5 ? ' active' : ''}" data-rating="5" title="Like">
+                        <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 14px; height: 14px;"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
+                    </button>
+                    <button class="title-rating-btn thumb-down${userRating === -5 ? ' active' : ''}" data-rating="-5" title="Dislike">
+                        <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 14px; height: 14px;"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm12-3h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"></path></svg>
+                    </button>
+                </div>
                 <button type="button" class="card-action-btn" title="Actions">⋮</button>
             </div>
             <p class="video-channel"><span class="channel-link" data-id="${video.channelId || ''}" data-name="${escapeHTML(video.channelName)}">${escapeHTML(video.channelName)}</span>${video.viewCount && video.viewCount > 0 ? ` • ${formatViews(video.viewCount)}` : ''}</p>
@@ -1751,6 +1765,54 @@ function createVideoCard(video) {
     card.querySelector(".thumbnail-play-overlay").addEventListener("click", openAction);
     card.querySelector(".video-title").addEventListener("click", openAction);
     
+    // New inline buttons listeners
+    card.querySelector('[data-action="inline-add-to-queue"]').addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        addToQueue(video, false);
+    });
+
+    card.querySelector('[data-action="inline-add-to-playlist"]').addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        showPlaylistModal(video);
+    });
+
+    const videoTopicForRating = video.discoveryTopic || (video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:")) : null) || "";
+
+    card.querySelectorAll(".title-rating-btn").forEach(btn => {
+        btn.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            const rating = parseInt(ev.currentTarget.dataset.rating, 10);
+            state.videoRatings[video.id] = rating;
+            saveVideoRatings();
+            
+            if (rating === -5 && videoTopicForRating) {
+                const normalized = videoTopicForRating.trim().toLowerCase();
+                if (!state.dislikedTopics.includes(normalized)) {
+                    state.dislikedTopics.push(normalized);
+                    saveDislikedTopics();
+                }
+                if (state.likedTopics.includes(normalized)) {
+                    state.likedTopics = state.likedTopics.filter(t => t !== normalized);
+                    saveLikedTopics();
+                }
+                state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== normalized);
+                saveTopics();
+            }
+            
+            card.querySelectorAll(".title-rating-btn").forEach(b => b.classList.remove("active"));
+            ev.currentTarget.classList.add("active");
+
+            let badge = card.querySelector(".score-badge");
+            if (!badge) {
+                badge = document.createElement("div");
+                card.querySelector(".thumbnail-area").appendChild(badge);
+            }
+            badge.innerHTML = rating > 0 ? `${thumbUpSvg}Liked` : `${thumbDownSvg}Disliked`;
+            badge.className = "score-badge " + (rating > 0 ? "high" : "low");
+            showToast(rating > 0 ? '👍 Liked' : '👎 Disliked', rating > 0 ? "success" : "info");
+        });
+    });
+
     const channelLink = card.querySelector(".channel-link");
     if (channelLink) {
         channelLink.addEventListener("click", (e) => {
@@ -1774,36 +1836,15 @@ function createVideoCard(video) {
         
         const dropdown = document.createElement("div");
         dropdown.className = "card-action-dropdown";
-        // Determine the topic associated with this video
-        const videoTopic = video.discoveryTopic || (video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:")) : null) || "";
-        const currentRating = state.videoRatings[video.id];
         
         dropdown.innerHTML = `
-            <div class="card-rating-row">
-                <button class="rate-thumb-btn thumb-up${currentRating === 5 ? ' active' : ''}" data-rating="5" title="Like (Wallgarden)">
-                    <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 13px; height: 13px;"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
-                    Like
-                </button>
-                <button class="rate-thumb-btn thumb-down${currentRating === -5 ? ' active' : ''}" data-rating="-5" title="Dislike (Wallgarden)">
-                    <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 13px; height: 13px;"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm12-3h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"></path></svg>
-                    Dislike
-                </button>
-            </div>
             <button data-action="play-next">
                 <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
                 Play Next
             </button>
-            <button data-action="add-to-queue">
-                <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                Add to Queue
-            </button>
             <button data-action="play-inline">
                 <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
                 Play Inline
-            </button>
-            <button data-action="add-to-playlist">
-                <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
-                Add to Playlist
             </button>
             <button data-action="subscribe">
                 ${isSubscribed ? `
@@ -1814,62 +1855,11 @@ function createVideoCard(video) {
                     Subscribe to Channel
                 `}
             </button>
-            <button class="danger" data-action="block">
-                <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>
-                Block Channel
-            </button>
-            <button data-action="remove-topic"${videoTopic ? '' : ' disabled'}>
-                <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
-                Remove Topic${videoTopic ? ': ' + capitalizePhrase(videoTopic) : ''}
-            </button>
-            <button data-action="hide">
-                <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
-                Hide Video
-            </button>
         `;
-        
-        dropdown.querySelectorAll(".rate-thumb-btn").forEach(btn => {
-            btn.addEventListener("click", (ev) => {
-                ev.stopPropagation();
-                const rating = parseInt(ev.target.dataset.rating, 10);
-                state.videoRatings[video.id] = rating;
-                saveVideoRatings();
-                
-                // Thumbs down explicitly adds the topic to disliked list
-                if (rating === -5 && videoTopic) {
-                    const normalized = videoTopic.trim().toLowerCase();
-                    if (!state.dislikedTopics.includes(normalized)) {
-                        state.dislikedTopics.push(normalized);
-                        saveDislikedTopics();
-                    }
-                    if (state.likedTopics.includes(normalized)) {
-                        state.likedTopics = state.likedTopics.filter(t => t !== normalized);
-                        saveLikedTopics();
-                    }
-                    state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== normalized);
-                    saveTopics();
-                }
-                
-                // Update badge visually
-                const badge = card.querySelector(".score-badge");
-                if (badge) {
-                    badge.innerHTML = rating > 0 ? `${thumbUpSvg}Liked` : `${thumbDownSvg}Disliked`;
-                    badge.className = "score-badge " + (rating > 0 ? "high" : "low");
-                }
-                dropdown.remove();
-                showToast(rating > 0 ? '👍 Liked' : '👎 Disliked', rating > 0 ? "success" : "info");
-            });
-        });
         
         dropdown.querySelector('[data-action="play-next"]').addEventListener("click", (ev) => {
             ev.stopPropagation();
             addToQueue(video, true);
-            dropdown.remove();
-        });
-
-        dropdown.querySelector('[data-action="add-to-queue"]').addEventListener("click", (ev) => {
-            ev.stopPropagation();
-            addToQueue(video, false);
             dropdown.remove();
         });
 
@@ -1878,13 +1868,6 @@ function createVideoCard(video) {
             dropdown.remove();
             playVideo(video);
         });
-
-        dropdown.querySelector('[data-action="add-to-playlist"]').addEventListener("click", (ev) => {
-            ev.stopPropagation();
-            dropdown.remove();
-            showPlaylistModal(video);
-        });
-
         dropdown.querySelector('[data-action="block"]').addEventListener("click", (ev) => {
             ev.stopPropagation();
             const channelName = video.channelName;
@@ -2165,8 +2148,14 @@ function renderFeed() {
         
         if (isSubscribed) {
             headerActions.innerHTML = `
-                <button class="btn btn-danger btn-sm btn-header-unsub">Unsubscribe</button>
-                <button class="btn btn-danger btn-sm btn-header-block">🚫 Block Channel</button>
+                <button class="btn btn-danger btn-sm btn-header-unsub">
+                    <svg class="icon-svg" style="width:14px; height:14px; margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="23" y1="11" x2="17" y2="11"></line></svg>
+                    Unsubscribe
+                </button>
+                <button class="btn btn-danger btn-sm btn-header-block">
+                    <svg class="icon-svg" style="width:14px; height:14px; margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>
+                    Block Channel
+                </button>
             `;
             headerActions.querySelector(".btn-header-unsub").addEventListener("click", () => {
                 state.channels = state.channels.filter(ch => ch.id !== channelId);
@@ -2177,8 +2166,14 @@ function renderFeed() {
             });
         } else {
             headerActions.innerHTML = `
-                <button class="btn btn-primary btn-sm btn-header-sub" style="background:var(--accent);color:var(--bg-primary);border-color:var(--accent);">➕ Subscribe</button>
-                <button class="btn btn-danger btn-sm btn-header-block">🚫 Block Channel</button>
+                <button class="btn btn-primary btn-sm btn-header-sub" style="background:var(--accent);color:var(--bg-primary);border-color:var(--accent);">
+                    <svg class="icon-svg" style="width:14px; height:14px; margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="20" y1="8" x2="20" y2="14"></line><line x1="23" y1="11" x2="17" y2="11"></line></svg>
+                    Subscribe
+                </button>
+                <button class="btn btn-danger btn-sm btn-header-block">
+                    <svg class="icon-svg" style="width:14px; height:14px; margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>
+                    Block Channel
+                </button>
             `;
             headerActions.querySelector(".btn-header-sub").addEventListener("click", () => {
                 state.channels.push({ name: channelName, id: channelId });
@@ -5770,7 +5765,10 @@ function renderDiscoverChannelsView() {
             </div>
             <div class="discover-channel-actions">
                 <button class="btn btn-secondary btn-sm btn-inspect-rec">🔍 Inspect Feed</button>
-                <button class="btn btn-primary btn-sm btn-sub-rec" style="background:var(--accent);color:var(--bg-primary);border-color:var(--accent);">➕ Subscribe</button>
+                <button class="btn btn-primary btn-sm btn-sub-rec" style="background:var(--accent);color:var(--bg-primary);border-color:var(--accent);">
+                    <svg class="icon-svg" style="width:14px; height:14px; margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="20" y1="8" x2="20" y2="14"></line><line x1="23" y1="11" x2="17" y2="11"></line></svg>
+                    Subscribe
+                </button>
             </div>
         `;
         
@@ -5837,7 +5835,7 @@ function renderDiscoverChannelsView() {
             } catch (err) {
                 showToast("Failed to subscribe: " + err.message, "danger");
                 btn.disabled = false;
-                btn.textContent = "➕ Subscribe";
+                btn.innerHTML = `<svg class="icon-svg" style="width:14px; height:14px; margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="20" y1="8" x2="20" y2="14"></line><line x1="23" y1="11" x2="17" y2="11"></line></svg>Subscribe`;
             }
         });
         
