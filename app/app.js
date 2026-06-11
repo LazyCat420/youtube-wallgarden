@@ -1338,7 +1338,8 @@ async function syncFeeds() {
                         entries.forEach(entry => {
                             const title = entry.querySelector("title")?.textContent || "";
                             const content = entry.querySelector("content")?.textContent || entry.querySelector("summary")?.textContent || "";
-                            // removed publishedStr
+                            const publishedStr = entry.querySelector("published")?.textContent;
+                            const published = publishedStr ? Date.parse(publishedStr) : null;
                             
                             const ytMatch = content.match(/href="https:\/\/(?:www\.)?youtube\.com\/watch\?v=([^"&?]+)/) || 
                                             content.match(/href="https:\/\/youtu\.be\/([^"&?]+)/);
@@ -1349,7 +1350,7 @@ async function syncFeeds() {
                                     title: title,
                                     channelName: channel.name,
                                     channelId: channel.id,
-                                    // removed published
+                                    published: published,
                                     description: content || ""
                                 });
                             }
@@ -1382,7 +1383,8 @@ async function syncFeeds() {
                             const videoId = entry.querySelector("videoId")?.textContent || 
                                             entry.querySelector("id")?.textContent?.split(":")[2];
                             const title = entry.querySelector("title")?.textContent || "";
-                            // removed publishedStr
+                            const publishedStr = entry.querySelector("published")?.textContent;
+                            const published = publishedStr ? Date.parse(publishedStr) : null;
                             
                             const mediaGroup = entry.getElementsByTagName("media:group")[0];
                             const description = mediaGroup ? mediaGroup.getElementsByTagName("media:description")[0]?.textContent : "";
@@ -1393,7 +1395,7 @@ async function syncFeeds() {
                                     title: title,
                                     channelName: feedTitle || channel.name,
                                     channelId: channel.id,
-                                    // removed published
+                                    published: published,
                                     description: description || ""
                                 });
                             }
@@ -1436,7 +1438,7 @@ async function syncFeeds() {
                                     title: item.title,
                                     channelName: item.channel || channel.name,
                                     channelId: channel.id,
-                                    // removed published
+                                    published: item.published_at ? Date.parse(item.published_at) : null,
                                     description: item.description || ""
                                 });
                             });
@@ -1462,7 +1464,8 @@ async function syncFeeds() {
                         merged.push(ev);
                     }
                 });
-                // removed sort by published
+                // Sort by publication date (descending)
+                merged.sort((a, b) => (b.published || 0) - (a.published || 0));
                 results[channel.id] = merged.slice(0, 50);
             } else {
                 console.warn(`All sync methods failed for channel ${channel.name}. Retaining cache.`);
@@ -1652,7 +1655,8 @@ async function fetchChannelFeedOnDemand(channelId, channelName) {
             const videoId = entry.querySelector("videoId")?.textContent || 
                             entry.querySelector("id")?.textContent?.split(":")[2];
             const title = entry.querySelector("title")?.textContent || "";
-            // removed publishedStr
+            const publishedStr = entry.querySelector("published")?.textContent;
+            const published = publishedStr ? Date.parse(publishedStr) : null;
                                  
             if (videoId && title) {
                 videos.push({
@@ -1660,7 +1664,7 @@ async function fetchChannelFeedOnDemand(channelId, channelName) {
                     title: title,
                     channelName: feedTitle,
                     channelId: channelId,
-                    // removed published
+                    published: published
                 });
             }
         });
@@ -1711,10 +1715,13 @@ function createVideoCard(video) {
     const topMatchedTopic = video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:") && t !== "vintage" && t !== "viral-spam") : null;
     const categoryText = topMatchedTopic ? capitalizePhrase(topMatchedTopic) : "";
     
-    // Format meta/views if available
-    let metaLine = video.channelName || "";
+    // Format meta/views/date if available
+    let metaHtml = `<span class="channel-link" data-id="${video.channelId || ''}" data-name="${escapeHTML(video.channelName)}">${escapeHTML(video.channelName)}</span>`;
     if (video.viewCount && video.viewCount > 0) {
-        metaLine += ` • ${formatViews(video.viewCount)}`;
+        metaHtml += ` • ${formatViews(video.viewCount)}`;
+    }
+    if (video.published) {
+        metaHtml += ` • ${getRelativeTime(video.published)}`;
     }
     
     // Check if channel is already subscribed
@@ -1754,7 +1761,7 @@ function createVideoCard(video) {
                 </div>
                 <button type="button" class="card-action-btn" title="Actions">⋮</button>
             </div>
-            <p class="video-channel"><span class="channel-link" data-id="${video.channelId || ''}" data-name="${escapeHTML(video.channelName)}">${escapeHTML(video.channelName)}</span>${video.viewCount && video.viewCount > 0 ? ` • ${formatViews(video.viewCount)}` : ''}</p>
+            <p class="video-channel">${metaHtml}</p>
             <p class="video-time">${video.duration ? formatDuration(video.duration) : ""}</p>
         </div>
     `;
@@ -3800,7 +3807,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                                     title: item.title,
                                     channelName: item.channel,
                                     channelId: "",
-                                    // removed publishedStr and published
+                                    published: item.published_at ? Date.parse(item.published_at) : null,
                                     duration: item.duration_secs,
                                     viewCount: item.view_count,
                                     isDiscover: true
@@ -3941,11 +3948,14 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                             }
                             
                             if (videoId && title) {
+                                const publishedText = vr.publishedTimeText?.simpleText || "";
+                                const published = publishedText ? parseRelativeTime(publishedText) : null;
                                 videos.push({
                                     id: videoId,
                                     title: title,
                                     channelName: channelName,
                                     channelId: channelId,
+                                    published: published,
                                     duration: durationSecs,
                                     isDiscover: true
                                 });
@@ -4030,7 +4040,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         const card = document.createElement("div");
         card.className = "video-card fade-in discover-card";
         
-        const relativeTime = "";
+        const relativeTime = enrichedVideo.published ? getRelativeTime(enrichedVideo.published) : "";
         
         card.innerHTML = `
             <div class="thumbnail-area">
@@ -4076,7 +4086,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         const card = document.createElement("div");
         card.className = "video-card fade-in discover-card";
         
-        const relativeTime = "";
+        const relativeTime = enrichedVideo.published ? getRelativeTime(enrichedVideo.published) : "";
         let metaLine = enrichedVideo.channelName;
         if (enrichedVideo.viewCount && enrichedVideo.viewCount > 0) {
             metaLine += ` • ${formatViews(enrichedVideo.viewCount)}`;
@@ -4791,7 +4801,7 @@ async function fetchVideosForTopic(topic) {
                             title: item.title,
                             channelName: item.channel,
                             channelId: "",
-                            // removed publishedStr and published
+                            published: item.published_at ? Date.parse(item.published_at) : null,
                             duration: item.duration_secs,
                             viewCount: item.view_count,
                             isDiscover: true,
