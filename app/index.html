@@ -16,19 +16,23 @@
     <!-- Inline critical CSS for above-the-fold content (eliminates render-blocking app.css) -->
     <style>
         :root {
-            --bg-primary: #0A0A0A;
-            --bg-secondary: #111111;
-            --bg-sidebar: rgba(15, 15, 15, 0.95);
-            --card-bg: rgba(26, 26, 26, 0.85);
-            --card-border: rgba(42, 42, 42, 0.8);
-            --accent: #4ADE80;
-            --accent-glow: rgba(74, 222, 128, 0.2);
-            --text-primary: #F0F0F0;
-            --text-secondary: #B0B0B0;
-            --text-muted: #8A8A8A;
-            --score-high: #4ADE80;
+            --bg-primary: #030712;
+            --bg-secondary: #0B1329;
+            --bg-sidebar: rgba(11, 21, 40, 0.95);
+            --card-bg: rgba(15, 32, 67, 0.45);
+            --card-border: rgba(59, 130, 246, 0.12);
+            --theme-blue-1: #1E40AF;
+            --theme-blue-2: #3B82F6;
+            --theme-blue-3: #60A5FA;
+            --theme-blue-glow: rgba(59, 130, 246, 0.25);
+            --accent: var(--theme-blue-2);
+            --accent-glow: var(--theme-blue-glow);
+            --text-primary: #F3F4F6;
+            --text-secondary: #9CA3AF;
+            --text-muted: #6B7280;
+            --score-high: #3B82F6;
             --score-mid: #60A5FA;
-            --score-low: #F87171;
+            --score-low: #EF4444;
             --font-stack: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
         }
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -95,9 +99,20 @@
             text-align: left;
         }
         .nav-item.active {
-            background: rgba(74, 222, 128, 0.06);
+            background: rgba(59, 130, 246, 0.08);
             color: var(--accent);
             font-weight: 600;
+            border-radius: 6px;
+            box-shadow: inset 2px 0 0 var(--accent);
+        }
+        .icon-svg {
+            width: 1.15rem;
+            height: 1.15rem;
+            stroke: currentColor;
+            fill: none;
+            flex-shrink: 0;
+            display: inline-block;
+            vertical-align: middle;
         }
         .nav-item .nav-count {
             margin-left: auto;
@@ -173,53 +188,53 @@
         <!-- Sidebar Navigation -->
         <aside class="sidebar">
             <div class="sidebar-brand">
-                <span class="brand-icon">🌿</span>
+                <svg class="icon-svg brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 1.5rem; height: 1.5rem; color: var(--accent);"><path d="M2 22C2 12 10 4 22 2M8 16c0-4.4 3.6-8 8-8M12 20c0-2.2 1.8-4 4-4"></path></svg>
                 <span class="brand-name">Wallgarden</span>
                 <button id="btn-sidebar-close" class="sidebar-close" aria-label="Close Navigation">✕</button>
             </div>
 
             <nav class="sidebar-nav">
                 <button class="nav-item active" data-view="smart-feed">
-                    <span class="nav-icon">✨</span>
+                    <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
                     <span class="nav-label">Discovery Feed</span>
                 </button>
                 <button class="nav-item" data-view="subscription-feed">
-                    <span class="nav-icon">🌿</span>
+                    <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a9 9 0 0 1 9 9"></path><path d="M4 4a16 16 0 0 1 16 16"></path><circle cx="5" cy="19" r="1"></circle></svg>
                     <span class="nav-label">Subscription Feed</span>
                 </button>
                 <button class="nav-item" data-view="news-feed">
-                    <span class="nav-icon">📰</span>
+                    <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"></path><line x1="8" y1="8" x2="16" y2="8"></line><line x1="8" y1="12" x2="16" y2="12"></line><line x1="8" y1="16" x2="12" y2="16"></line></svg>
                     <span class="nav-label">News Feed</span>
                 </button>
                 <button class="nav-item" data-view="playlists">
-                    <span class="nav-icon">▶️</span>
+                    <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
                     <span class="nav-label">Playlists</span>
                 </button>
                 <button class="nav-item" data-view="liked-videos">
-                    <span class="nav-icon">👍</span>
+                    <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
                     <span class="nav-label">Liked Videos</span>
                 </button>
                 <button class="nav-item" data-view="subscriptions">
-                    <span class="nav-icon">⚙️</span>
+                    <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
                     <span class="nav-label">Manage Subscriptions</span>
                     <span class="nav-count" id="nav-sub-count">0</span>
                 </button>
                 <button class="nav-item" data-view="discover-channels">
-                    <span class="nav-icon">✨</span>
+                    <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"></polygon></svg>
                     <span class="nav-label">Discover Channels</span>
                 </button>
             </nav>
 
             <div id="weather-widget" class="weather-widget">
-                <div class="weather-loading" style="font-size: 0.85rem; color: var(--text-muted); padding: 0.5rem 1rem;">🌤️ Loading weather...</div>
+                <div class="weather-loading" style="font-size: 0.85rem; color: var(--text-muted); padding: 0.5rem 1rem;">Loading weather...</div>
             </div>
 
             <div class="sidebar-footer">
                 <a href="/extension/" class="btn-sidebar" target="_blank" title="Browse Chrome Extension Files">
-                    <span class="icon">🔌</span> Chrome Extension
+                    <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg> Chrome Extension
                 </a>
                 <button id="btn-open-settings" class="btn-sidebar">
-                    <span class="icon">⚙️</span> Settings
+                    <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg> Settings
                 </button>
             </div>
         </aside>
@@ -243,10 +258,12 @@
                 </div>
                 <div class="header-search-row">
                     <form id="search-form" class="header-search-bar" action="" onsubmit="return false;">
-                        <span class="search-icon">🔍</span>
+                        <svg class="icon-svg search-icon" style="width: 16px; height: 16px; margin-right: 0.65rem;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
                         <input type="text" id="input-search-videos" placeholder="Search feed or query YouTube...">
                         <button id="btn-clear-search" class="btn-clear-search hidden" title="Clear search" type="button">✕</button>
-                        <button id="btn-submit-search" class="btn-submit-search" title="Search YouTube" type="submit">➤</button>
+                        <button id="btn-submit-search" class="btn-submit-search" title="Search YouTube" type="submit">
+                            <svg class="icon-svg" style="width: 14px; height: 14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                        </button>
                     </form>
                     <div id="search-suggestions" class="search-suggestions">
                         <!-- Suggestion pills populated dynamically -->
@@ -259,7 +276,9 @@
                 <!-- Shorts Dedicated Shelf -->
                 <div id="shorts-shelf" class="shorts-shelf hidden">
                     <div class="shorts-shelf-header">
-                        <h2 class="shorts-shelf-title">⚡ Shorts</h2>
+                        <h2 class="shorts-shelf-title">
+                            <svg class="icon-svg" style="width: 18px; height: 18px; display: inline-block; vertical-align: middle; margin-right: 6px; color: var(--accent);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>Shorts
+                        </h2>
                         <span class="shorts-badge">Filtered Feed</span>
                     </div>
                     <div id="shorts-grid" class="shorts-grid">
@@ -270,7 +289,9 @@
                 <!-- Reddit Dedicated Shelf -->
                 <div id="reddit-shelf" class="shorts-shelf hidden">
                     <div class="shorts-shelf-header">
-                        <h2 class="shorts-shelf-title">🟠 Reddit</h2>
+                        <h2 class="shorts-shelf-title">
+                            <svg class="icon-svg" style="width: 18px; height: 18px; display: inline-block; vertical-align: middle; margin-right: 6px; color: #FF4500;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="2"></circle></svg>Reddit
+                        </h2>
                         <span class="shorts-badge">Top Videos</span>
                     </div>
                     <div id="reddit-grid" class="shorts-grid">
@@ -288,7 +309,7 @@
                         <p class="discover-intro">Latest updates from your news sources.</p>
                         <button id="btn-refresh-news" class="btn btn-primary btn-icon-only" title="Refresh News">
                             <span class="btn-text">Refresh News</span>
-                            <span class="sync-spinner">🔄</span>
+                            <svg class="icon-svg sync-spinner" style="width: 14px; height: 14px; margin-left: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
                         </button>
                     </div>
                     <div id="news-feed-grid" class="video-grid">
@@ -302,7 +323,7 @@
                         <p class="discover-intro">Your custom playlists.</p>
                         <button id="btn-create-playlist" class="btn btn-primary btn-icon-only" title="Create Playlist">
                             <span class="btn-text">Create Playlist</span>
-                            <span class="icon">➕</span>
+                            <svg class="icon-svg" style="width: 14px; height: 14px; margin-left: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                         </button>
                     </div>
                     <div id="playlists-grid" class="playlists-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 1rem; margin-bottom: 2rem;">
@@ -310,7 +331,9 @@
                     </div>
                     
                     <div id="playlist-videos-header" class="hidden" style="margin-bottom: 1rem; display: flex; align-items: center; gap: 1rem;">
-                        <button id="btn-back-to-playlists" class="btn">🔙 Back</button>
+                        <button id="btn-back-to-playlists" class="btn">
+                            <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>Back
+                        </button>
                         <h2 id="current-playlist-title" style="margin: 0;"></h2>
                     </div>
                     <div id="playlist-videos-grid" class="video-grid hidden">
@@ -334,12 +357,12 @@
                         <p class="discover-intro">Find new high-quality creators based on your subscription graph, favorite topics, and AI suggestions. Inspect their latest videos before subscribing.</p>
                         <button id="btn-refresh-discover" class="btn btn-primary btn-icon-only" title="Refresh Recommendations">
                             <span class="btn-text">Refresh Suggestions</span>
-                            <span class="discover-spinner">🔄</span>
+                            <svg class="icon-svg discover-spinner" style="width: 14px; height: 14px; margin-left: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
                         </button>
                     </div>
                     
                     <div id="discover-loading-state" class="empty-state hidden">
-                        <div class="sync-spinner" style="font-size: 2.5rem; animation: spin 1s linear infinite; display: block; margin: 0 auto 1.5rem;">🔄</div>
+                        <svg class="icon-svg sync-spinner" style="width: 32px; height: 32px; display: block; margin: 0 auto 1.5rem; animation: spin 1s linear infinite;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
                         <h3>Analyzing subscriptions & topics...</h3>
                         <p>Querying local vLLM, searching YouTube, and generating suggestions.</p>
                     </div>
@@ -355,7 +378,7 @@
                         <p>Generate fresh content ideas tailored to your preferences. The AI learns from your upvotes/downvotes and search history.</p>
                         <button id="btn-brainstorm-more" class="btn btn-primary">
                             <span class="btn-text">Brainstorm More</span>
-                            <span class="brainstorm-spinner hidden">🔄</span>
+                            <svg class="icon-svg brainstorm-spinner hidden" style="width: 14px; height: 14px; margin-left: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
                         </button>
                     </div>
                     <div id="brainstorm-grid" class="brainstorm-grid">
@@ -364,7 +387,7 @@
                 </div>
 
                 <div id="empty-state" class="empty-state hidden">
-                    <div class="empty-icon">🌾</div>
+                    <svg class="icon-svg empty-icon" style="width: 48px; height: 48px; margin-bottom: 1rem; opacity: 0.6; color: var(--text-muted);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="8" y1="15" x2="16" y2="15"></line><line x1="9" y1="9" x2="9.01" y2="9"></line><line x1="15" y1="9" x2="15.01" y2="9"></line></svg>
                     <h3>No videos found</h3>
                     <p>Try adding more subscriptions, adjusting topic weights, or verifying connection status.</p>
                 </div>
