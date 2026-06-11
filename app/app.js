@@ -752,6 +752,19 @@ function setupEventListeners() {
         });
     }
 
+    const weatherWidget = document.getElementById("weather-widget");
+    if (weatherWidget) {
+        weatherWidget.addEventListener("click", () => {
+            const newCity = prompt("Enter a city name for weather forecast (or leave blank to use your IP location):", state.settings.weatherCity || "");
+            if (newCity !== null) {
+                state.settings.weatherCity = newCity.trim();
+                saveSettings();
+                weatherWidget.innerHTML = `<div class="weather-loading" style="font-size: 0.85rem; color: var(--text-muted); padding: 0.5rem 1rem;">Loading weather...</div>`;
+                fetchWeather();
+            }
+        });
+    }
+
     // Search input handlers
     const searchForm = document.getElementById("search-form");
     const searchInput = document.getElementById("input-search-videos");
