@@ -1705,19 +1705,7 @@ function createVideoCard(video) {
         card.classList.add("discover-card");
     }
     
-    let scoreClass = "mid";
-    if (video.score >= 5) scoreClass = "high";
-    if (video.score < 0) scoreClass = "low";
-    
     const userRating = state.videoRatings && state.videoRatings[video.id];
-    let ratingBadge = '';
-    const thumbUpSvg = `<svg class="icon-svg" style="width:12px; height:12px; margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>`;
-    const thumbDownSvg = `<svg class="icon-svg" style="width:12px; height:12px; margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm12-3h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"></path></svg>`;
-    if (userRating === 5) {
-        ratingBadge = `<div class="score-badge high">${thumbUpSvg}Liked</div>`;
-    } else if (userRating === -5) {
-        ratingBadge = `<div class="score-badge low">${thumbDownSvg}Disliked</div>`;
-    }
     
     // Publish date removed as requested
     const topMatchedTopic = video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:") && t !== "vintage" && t !== "viral-spam") : null;
@@ -1751,7 +1739,6 @@ function createVideoCard(video) {
                     <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
                 </button>
             </div>
-            ${ratingBadge}
             ${video.isDiscover && video.discoveryTopic ? `<div class="category-badge" style="background:var(--accent);color:var(--bg)">✨ ${capitalizePhrase(video.discoveryTopic)}</div>` : (video.isDiscover ? `<div class="search-badge">🔍 Search</div>` : (categoryText ? `<div class="category-badge">${categoryText}</div>` : ""))}
         </div>
         <div class="card-details">
@@ -1814,14 +1801,6 @@ function createVideoCard(video) {
             
             card.querySelectorAll(".title-rating-btn").forEach(b => b.classList.remove("active"));
             ev.currentTarget.classList.add("active");
-
-            let badge = card.querySelector(".score-badge");
-            if (!badge) {
-                badge = document.createElement("div");
-                card.querySelector(".thumbnail-area").appendChild(badge);
-            }
-            badge.innerHTML = rating > 0 ? `${thumbUpSvg}Liked` : `${thumbDownSvg}Disliked`;
-            badge.className = "score-badge " + (rating > 0 ? "high" : "low");
             showToast(rating > 0 ? '👍 Liked' : '👎 Disliked', rating > 0 ? "success" : "info");
         });
     });
@@ -3986,10 +3965,6 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         const card = document.createElement("div");
         card.className = "video-card fade-in discover-card";
         
-        let scoreClass = "mid";
-        if (enrichedVideo.score >= 5) scoreClass = "high";
-        if (enrichedVideo.score < 0) scoreClass = "low";
-        
         const relativeTime = "";
         
         card.innerHTML = `
@@ -3998,7 +3973,6 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
                 <div class="thumbnail-play-overlay">
                     <div class="play-icon-circle">▶</div>
                 </div>
-                <div class="score-badge ${scoreClass}">★ ${enrichedVideo.score}</div>
                 <div class="search-badge">⚡ Short</div>
             </div>
             <div class="card-details">
@@ -4037,10 +4011,6 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         const card = document.createElement("div");
         card.className = "video-card fade-in discover-card";
         
-        let scoreClass = "mid";
-        if (enrichedVideo.score >= 5) scoreClass = "high";
-        if (enrichedVideo.score < 0) scoreClass = "low";
-        
         const relativeTime = "";
         let metaLine = enrichedVideo.channelName;
         if (enrichedVideo.viewCount && enrichedVideo.viewCount > 0) {
@@ -4053,7 +4023,6 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
                 <div class="thumbnail-play-overlay">
                     <div class="play-icon-circle">▶</div>
                 </div>
-                <div class="score-badge ${scoreClass}">★ ${enrichedVideo.score}</div>
                 <div class="search-badge">🔍 Search</div>
             </div>
             <div class="card-details">
