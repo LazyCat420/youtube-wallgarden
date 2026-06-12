@@ -2027,6 +2027,29 @@ function renderFeed() {
     const playlistsContainer = document.getElementById("playlists-container");
     const likedVideosContainer = document.getElementById("liked-videos-container");
     
+    // Setup feed sort dropdown if the current view supports sorting
+    const topHeaderActions = document.querySelector(".header-actions");
+    if (topHeaderActions) {
+        topHeaderActions.innerHTML = "";
+        const sortableViews = ["smart-feed", "subscription-feed", "channel_", "topic_", "search_"];
+        const isSortable = sortableViews.some(v => state.currentView === v || state.currentView.startsWith(v));
+        if (isSortable) {
+            const selectEl = document.createElement("select");
+            selectEl.className = "select-sort";
+            selectEl.id = "feed-sort-select";
+            selectEl.innerHTML = `
+                <option value="relevance" ${state.settings.discoverySortOrder === "relevance" ? "selected" : ""}>Sort: Relevance</option>
+                <option value="date" ${state.settings.discoverySortOrder === "date" ? "selected" : ""}>Sort: Date (Newest)</option>
+            `;
+            selectEl.addEventListener("change", (e) => {
+                state.settings.discoverySortOrder = e.target.value;
+                saveSettings();
+                renderFeed();
+            });
+            topHeaderActions.appendChild(selectEl);
+        }
+    }
+
     if (grid) grid.classList.remove("hidden");
     if (brainstormContainer) brainstormContainer.classList.add("hidden");
     if (discoverChannelsContainer) discoverChannelsContainer.classList.add("hidden");
@@ -2288,7 +2311,11 @@ function renderFeed() {
             scored = scored.filter(v => !isShortVideo(v));
         }
         
-        scored.sort((a, b) => b.score - a.score);
+        if (state.settings.discoverySortOrder === "date") {
+            scored.sort((a, b) => (b.published || 0) - (a.published || 0));
+        } else {
+            scored.sort((a, b) => b.score - a.score);
+        }
         
         if (shorts.length > 0) {
             shortsShelf.classList.remove("hidden");
@@ -2338,11 +2365,15 @@ function renderFeed() {
             subVideos = subVideos.filter(v => !isShortVideo(v));
         }
         
-        subVideos.sort((a, b) => {
-            if (a.score >= 5 && b.score < 5) return -1;
-            if (b.score >= 5 && a.score < 5) return 1;
-            return b.score - a.score;
-        });
+        if (state.settings.discoverySortOrder === "date") {
+            subVideos.sort((a, b) => (b.published || 0) - (a.published || 0));
+        } else {
+            subVideos.sort((a, b) => {
+                if (a.score >= 5 && b.score < 5) return -1;
+                if (b.score >= 5 && a.score < 5) return 1;
+                return b.score - a.score;
+            });
+        }
         
         const initialSubVideos = subVideos.slice(0, 50);
         
@@ -2370,13 +2401,7 @@ function renderFeed() {
         return;
     }
     
-    // Inject sort dropdown for discovery and topics
-    const topHeaderActions = document.querySelector(".header-actions");
-    if (topHeaderActions) topHeaderActions.innerHTML = "";
 
-    if (state.currentView === "smart-feed" || state.currentView.startsWith("topic_") || state.currentView.startsWith("search_")) {
-        // Sort order UI removed
-    }
 
     // Handle Smart Feed (Discovery)
     if (state.currentView === "smart-feed") {
@@ -2419,9 +2444,13 @@ function renderFeed() {
         
         if (state.smartFeedVideos.length > 0) {
             state.smartFeedVideos.sort((a, b) => {
-                const scoreA = a.score !== undefined ? a.score : getScoreAndMatches(a).score;
-                const scoreB = b.score !== undefined ? b.score : getScoreAndMatches(b).score;
-                return scoreB - scoreA;
+                if (state.settings.discoverySortOrder === "date") {
+                    return (b.published || 0) - (a.published || 0);
+                } else {
+                    const scoreA = a.score !== undefined ? a.score : getScoreAndMatches(a).score;
+                    const scoreB = b.score !== undefined ? b.score : getScoreAndMatches(b).score;
+                    return scoreB - scoreA;
+                }
             });
             
             const fragment = document.createDocumentFragment();
@@ -2470,11 +2499,15 @@ function renderFeed() {
             (v.channelName && v.channelName.toLowerCase().includes(queryTerm))
         );
         
-        allVideos.sort((a, b) => {
-            if (a.score >= 5 && b.score < 5) return -1;
-            if (b.score >= 5 && a.score < 5) return 1;
-            return b.score - a.score;
-        });
+        if (state.settings.discoverySortOrder === "date") {
+            allVideos.sort((a, b) => (b.published || 0) - (a.published || 0));
+        } else {
+            allVideos.sort((a, b) => {
+                if (a.score >= 5 && b.score < 5) return -1;
+                if (b.score >= 5 && a.score < 5) return 1;
+                return b.score - a.score;
+            });
+        }
         
         if (sessionTopicSearchCache[queryTerm] === undefined && !topicSearchLoading[queryTerm]) {
             fetchTopicSearchDiscovery(queryTerm);
@@ -2498,7 +2531,12 @@ function renderFeed() {
             });
             
             discoverVideos = discoverVideos.filter(dv => !allVideos.some(sv => sv.id === dv.id));
-            discoverVideos.sort((a, b) => b.score - a.score);
+            
+            if (state.settings.discoverySortOrder === "date") {
+                discoverVideos.sort((a, b) => (b.published || 0) - (a.published || 0));
+            } else {
+                discoverVideos.sort((a, b) => b.score - a.score);
+            }
         }
         
         let allShorts = [];
@@ -3757,12 +3795,41 @@ function parseRelativeTime(str) {
 }
 
 function getRelativeTime(timestamp) {
+    if (!timestamp) return "";
     const diffMs = Date.now() - timestamp;
+    if (diffMs < 0) return "Just now";
+    
     const diffSec = Math.floor(diffMs / 1000);
     const diffMin = Math.floor(diffSec / 60);
     const diffHr = Math.floor(diffMin / 60);
     const diffDays = Math.floor(diffHr / 24);
     
+    if (diffDays >= 365) {
+        const years = Math.floor(diffDays / 365);
+        const remainingDays = diffDays % 365;
+        const months = Math.floor(remainingDays / 30);
+        if (months > 0) {
+            return `${years}y ${months}mo ago`;
+        }
+        return `${years}y ago`;
+    }
+    if (diffDays >= 30) {
+        const months = Math.floor(diffDays / 30);
+        const remainingDays = diffDays % 30;
+        const weeks = Math.floor(remainingDays / 7);
+        if (weeks > 0) {
+            return `${months}mo ${weeks}w ago`;
+        }
+        return `${months}mo ago`;
+    }
+    if (diffDays >= 7) {
+        const weeks = Math.floor(diffDays / 7);
+        const remainingDays = diffDays % 7;
+        if (remainingDays > 0) {
+            return `${weeks}w ${remainingDays}d ago`;
+        }
+        return `${weeks}w ago`;
+    }
     if (diffDays > 0) return `${diffDays}d ago`;
     if (diffHr > 0) return `${diffHr}h ago`;
     if (diffMin > 0) return `${diffMin}m ago`;
@@ -6073,7 +6140,7 @@ async function renderNewsFeed() {
                 <div class="video-info" style="padding: 1rem;">
                     <div class="video-title" style="margin-bottom: 0.5rem;"><a href="${news.link}" target="_blank" style="color: var(--text-primary); text-decoration: none;">${news.title}</a></div>
                     <div class="video-channel" style="color: var(--accent); margin-bottom: 0.5rem;">${news.channelName}</div>
-                    <div class="video-meta" style="margin-bottom: 0.5rem;">${formatTimeAgo(news.published)}</div>
+                    <div class="video-meta" style="margin-bottom: 0.5rem;">${getRelativeTime(news.published)}</div>
                     <div style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; margin-bottom: 0.75rem;">${news.description}</div>
                     <div class="news-actions" style="display: flex; gap: 0.5rem;">
                         <button class="btn btn-sm btn-news-like ${state.newsSourceRatings[news.channelName] === 1 ? 'active' : ''}" data-source="${news.channelName}">
