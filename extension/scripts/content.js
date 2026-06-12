@@ -81,8 +81,9 @@ function startMenuInterceptor() {
     document.addEventListener('click', (e) => {
         // Match both regular video and Shorts ⋮ buttons
         const menuButton = e.target.closest(
-            'ytd-menu-renderer button, yt-icon-button#button, button.yt-icon-button, ' +
-            'button[aria-label="More actions"], button[aria-label="Action menu"]'
+            'yt-icon-button#button[aria-label="More actions"], ' +
+            'button[aria-label="More actions"], ' +
+            'button[aria-label="Action menu"]'
         );
         if (menuButton) {
             // Find parent card (regular videos + Shorts containers)
@@ -118,6 +119,14 @@ function startMenuInterceptor() {
                                 handleRejection(text, lastMenuTarget);
                             });
                         }
+                    } else if (text.includes('save to playlist') || text.includes('watch later') || text.includes('save to queue')) {
+                        if (!item.dataset.wallgardenSyncHooked) {
+                            item.dataset.wallgardenSyncHooked = 'true';
+                            item.addEventListener('click', () => {
+                                console.log("[Wallgarden Sync] PLAYLIST_SAVE clicked via menu item");
+                                sendSyncEvent('PLAYLIST_SAVE');
+                            });
+                        }
                     }
                 });
             });
@@ -132,7 +141,11 @@ function startMenuInterceptor() {
  * Shorts/Sidebar use: yt-sheet-view-model > yt-list-view-model (or yt-list-view-model directly)
  */
 function tryInjectBlockItem() {
-    if (!settings.enableSmartBlock || !lastMenuTarget) return;
+    if (!lastMenuTarget || lastMenuTarget.closest('ytd-watch-metadata')) {
+        lastMenuTarget = null;
+        return;
+    }
+    if (!settings.enableSmartBlock) return;
 
     // --- Path 1: Regular video popup (tp-yt-paper-listbox) ---
     const listbox = document.querySelector(
@@ -1041,6 +1054,8 @@ function startSyncObservers() {
 
     // 2. DOM Observers for Clicks (Likes, Subscriptions, Playlists)
     document.addEventListener('click', (e) => {
+        if (e.target.closest('.wg-block-menu-item')) return; // Never intercept our own items
+
         const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
         
         // Log all clicks in DevTools to assist debugging
@@ -1054,7 +1069,7 @@ function startSyncObservers() {
         let hasLike = false;
         let hasDislike = false;
 
-        const segmentedContainer = e.target.closest('segmented-like-dislike-button-view-model');
+        const segmentedContainer = e.target.closest('ytd-watch-metadata segmented-like-dislike-button-view-model');
         if (segmentedContainer) {
             // If we clicked inside the segmented container, determine if it's the first button (like) or second (dislike)
             const buttons = Array.from(segmentedContainer.querySelectorAll('button, yt-button-view-model'));
@@ -1067,7 +1082,7 @@ function startSyncObservers() {
 
         // Fallbacks for standard DOM nodes
         if (!hasLike && !hasDislike) {
-            const btn = e.target.closest('like-button-view-model, dislike-button-view-model, button');
+            const btn = e.target.closest('like-button-view-model, dislike-button-view-model');
             if (btn) {
                 const tag = btn.tagName.toLowerCase();
                 const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
@@ -1111,34 +1126,25 @@ function startSyncObservers() {
             hasSub = !!e.target.closest('yt-subscribe-button-view-model button, ytd-subscribe-button-renderer button');
         }
         if (!hasPlaylist) {
-            hasPlaylist = !!e.target.closest('ytd-menu-service-item-renderer:has(yt-icon.ytd-playlist-add-icon), yt-button-view-model:has(svg path[d*="M14,10H2v2h12V10z M14,6H2v2h12V6z M18,14v-4h-2v4h-4v2h4v4h2v-4h4v-2H18z"])');
+            hasPlaylist = !!e.target.closest('ytd-menu-popup-renderer ytd-menu-service-item-renderer:has(yt-icon.ytd-playlist-add-icon)');
         }
 
         if (hasLike) {
             console.log("[Wallgarden Sync] LIKE clicked");
             const metadata = scrapeVideoMetadata();
             sendSyncEvent('LIKE', metadata);
-            return;
-        }
-
-        if (hasDislike) {
+        } else if (hasDislike) {
             console.log("[Wallgarden Sync] DISLIKE clicked");
             const metadata = scrapeVideoMetadata();
             sendSyncEvent('DISLIKE', metadata);
-            return;
-        }
-
-        if (hasSub) {
+        } else if (hasSub) {
             console.log("[Wallgarden Sync] SUBSCRIBE clicked");
             sendSyncEvent('SUBSCRIBE');
-            return;
-        }
-
-        if (hasPlaylist) {
+        } else if (hasPlaylist) {
             console.log("[Wallgarden Sync] PLAYLIST_SAVE clicked");
             sendSyncEvent('PLAYLIST_SAVE');
         }
-    }, true);
+    }, false);
 }
 
 // Start sync observers
