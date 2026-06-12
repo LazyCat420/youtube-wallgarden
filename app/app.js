@@ -1422,7 +1422,7 @@ async function syncFeeds() {
                         body: JSON.stringify({
                             source: "youtube",
                             channels: [channel.id],
-                            limit: 0,
+                            limit: 10,
                             days_back: 0,
                             require_transcript: false
                         }),
