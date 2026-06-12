@@ -2815,3 +2815,32 @@ body {
     height: 100%;
     border: none;
 }
+
+/* Sleek custom select styles for sorting */
+.select-sort {
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    padding: 0.45rem 1.75rem 0.45rem 0.75rem;
+    font-family: var(--font-stack);
+    font-size: 0.85rem;
+    font-weight: 600;
+    outline: none;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none' stroke='%239CA3AF' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' class='feather feather-chevron-down' viewBox='0 0 24 24'><polyline points='6 9 12 15 18 9'></polyline></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.6rem center;
+}
+.select-sort:hover {
+    border-color: var(--accent);
+    background-color: rgba(255, 255, 255, 0.05);
+}
+.select-sort:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.15);
+}
