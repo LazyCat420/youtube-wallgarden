@@ -1789,26 +1789,74 @@ function createVideoCard(video) {
         btn.addEventListener("click", (ev) => {
             ev.stopPropagation();
             const rating = parseInt(ev.currentTarget.dataset.rating, 10);
-            state.videoRatings[video.id] = rating;
-            saveVideoRatings();
+            const isAlreadyActive = ev.currentTarget.classList.contains("active");
             
-            if (rating === -5 && videoTopicForRating) {
-                const normalized = videoTopicForRating.trim().toLowerCase();
-                if (!state.dislikedTopics.includes(normalized)) {
-                    state.dislikedTopics.push(normalized);
-                    saveDislikedTopics();
+            if (isAlreadyActive) {
+                // Toggle OFF
+                delete state.videoRatings[video.id];
+                if (rating === 5) {
+                    state.likedVideos = state.likedVideos.filter(v => v.id !== video.id);
+                    saveLikedVideos();
                 }
-                if (state.likedTopics.includes(normalized)) {
-                    state.likedTopics = state.likedTopics.filter(t => t !== normalized);
-                    saveLikedTopics();
+                saveVideoRatings();
+                ev.currentTarget.classList.remove("active");
+                showToast(rating > 0 ? 'Removed Like' : 'Removed Dislike', "info");
+            } else {
+                // Toggle ON or Switch rating
+                state.videoRatings[video.id] = rating;
+                if (rating === 5) {
+                    if (!state.likedVideos.some(v => v.id === video.id)) {
+                        state.likedVideos.push(video);
+                    }
+                } else {
+                    state.likedVideos = state.likedVideos.filter(v => v.id !== video.id);
                 }
-                state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== normalized);
-                saveTopics();
+                saveLikedVideos();
+                saveVideoRatings();
+                
+                if (rating === -5 && videoTopicForRating) {
+                    const normalized = videoTopicForRating.trim().toLowerCase();
+                    if (!state.dislikedTopics.includes(normalized)) {
+                        state.dislikedTopics.push(normalized);
+                        saveDislikedTopics();
+                    }
+                    if (state.likedTopics.includes(normalized)) {
+                        state.likedTopics = state.likedTopics.filter(t => t !== normalized);
+                        saveLikedTopics();
+                    }
+                    state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== normalized);
+                    saveTopics();
+                }
+                
+                card.querySelectorAll(".title-rating-btn").forEach(b => b.classList.remove("active"));
+                ev.currentTarget.classList.add("active");
+                showToast(rating > 0 ? '👍 Liked' : '👎 Disliked', rating > 0 ? "success" : "info");
             }
-            
-            card.querySelectorAll(".title-rating-btn").forEach(b => b.classList.remove("active"));
-            ev.currentTarget.classList.add("active");
-            showToast(rating > 0 ? '👍 Liked' : '👎 Disliked', rating > 0 ? "success" : "info");
+
+            // Sync with inline player sidebar if it's currently showing this video
+            const activePlayerIframe = document.querySelector(".inline-player iframe");
+            if (activePlayerIframe && activePlayerIframe.src.includes(video.id)) {
+                const sidebarLike = document.querySelector(".sidebar-btn-like");
+                const sidebarDislike = document.querySelector(".sidebar-btn-dislike");
+                if (sidebarLike && sidebarDislike) {
+                    const currentRating = state.videoRatings[video.id];
+                    if (currentRating === 5) {
+                        sidebarLike.classList.add("active");
+                        sidebarDislike.classList.remove("active");
+                    } else if (currentRating === -5) {
+                        sidebarLike.classList.remove("active");
+                        sidebarDislike.classList.add("active");
+                    } else {
+                        sidebarLike.classList.remove("active");
+                        sidebarDislike.classList.remove("active");
+                    }
+                }
+            }
+
+            // If we are currently in the liked-videos view, refresh the view
+            if (state.currentView === "liked-videos") {
+                renderLikedVideosView();
+            }
         });
     });
 

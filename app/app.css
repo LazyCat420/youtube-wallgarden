@@ -621,8 +621,16 @@ body {
     color: var(--theme-blue-2);
 }
 
+.title-rating-btn.active.thumb-up svg {
+    fill: var(--theme-blue-2);
+}
+
 .title-rating-btn.active.thumb-down {
     color: var(--score-low);
+}
+
+.title-rating-btn.active.thumb-down svg {
+    fill: var(--score-low);
 }
 
 .video-channel {
