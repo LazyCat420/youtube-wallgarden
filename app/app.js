@@ -1383,7 +1383,8 @@ async function syncFeeds() {
                             const videoId = entry.querySelector("videoId")?.textContent || 
                                             entry.querySelector("id")?.textContent?.split(":")[2];
                             const title = entry.querySelector("title")?.textContent || "";
-                            const publishedStr = entry.querySelector("published")?.textContent;
+                            const publishedStr = entry.querySelector("published")?.textContent || 
+                                                 entry.querySelector("updated")?.textContent || null;
                             const published = publishedStr ? Date.parse(publishedStr) : null;
                             
                             const mediaGroup = entry.getElementsByTagName("media:group")[0];
@@ -1655,7 +1656,8 @@ async function fetchChannelFeedOnDemand(channelId, channelName) {
             const videoId = entry.querySelector("videoId")?.textContent || 
                             entry.querySelector("id")?.textContent?.split(":")[2];
             const title = entry.querySelector("title")?.textContent || "";
-            const publishedStr = entry.querySelector("published")?.textContent;
+            const publishedStr = entry.querySelector("published")?.textContent || 
+                                 entry.querySelector("updated")?.textContent || null;
             const published = publishedStr ? Date.parse(publishedStr) : null;
                                  
             if (videoId && title) {
