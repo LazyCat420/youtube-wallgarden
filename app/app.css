@@ -304,12 +304,12 @@ body {
 .search-suggestions {
     display: flex;
     gap: 0.4rem;
-    flex-wrap: wrap; /* Wrap up to 3 rows */
+    flex-wrap: wrap; /* Wrap up to 3-4 rows */
     justify-content: center;
     max-width: 100%;
     width: 100%;
     margin: 0.6rem auto 0;
-    max-height: 7rem; /* Allow up to 3 rows */
+    max-height: 10rem; /* Allow up to 4 rows */
     overflow-y: auto;
     scrollbar-width: thin;
 }
