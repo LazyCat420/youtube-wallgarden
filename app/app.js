@@ -137,60 +137,161 @@ function updateSubCount() {
     if (el) el.textContent = state.channels.length;
 }
 
+let currentSearchSuggestions = [];
+
+function getSuggestionsPool() {
+    const pool = [];
+    const seen = new Set();
+    const add = (phrase) => {
+        if (!phrase) return;
+        const normalized = phrase.trim().toLowerCase();
+        if (!normalized) return;
+        if ((state.dislikedTopics || []).some(dt => dt.toLowerCase() === normalized)) return;
+        if ((state.burnedQueries || []).some(bq => bq.toLowerCase() === normalized)) return;
+        if (!seen.has(normalized)) {
+            seen.add(normalized);
+            pool.push(normalized);
+        }
+    };
+
+    // 1. Liked topics
+    (state.likedTopics || []).forEach(t => add(t));
+    // 2. Recent search history
+    (state.searchHistory || []).forEach(q => add(q));
+    // 3. User preferred (topics with weight > 0)
+    (state.topics || []).filter(t => t.weight > 0).forEach(t => add(t.phrase));
+    // 4. Brainstormed queue
+    (state.smartFeedTopicsQueue || []).forEach(t => add(t));
+    
+    return pool;
+}
+
+function deleteSuggestion(topic) {
+    const normalized = topic.toLowerCase();
+    
+    // Remove from likedTopics
+    state.likedTopics = (state.likedTopics || []).filter(t => t.toLowerCase() !== normalized);
+    saveLikedTopics();
+    
+    // Remove from searchHistory
+    state.searchHistory = (state.searchHistory || []).filter(q => q.toLowerCase() !== normalized);
+    saveSearchHistory();
+    
+    // Remove from smartFeedTopicsQueue
+    state.smartFeedTopicsQueue = (state.smartFeedTopicsQueue || []).filter(t => t.toLowerCase() !== normalized);
+    
+    // Remove from state.topics
+    state.topics = (state.topics || []).filter(t => t.phrase.toLowerCase() !== normalized);
+    saveTopics();
+    
+    // Burn the query so it is never suggested again by LLM brainstormer
+    if (!state.burnedQueries.includes(normalized)) {
+        state.burnedQueries.push(normalized);
+        if (state.burnedQueries.length > 50) {
+            state.burnedQueries.shift();
+        }
+        saveBurnedQueries();
+    }
+    
+    // Remove from current active suggestion list
+    const index = currentSearchSuggestions.indexOf(normalized);
+    if (index > -1) {
+        currentSearchSuggestions.splice(index, 1);
+    }
+    
+    // Try to find a replacement!
+    const pool = getSuggestionsPool();
+    const replacement = pool.find(p => !currentSearchSuggestions.includes(p));
+    if (replacement) {
+        if (index > -1) {
+            currentSearchSuggestions.splice(index, 0, replacement);
+        } else {
+            currentSearchSuggestions.push(replacement);
+        }
+    }
+    
+    // Re-render suggestions
+    renderSearchSuggestions(true);
+}
+
 // Render suggestion pills under the search bar
-function renderSearchSuggestions() {
+function renderSearchSuggestions(useExisting = false) {
     const container = document.getElementById("search-suggestions");
     if (!container) return;
     container.innerHTML = "";
     
-    const suggestions = new Set();
-    const shuffleArray = (arr) => [...arr].sort(() => 0.5 - Math.random());
+    if (!useExisting || currentSearchSuggestions.length === 0) {
+        const suggestions = new Set();
+        const shuffleArray = (arr) => [...arr].sort(() => 0.5 - Math.random());
+        
+        // 1. Liked topics (random up to 15)
+        const liked = (state.likedTopics || []).map(t => t.toLowerCase());
+        shuffleArray(liked).slice(0, 15).forEach(t => suggestions.add(t));
+        
+        // 2. Recent search history (random up to 10)
+        const searches = (state.searchHistory || []).map(q => q.toLowerCase());
+        shuffleArray(searches).slice(0, 10).forEach(t => suggestions.add(t));
+        
+        // 3. User preferred (highly weighted topics, weight > 0, random up to 25)
+        const highlyWeighted = state.topics
+            .filter(t => t.weight > 0 && !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t.phrase.toLowerCase()))
+            .map(t => t.phrase.toLowerCase());
+        shuffleArray(highlyWeighted).slice(0, 25).forEach(t => suggestions.add(t));
+        
+        // 4. Trending new (from the AI-brainstormed queue, random up to 20)
+        const newQueue = (state.smartFeedTopicsQueue || [])
+            .map(t => t.toLowerCase())
+            .filter(t => !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t));
+        shuffleArray(newQueue).slice(0, 20).forEach(t => suggestions.add(t));
+        
+        // 5. Unexplored topics (weight === 5, not liked, not searched, random up to 15)
+        const unexplored = state.topics
+            .filter(t => t.weight === 5 && 
+                        !liked.includes(t.phrase.toLowerCase()) && 
+                        !searches.includes(t.phrase.toLowerCase()) &&
+                        !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t.phrase.toLowerCase()))
+            .map(t => t.phrase.toLowerCase());
+        shuffleArray(unexplored).slice(0, 15).forEach(t => suggestions.add(t));
+        
+        // Filter out burned queries and empty strings
+        const finalPool = [...suggestions].filter(phrase => {
+            const normalized = phrase.trim().toLowerCase();
+            if (!normalized) return false;
+            if ((state.dislikedTopics || []).some(dt => dt.toLowerCase() === normalized)) return false;
+            if ((state.burnedQueries || []).some(bq => bq.toLowerCase() === normalized)) return false;
+            return true;
+        });
+
+        // Combine, shuffle the final list, and limit to 50 pills
+        currentSearchSuggestions = shuffleArray(finalPool).slice(0, 50);
+    }
     
-    // 1. Liked topics (random up to 8)
-    const liked = (state.likedTopics || []).map(t => t.toLowerCase());
-    shuffleArray(liked).slice(0, 8).forEach(t => suggestions.add(t));
-    
-    // 2. Recent search history (random up to 5)
-    const searches = (state.searchHistory || []).map(q => q.toLowerCase());
-    shuffleArray(searches).slice(0, 5).forEach(t => suggestions.add(t));
-    
-    // 3. User preferred (highly weighted topics, weight > 5, random up to 6)
-    const highlyWeighted = state.topics
-        .filter(t => t.weight > 5 && !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t.phrase.toLowerCase()))
-        .map(t => t.phrase.toLowerCase());
-    shuffleArray(highlyWeighted).slice(0, 6).forEach(t => suggestions.add(t));
-    
-    // 4. Trending new (from the AI-brainstormed queue, random up to 6)
-    const newQueue = (state.smartFeedTopicsQueue || [])
-        .map(t => t.toLowerCase())
-        .filter(t => !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t));
-    shuffleArray(newQueue).slice(0, 6).forEach(t => suggestions.add(t));
-    
-    // 5. Unexplored topics (weight === 5, not liked, not searched, random up to 8)
-    const unexplored = state.topics
-        .filter(t => t.weight === 5 && 
-                    !liked.includes(t.phrase.toLowerCase()) && 
-                    !searches.includes(t.phrase.toLowerCase()) &&
-                    !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t.phrase.toLowerCase()))
-        .map(t => t.phrase.toLowerCase());
-    
-    shuffleArray(unexplored).slice(0, 8).forEach(t => suggestions.add(t));
-    
-    // Combine, shuffle the final list, and limit to 25 pills so the row changes completely on every refresh
-    const pills = shuffleArray([...suggestions]).slice(0, 25);
-    
-    pills.forEach(topic => {
-        const pill = document.createElement("button");
+    currentSearchSuggestions.forEach(topic => {
+        const pill = document.createElement("div");
         pill.className = "suggestion-pill";
-        pill.type = "button";
-        pill.textContent = topic.split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
-        pill.addEventListener("click", () => {
+        
+        const textSpan = document.createElement("span");
+        textSpan.className = "suggestion-text";
+        textSpan.textContent = topic.split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+        textSpan.addEventListener("click", () => {
             const searchInput = document.getElementById("input-search-videos");
             if (searchInput) searchInput.value = topic;
             state.discoverBatchIndex = 0;
             state.discoverMaxReached = false;
             triggerGlobalSearch(topic);
         });
+        pill.appendChild(textSpan);
+        
+        const deleteSpan = document.createElement("span");
+        deleteSpan.className = "delete-suggestion";
+        deleteSpan.textContent = "✕";
+        deleteSpan.title = "Delete topic from suggestions";
+        deleteSpan.addEventListener("click", (e) => {
+            e.stopPropagation();
+            deleteSuggestion(topic);
+        });
+        pill.appendChild(deleteSpan);
+        
         container.appendChild(pill);
     });
 }
@@ -894,6 +995,27 @@ function setupEventListeners() {
 
     // Setup Profiles UI Event Listeners
     setupProfilesUI();
+
+    // Scroll listener for sticky main header background color / backdrop filter fade
+    const feedSection = document.querySelector(".feed-section");
+    const mainHeader = document.querySelector(".main-header");
+    if (feedSection && mainHeader) {
+        feedSection.addEventListener("scroll", () => {
+            const scrollTop = feedSection.scrollTop;
+            const maxScroll = 100;
+            const ratio = Math.min(scrollTop / maxScroll, 1);
+            
+            // Background opacity goes from 0 to 0.85
+            const bgOpacity = ratio * 0.85;
+            // Blur goes from 0 to 12px
+            const blurAmt = ratio * 12;
+            
+            mainHeader.style.background = `rgba(3, 7, 18, ${bgOpacity})`;
+            mainHeader.style.backdropFilter = `blur(${blurAmt}px)`;
+            mainHeader.style.webkitBackdropFilter = `blur(${blurAmt}px)`;
+            mainHeader.style.borderColor = `rgba(59, 130, 246, ${ratio * 0.12})`;
+        });
+    }
 }
 
 // Render profile options inside Settings tab dropdowns
@@ -2443,7 +2565,7 @@ function renderFeed() {
             <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
                 <div style="display: flex; align-items: center; gap: 0.5rem;">
                     <h2 class="discover-section-title" style="font-size: 1.15rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
-                        <span>✨ Discovery Feed</span>
+                        <span>Discovery Feed</span>
                     </h2>
                     <span class="suggestions-badge">AI Discovery</span>
                 </div>
@@ -2600,7 +2722,7 @@ function renderFeed() {
             const divider = document.createElement("div");
             divider.className = "discover-section-header";
             divider.innerHTML = `
-                <h2 class="discover-section-title">🔍 Public Search Results for "${capitalizePhrase(searchQuery)}"</h2>
+                <h2 class="discover-section-title">Public Search Results for "${capitalizePhrase(searchQuery)}"</h2>
                 <span class="discover-badge">YouTube Public Search</span>
             `;
             grid.appendChild(divider);
@@ -4204,8 +4326,8 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
             divider.className = "discover-section-header";
             const isSearch = state.currentView.startsWith("search_");
             const titleText = isSearch
-                ? `🔍 Public Search Results for "${capitalizePhrase(topicPhrase)}"`
-                : `🔍 Discover More on "${capitalizePhrase(topicPhrase)}"`;
+                ? `Public Search Results for "${capitalizePhrase(topicPhrase)}"`
+                : `Discover More on "${capitalizePhrase(topicPhrase)}"`;
             divider.innerHTML = `
                 <h2 class="discover-section-title">${titleText}</h2>
                 <span class="discover-badge">YouTube Public Search</span>
@@ -4228,7 +4350,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
                 <div class="thumbnail-play-overlay">
                     <div class="play-icon-circle">▶</div>
                 </div>
-                <div class="search-badge">🔍 Search</div>
+                <div class="search-badge">Search</div>
             </div>
             <div class="card-details">
                 <h3 class="video-title">${escapeHTML(enrichedVideo.title)}</h3>
@@ -5599,10 +5721,10 @@ async function editDiscoverTopic(topic) {
             
             currentHeaderEl.innerHTML = `
                 <h2 class="discover-section-title" style="font-size: 1.1rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
-                    <span>🔍 Discover:</span>
+                    <span>Discover:</span>
                     <span class="discover-topic-text" style="color: var(--accent);">${escapeHTML(capitalizePhrase(newTopicClean))}</span>
                     <div class="discover-topic-actions">
-                        <button class="discover-action-btn edit-btn" title="Edit Topic" data-topic="${escapeHTML(newTopicClean)}">✏️</button>
+                        <button class="discover-action-btn edit-btn" title="Edit Topic" data-topic="${escapeHTML(newTopicClean)}"><svg class="icon-svg" style="width: 12px; height: 12px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
                         <button class="discover-action-btn remove-btn" title="Remove Topic" data-topic="${escapeHTML(newTopicClean)}">✕</button>
                     </div>
                 </h2>
