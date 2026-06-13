@@ -1700,7 +1700,7 @@ function getScoreAndMatches(video) {
     
     // Viral spam heuristic for post-2023 videos
     if (video.published && video.published > JAN_2023 && video.viewCount) {
-        const ageMs = Date.now() - video.published;
+        const ageMs = getVideoAge(video.published);
         const ageMonths = ageMs / (30 * 24 * 60 * 60 * 1000);
         // Suspiciously viral: >10M views in <12 months
         if (video.viewCount > 10000000 && ageMonths < 12) {
@@ -3901,7 +3901,7 @@ function parseRelativeTime(str) {
         return parsed;
     }
     
-    const match = cleanStr.match(/^(\d+)\s+(second|minute|hour|day|week|month|year)s?$/);
+    const match = cleanStr.match(/^(\d+)\s*(s|sec|second|m|min|minute|h|hr|hour|d|day|w|wk|week|mo|month|y|yr|year)s?$/);
     if (!match) {
         return 0;
     }
@@ -3919,13 +3919,13 @@ function parseRelativeTime(str) {
     
     let msDiff = 0;
     switch (unit) {
-        case 'second': msDiff = value * second; break;
-        case 'minute': msDiff = value * minute; break;
-        case 'hour': msDiff = value * hour; break;
-        case 'day': msDiff = value * day; break;
-        case 'week': msDiff = value * week; break;
-        case 'month': msDiff = value * month; break;
-        case 'year': msDiff = value * year; break;
+        case 's': case 'sec': case 'second': msDiff = value * second; break;
+        case 'm': case 'min': case 'minute': msDiff = value * minute; break;
+        case 'h': case 'hr': case 'hour': msDiff = value * hour; break;
+        case 'd': case 'day': msDiff = value * day; break;
+        case 'w': case 'wk': case 'week': msDiff = value * week; break;
+        case 'mo': case 'month': msDiff = value * month; break;
+        case 'y': case 'yr': case 'year': msDiff = value * year; break;
     }
     
     return Date.now() - msDiff;
@@ -3943,34 +3943,25 @@ function getRelativeTime(timestamp) {
     
     if (diffDays >= 365) {
         const years = Math.floor(diffDays / 365);
-        const remainingDays = diffDays % 365;
-        const months = Math.floor(remainingDays / 30);
-        if (months > 0) {
-            return `${years}y ${months}mo ago`;
-        }
         return `${years}y ago`;
     }
     if (diffDays >= 30) {
         const months = Math.floor(diffDays / 30);
-        const remainingDays = diffDays % 30;
-        const weeks = Math.floor(remainingDays / 7);
-        if (weeks > 0) {
-            return `${months}mo ${weeks}w ago`;
-        }
         return `${months}mo ago`;
     }
     if (diffDays >= 7) {
         const weeks = Math.floor(diffDays / 7);
-        const remainingDays = diffDays % 7;
-        if (remainingDays > 0) {
-            return `${weeks}w ${remainingDays}d ago`;
-        }
         return `${weeks}w ago`;
     }
     if (diffDays > 0) return `${diffDays}d ago`;
     if (diffHr > 0) return `${diffHr}h ago`;
     if (diffMin > 0) return `${diffMin}m ago`;
     return "Just now";
+}
+
+function getVideoAge(timestamp) {
+    if (!timestamp) return 0;
+    return Date.now() - timestamp;
 }
 
 // Smart date formatting removed
@@ -3983,7 +3974,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
     const cacheKey = topicPhrase.toLowerCase();
     offset = offset || 0;
     const fetchCount = offset + DISCOVER_BATCH_SIZE;
-    const url = `/youtube/results?search_query=${encodeURIComponent(topicPhrase)}`;
+    const url = `/youtube/results?search_query=${encodeURIComponent(topicPhrase)}&sp=CAI%253D`;
     console.log(`[Search Debug] fetchTopicSearchDiscovery initiated for: "${topicPhrase}" (cacheKey: "${cacheKey}", offset: ${offset}, fetchCount: ${fetchCount})`);
     if (topicSearchLoading[cacheKey]) {
         console.log(`[Search Debug] fetchTopicSearchDiscovery already loading for "${cacheKey}". Aborting duplicate call.`);
@@ -4013,7 +4004,8 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                     limit: fetchCount,
                     days_back: 0,
                     require_transcript: false,
-                    stream: true
+                    stream: true,
+                    sort: "date"
                 }),
                 signal: controller.signal
             });
