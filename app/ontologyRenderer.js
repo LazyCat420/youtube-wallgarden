@@ -81,6 +81,7 @@ function physicsTick(nodes, edges, nodeMapById, alpha) {
     const attraction = 0.02 + Math.min(edgeCount / Math.max(nodeCount, 1), 2) * 0.008;
     const centerGravity = 0.0005;
     const groupGravity = 0.0025;
+    const clusterOffsetGravity = 0.0004; // Weak pull toward fixed type regions
     const damping = 0.82;
     const maxVelocity = 15;
 
@@ -191,6 +192,24 @@ function physicsTick(nodes, edges, nodeMapById, alpha) {
         const deltaY = centroid.y - node.y;
         node.vx += deltaX * groupGravity * alpha;
         node.vy += deltaY * groupGravity * alpha;
+    });
+
+    // ── Fixed-offset type clustering ──
+    // Gives each node type a gentle pull toward a fixed region of the canvas.
+    // This breaks the initial sunflower spiral symmetry so types separate visually.
+    const TYPE_CLUSTER_OFFSETS = {
+        "Topic":          { x: -0.2, y: -0.15 },   // Upper-left
+        "Channel":        { x:  0.25, y: -0.1 },    // Upper-right
+        "ContentPattern": { x:  0.0, y:  0.25 },    // Bottom center
+    };
+    nodes.forEach(node => {
+        if (node._dragging) return;
+        const offset = TYPE_CLUSTER_OFFSETS[node.type];
+        if (!offset) return;
+        const targetX = centerOfMassX + offset.x * 600;
+        const targetY = centerOfMassY + offset.y * 600;
+        node.vx += (targetX - node.x) * clusterOffsetGravity * alpha;
+        node.vy += (targetY - node.y) * clusterOffsetGravity * alpha;
     });
 
     nodes.forEach(node => {

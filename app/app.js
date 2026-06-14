@@ -483,7 +483,14 @@ function loadState() {
 }
 
 function migrateTopicsToGraph() {
-    // V2 migration: wipe the broken orphan-heavy graph and rebuild with proper edge creation
+    // Auto-detect broken v2 migration: had nodes but 0 edges = scoring wasn't run
+    if (localStorage.getItem(getProfileKey("ontology_v2_migrated")) === "1"
+        && Object.keys(state.ontologyGraph.edges || {}).length === 0
+        && Object.keys(state.ontologyGraph.nodes || {}).length > 0) {
+        console.log("[Ontology V2] Detected broken migration (nodes but 0 edges) — re-running...");
+        localStorage.removeItem(getProfileKey("ontology_v2_migrated"));
+    }
+    
     if (localStorage.getItem(getProfileKey("ontology_v2_migrated"))) return;
     
     console.log("[Ontology V2] Wiping old graph and rebuilding with proper edge creation...");
@@ -497,6 +504,8 @@ function migrateTopicsToGraph() {
     (state.dislikedTopics || []).forEach(t => graphUpsertNode(state.ontologyGraph, t, "Topic", -4));
     
     // Rebuild edges from video ratings history
+    // CRITICAL: cached videos don't have matchedTopics — it's computed by getScoreAndMatches()
+    // We must run scoring on each video before passing to graphProcessRating()
     const ratings = state.videoRatings || {};
     const cache = state.cache?.videos || {};
     let rebuiltCount = 0;
@@ -504,7 +513,12 @@ function migrateTopicsToGraph() {
         for (const channelVideos of Object.values(cache)) {
             const video = channelVideos.find(v => v.id === videoId);
             if (video) {
-                graphProcessRating(state.ontologyGraph, video, rating > 0 ? 1 : -1);
+                // Run scoring to populate matchedTopics (they're not stored in cache)
+                const evaluation = getScoreAndMatches(video);
+                graphProcessRating(state.ontologyGraph, {
+                    ...video,
+                    matchedTopics: evaluation.matches
+                }, rating > 0 ? 1 : -1);
                 rebuiltCount++;
                 break;
             }
