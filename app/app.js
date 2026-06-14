@@ -6829,6 +6829,16 @@ function renderOntologyView() {
         statsEl.innerHTML = `Nodes: <strong>${nodeCount}</strong> | Edges: <strong>${edgeCount}</strong> | Last Pruned: <em>${state.ontologyGraph.lastPruned ? new Date(state.ontologyGraph.lastPruned).toLocaleString() : 'Never'}</em>`;
     }
 
+    const nodeEdgeCounts = {};
+    for (const e of Object.values(gEdges)) {
+        nodeEdgeCounts[e.source] = (nodeEdgeCounts[e.source] || 0) + 1;
+        nodeEdgeCounts[e.target] = (nodeEdgeCounts[e.target] || 0) + 1;
+    }
+
+    let gridCols = Math.ceil(Math.sqrt(nodeCount));
+    let gridIndex = 0;
+    const GRID_SPACING = 150; // Distance between static nodes
+
     for (const [id, n] of Object.entries(gNodes)) {
         let color = "#aaaaaa";
         let shape = "dot";
@@ -6844,14 +6854,35 @@ function renderOntologyView() {
         // Scale size by absolute weight
         const size = Math.max(10, Math.min(40, 10 + (Math.abs(n.weight) * 2)));
 
+        const edgeCountForNode = nodeEdgeCounts[id] || 0;
+        const hasEdges = edgeCountForNode > 0;
+        
+        let physics = true;
+        let x = undefined;
+        let y = undefined;
+
+        if (!hasEdges) {
+            physics = false;
+            // Arrange in a grid
+            const col = gridIndex % gridCols;
+            const row = Math.floor(gridIndex / gridCols);
+            // Center the grid around origin but expand outward widely
+            x = (col - gridCols / 2) * GRID_SPACING * 4;
+            y = (row - gridCols / 2) * GRID_SPACING * 4;
+            gridIndex++;
+        }
+
         nodes.add({
             id: id,
             label: n.label,
-            title: `Type: ${n.type}\nWeight: ${n.weight.toFixed(1)}\nHits: ${n.hits}`,
+            title: `Type: ${n.type}\nWeight: ${n.weight.toFixed(1)}\nHits: ${n.hitCount || n.hits || 0}`,
             value: size,
             color: { background: color, border: "#ffffff" },
             shape: shape,
-            font: { color: "var(--text-primary)", size: 12 }
+            font: { color: "var(--text-primary)", size: 12 },
+            physics: physics,
+            x: x,
+            y: y
         });
     }
 

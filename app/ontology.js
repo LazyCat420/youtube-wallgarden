@@ -5,8 +5,8 @@
 
 const GRAPH_PRUNE_THRESHOLD = -8;       // Nodes below this weight are deleted
 const GRAPH_EDGE_PRUNE_THRESHOLD = -5;  // Edges below this weight are deleted
-const GRAPH_MAX_NODES = 300;            // Hard cap to prevent bloat
-const GRAPH_MAX_EDGES = 600;            // Hard cap
+const GRAPH_MAX_NODES = 10000;            // Hard cap to prevent bloat
+const GRAPH_MAX_EDGES = 20000;            // Hard cap
 
 // ── Helpers ─────────────────────────────────────────────────
 
