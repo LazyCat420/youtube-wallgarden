@@ -699,6 +699,27 @@ function setupEventListeners() {
         });
     });
 
+    const graphFilterWeight = document.getElementById("graph-filter-weight");
+    if (graphFilterWeight) {
+        graphFilterWeight.addEventListener("change", () => {
+            if (document.getElementById("tab-ontology").classList.contains("active")) {
+                renderOntologyView();
+            }
+        });
+    }
+
+    const btnPruneGraph = document.getElementById("btn-prune-graph");
+    if (btnPruneGraph) {
+        btnPruneGraph.addEventListener("click", () => {
+            if (!confirm("Are you sure you want to force prune the knowledge graph? This removes dead nodes and edges below thresholds.")) return;
+            graphPrune(state.ontologyGraph);
+            state.ontologyGraph.lastPruned = Date.now();
+            saveOntologyGraph();
+            renderOntologyView();
+            showToast("🧹 Graph successfully pruned", "success");
+        });
+    }
+
     // Add channel input
     const btnAddChannel = document.getElementById("btn-add-channel");
     const inputChannel = document.getElementById("input-channel-handle");
@@ -6797,154 +6818,53 @@ window.addEventListener("message", (event) => {
 
 // ── Ontology Graph Rendering ──
 function renderOntologyView() {
-    // If vis.js isn't loaded yet, load it dynamically
-    if (typeof vis === 'undefined') {
-        const statsEl = document.getElementById("ontology-stats");
-        if (statsEl) statsEl.textContent = "Loading vis.js rendering engine...";
-        
-        const script = document.createElement('script');
-        script.src = "https://unpkg.com/vis-network/standalone/umd/vis-network.min.js";
-        script.onload = () => {
-            renderOntologyView(); // Retry once loaded
-        };
-        document.head.appendChild(script);
-        return;
-    }
-
     const container = document.getElementById('ontology-graph-container');
     const statsEl = document.getElementById('ontology-stats');
     if (!container || !state.ontologyGraph) return;
 
-    // Convert our simplified graph into vis.js format
-    const nodes = new vis.DataSet();
-    const edges = new vis.DataSet();
-
     const gNodes = state.ontologyGraph.nodes || {};
     const gEdges = state.ontologyGraph.edges || {};
-    
-    // Stats
+
     const nodeCount = Object.keys(gNodes).length;
     const edgeCount = Object.keys(gEdges).length;
+
     if (statsEl) {
         statsEl.innerHTML = `Nodes: <strong>${nodeCount}</strong> | Edges: <strong>${edgeCount}</strong> | Last Pruned: <em>${state.ontologyGraph.lastPruned ? new Date(state.ontologyGraph.lastPruned).toLocaleString() : 'Never'}</em>`;
     }
 
-    const nodeEdgeCounts = {};
-    for (const e of Object.values(gEdges)) {
-        nodeEdgeCounts[e.source] = (nodeEdgeCounts[e.source] || 0) + 1;
-        nodeEdgeCounts[e.target] = (nodeEdgeCounts[e.target] || 0) + 1;
-    }
+    const weightSelect = document.getElementById("graph-filter-weight");
+    const minEdgeWeight = weightSelect ? parseInt(weightSelect.value, 10) : 0;
 
-    let gridCols = Math.ceil(Math.sqrt(nodeCount));
-    let gridIndex = 0;
-    const GRID_SPACING = 150; // Distance between static nodes
+    const nodesArr = Object.values(gNodes);
+    const edgesArr = Object.values(gEdges).filter(e => e.weight >= minEdgeWeight);
 
-    for (const [id, n] of Object.entries(gNodes)) {
-        let color = "#aaaaaa";
-        let shape = "dot";
-        
-        if (n.type === "Topic") {
-            color = n.weight > 0 ? "#10b981" : "#ef4444"; // Green vs Red
-            shape = "dot";
-        } else if (n.type === "Channel") {
-            color = n.weight > 0 ? "#3b82f6" : "#f59e0b"; // Blue vs Orange
-            shape = "box";
-        }
-        
-        // Scale size by absolute weight
-        const size = Math.max(10, Math.min(40, 10 + (Math.abs(n.weight) * 2)));
-
-        const edgeCountForNode = nodeEdgeCounts[id] || 0;
-        const hasEdges = edgeCountForNode > 0;
-        
-        let physics = true;
-        let x = undefined;
-        let y = undefined;
-
-        if (!hasEdges) {
-            physics = false;
-            // Arrange in a grid
-            const col = gridIndex % gridCols;
-            const row = Math.floor(gridIndex / gridCols);
-            // Center the grid around origin but expand outward widely
-            x = (col - gridCols / 2) * GRID_SPACING * 4;
-            y = (row - gridCols / 2) * GRID_SPACING * 4;
-            gridIndex++;
-        }
-
-        nodes.add({
-            id: id,
-            label: n.label,
-            title: `Type: ${n.type}\nWeight: ${n.weight.toFixed(1)}\nHits: ${n.hitCount || n.hits || 0}`,
-            value: size,
-            color: { background: color, border: "#ffffff" },
-            shape: shape,
-            font: { color: "var(--text-primary)", size: 12 },
-            physics: physics,
-            x: x,
-            y: y
-        });
-    }
-
-    for (const [id, e] of Object.entries(gEdges)) {
-        edges.add({
-            id: id,
-            from: e.source,
-            to: e.target,
-            value: e.weight,
-            title: `Weight: ${e.weight.toFixed(1)}`,
-            color: { 
-                color: e.weight > 0 ? "rgba(16, 185, 129, 0.4)" : "rgba(239, 68, 68, 0.4)",
-                highlight: e.weight > 0 ? "rgba(16, 185, 129, 0.8)" : "rgba(239, 68, 68, 0.8)"
+    if (!window.ontologyCanvas) {
+        window.ontologyCanvas = new OntologyGraphCanvas(container, function(node) {
+            const detailEl = document.getElementById("ontology-node-detail");
+            if (node) {
+                if (detailEl) {
+                    detailEl.style.display = "block";
+                    detailEl.innerHTML = `
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 0.5rem;">
+                            <h4 style="margin:0; font-size:1rem;">${escapeHTML(node.label || node.id)}</h4>
+                            <span style="font-size:0.75rem; background:var(--card-bg); padding:2px 6px; border-radius:4px; border:1px solid var(--card-border);">${node.type || 'default'}</span>
+                        </div>
+                        <div style="font-size:0.85rem; color:var(--text-secondary); display:grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+                            <div>Weight: <strong style="${(node.weight || 0) > 0 ? 'color:var(--success)' : 'color:var(--danger)'}">${(node.weight || 0).toFixed(2)}</strong></div>
+                            <div>Total Hits: <strong>${node.hitCount || node.hits || 0}</strong></div>
+                            <div>Last Updated: <strong>${new Date(node.lastUpdated || node.lastSeen || node.createdAt || Date.now()).toLocaleDateString()}</strong></div>
+                        </div>
+                        <button class="btn btn-sm btn-danger" style="margin-top:0.75rem; width:100%;" onclick="deleteNodeFromGraph('${node.id}')">Delete Node</button>
+                    `;
+                }
+            } else {
+                if (detailEl) detailEl.style.display = "none";
             }
         });
+        window.ontologyCanvas.setData(nodesArr, edgesArr);
+    } else {
+        window.ontologyCanvas.updateData(nodesArr, edgesArr);
     }
-
-    const data = { nodes, edges };
-    const options = {
-        physics: {
-            stabilization: false,
-            barnesHut: {
-                gravitationalConstant: -3000,
-                springConstant: 0.04,
-                springLength: 100
-            }
-        },
-        interaction: { hover: true, tooltipDelay: 200 }
-    };
-
-    // Store network instance globally to avoid memory leaks if re-rendered
-    if (window.ontologyNetwork) {
-        window.ontologyNetwork.destroy();
-    }
-    window.ontologyNetwork = new vis.Network(container, data, options);
-    
-    // Add click event for node detail
-    window.ontologyNetwork.on("click", function (params) {
-        const detailEl = document.getElementById("ontology-node-detail");
-        if (params.nodes.length > 0) {
-            const nodeId = params.nodes[0];
-            const n = gNodes[nodeId];
-            if (n && detailEl) {
-                detailEl.style.display = "block";
-                detailEl.innerHTML = `
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 0.5rem;">
-                        <h4 style="margin:0; font-size:1rem;">${escapeHTML(n.label)}</h4>
-                        <span style="font-size:0.75rem; background:var(--card-bg); padding:2px 6px; border-radius:4px; border:1px solid var(--card-border);">${n.type}</span>
-                    </div>
-                    <div style="font-size:0.85rem; color:var(--text-secondary); display:grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
-                        <div>Weight: <strong style="${n.weight > 0 ? 'color:var(--success)' : 'color:var(--danger)'}">${n.weight.toFixed(2)}</strong></div>
-                        <div>Total Hits: <strong>${n.hits}</strong></div>
-                        <div>Last Updated: <strong>${new Date(n.lastUpdated).toLocaleDateString()}</strong></div>
-                        ${n.clusterId ? `<div>Cluster: <strong>${n.clusterId}</strong></div>` : ''}
-                    </div>
-                    <button class="btn btn-sm btn-danger" style="margin-top:0.75rem; width:100%;" onclick="deleteNodeFromGraph('${nodeId}')">Delete Node</button>
-                `;
-            }
-        } else {
-            if (detailEl) detailEl.style.display = "none";
-        }
-    });
 }
 
 // Global helper for the delete button
