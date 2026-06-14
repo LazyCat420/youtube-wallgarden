@@ -1721,6 +1721,14 @@ body {
     scrollbar-width: thin;
 }
 
+.shorts-grid.collapsed {
+    display: none;
+}
+
+.collapse-icon.rotated {
+    transform: rotate(-180deg);
+}
+
 /* Specific cards inside the shorts grid */
 .shorts-grid .video-card {
     flex: 0 0 200px;
