@@ -367,6 +367,7 @@ function loadState() {
     const rawLikedVideos = getStoredItem("liked_videos");
     const rawNewsRatings = getStoredItem("news_ratings");
     const rawQueue = getStoredItem("queue");
+    const rawGraph = getStoredItem("ontology_graph");
 
     // Standard profile initialization - a fresh profile has NO topics and NO channels!
     state.channels = rawChannels ? JSON.parse(rawChannels) : (state.currentProfile === "default" ? [...DEFAULT_CHANNELS] : []);
@@ -396,6 +397,7 @@ function loadState() {
     state.likedVideos = rawLikedVideos ? JSON.parse(rawLikedVideos) : [];
     state.newsSourceRatings = rawNewsRatings ? JSON.parse(rawNewsRatings) : {};
     state.queue = rawQueue ? JSON.parse(rawQueue) : [];
+    state.ontologyGraph = rawGraph ? JSON.parse(rawGraph) : { nodes: {}, edges: {}, clusters: {} };
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
@@ -460,6 +462,20 @@ function loadState() {
     
     // Update profiles settings UI dropdowns
     renderProfileDropdowns();
+
+    migrateTopicsToGraph();
+}
+
+function migrateTopicsToGraph() {
+    if (localStorage.getItem(getProfileKey("ontology_migrated"))) return;
+    (state.topics || []).forEach(t => {
+        if (t.weight > 0) graphUpsertNode(state.ontologyGraph, t.phrase, "Topic", t.weight);
+        else if (t.weight < 0) graphUpsertNode(state.ontologyGraph, t.phrase, "Topic", t.weight);
+    });
+    (state.likedTopics || []).forEach(t => graphUpsertNode(state.ontologyGraph, t, "Topic", 4));
+    (state.dislikedTopics || []).forEach(t => graphUpsertNode(state.ontologyGraph, t, "Topic", -4));
+    saveOntologyGraph();
+    localStorage.setItem(getProfileKey("ontology_migrated"), "1");
 }
 
 function saveSettings() {
@@ -530,6 +546,10 @@ function saveDiscovered() {
 
 function saveQueue() {
     localStorage.setItem(getProfileKey("queue"), JSON.stringify(state.queue));
+}
+
+function saveOntologyGraph() {
+    localStorage.setItem(getProfileKey("ontology_graph"), JSON.stringify(state.ontologyGraph));
 }
 
 function getCachedVideosCount() {
@@ -672,6 +692,10 @@ function setupEventListeners() {
             
             e.target.classList.add("active");
             document.getElementById(e.target.dataset.tab).classList.add("active");
+
+            if (e.target.dataset.tab === "tab-ontology") {
+                renderOntologyView();
+            }
         });
     });
 
@@ -1078,7 +1102,7 @@ function switchProfile(profileName) {
     state.smartFeedUsedTopics = [];
     state.smartFeedInitialized = false;
 
-    // Load new profile state
+    // Load new profile
     loadState();
 
     // Reset views and clear grid
@@ -1158,7 +1182,7 @@ function deleteProfile(profileName) {
         "search_history", "brainstorm_topics", "video_ratings",
         "discovered_channels", "smart_feed_pool", "liked_topics",
         "disliked_topics", "burned_queries", "playlists", "liked_videos",
-        "news_ratings", "queue"
+        "news_ratings", "queue", "ontology_graph"
     ];
     keysToRemove.forEach(k => {
         localStorage.removeItem(`wallgarden_${profileName}_${k}`);
@@ -1607,6 +1631,19 @@ async function syncFeeds() {
         await Promise.all(workers);
         
         state.cache.videos = results;
+        
+        // Auto-suppress channels the graph has learned to avoid
+        if (state.ontologyGraph) {
+            const graphBlocked = graphGetDislikedChannels(state.ontologyGraph, -6);
+            graphBlocked.forEach(gc => {
+                if (!state.blockedChannels.some(bc => bc.id === gc.id)) {
+                    console.log(`[Ontology] Auto-suppressing channel ${gc.id} (graph weight: ${gc.weight})`);
+                    state.blockedChannels.push({ name: gc.id, id: gc.id, autoBlocked: true });
+                }
+            });
+            saveBlocked();
+        }
+
         state.cache.lastSync = Date.now();
         saveCache();
         saveChannels(); // Updates names if they changed
@@ -1709,6 +1746,11 @@ function getScoreAndMatches(video) {
         }
     }
     
+    // Add graph-learned bonus
+    if (state.ontologyGraph) {
+        score += graphScoreVideo(state.ontologyGraph, video);
+    }
+
     // Explicit user rating override
     video._score = score;
     video._matchedTopics = matches;
@@ -1956,6 +1998,21 @@ function createVideoCard(video) {
                 ev.currentTarget.classList.add("active");
                 showToast(rating > 0 ? '👍 Liked' : '👎 Disliked', rating > 0 ? "success" : "info");
             }
+
+            // ── Ontology Graph Update ──
+            if (!isAlreadyActive) {
+                graphProcessRating(state.ontologyGraph, {
+                    ...video,
+                    matchedTopics: video._matchedTopics || video.matchedTopics || []
+                }, rating > 0 ? 1 : -1);
+            } else {
+                // Rating was toggled OFF — reverse the effect
+                graphProcessRating(state.ontologyGraph, {
+                    ...video,
+                    matchedTopics: video._matchedTopics || video.matchedTopics || []
+                }, rating > 0 ? -1 : 1);
+            }
+            saveOntologyGraph();
 
             // Sync with inline player sidebar if it's currently showing this video
             const activePlayerIframe = document.querySelector(".inline-player iframe");
@@ -3111,15 +3168,24 @@ function playVideo(video) {
         sidebar.querySelector(".sidebar-btn-like").addEventListener("click", (e) => {
             e.preventDefault();
             e.stopPropagation();
+            let graphRating;
             if (state.videoRatings[video.id] === 5) {
                 delete state.videoRatings[video.id];
                 state.likedVideos = state.likedVideos.filter(v => v.id !== video.id);
+                graphRating = -1; // Reverse like
             } else {
                 state.videoRatings[video.id] = 5;
                 if (!state.likedVideos.some(v => v.id === video.id)) {
                     state.likedVideos.push(video);
                 }
+                graphRating = 1; // Apply like
             }
+            graphProcessRating(state.ontologyGraph, {
+                ...video,
+                matchedTopics: video._matchedTopics || video.matchedTopics || []
+            }, graphRating);
+            saveOntologyGraph();
+
             saveVideoRatings();
             saveLikedVideos();
             playVideo(video);
@@ -3128,12 +3194,21 @@ function playVideo(video) {
         sidebar.querySelector(".sidebar-btn-dislike").addEventListener("click", (e) => {
             e.preventDefault();
             e.stopPropagation();
+            let graphRating;
             if (state.videoRatings[video.id] === -5) {
                 delete state.videoRatings[video.id];
+                graphRating = 1; // Reverse dislike
             } else {
                 state.videoRatings[video.id] = -5;
                 state.likedVideos = state.likedVideos.filter(v => v.id !== video.id);
+                graphRating = -1; // Apply dislike
             }
+            graphProcessRating(state.ontologyGraph, {
+                ...video,
+                matchedTopics: video._matchedTopics || video.matchedTopics || []
+            }, graphRating);
+            saveOntologyGraph();
+
             saveVideoRatings();
             saveLikedVideos();
             playVideo(video);
@@ -4701,7 +4776,16 @@ async function generateBrainstormTopics(append, numRequests = 1) {
         state.brainstormLoading = false;
         return;
     }
-    const liked = likedAll.slice(0, 15).map(t => t.phrase).join(", ");
+    // Pull highest-weight liked topics from graph to seed the LLM
+    const graphTopics = Object.values(state.ontologyGraph?.nodes || {})
+        .filter(n => n.type === "Topic" && n.weight > 3)
+        .sort((a, b) => b.weight - a.weight)
+        .slice(0, 10)
+        .map(n => n.label);
+        
+    // Merge into the prompt's existing topic list
+    const combinedTopics = Array.from(new Set([...likedAll.slice(0, 15).map(t => t.phrase), ...graphTopics]));
+    const liked = combinedTopics.join(", ");
     const disliked = state.topics.filter(t => t.weight < 0).slice(0, 10).map(t => t.phrase).join(", ");
     const searches = state.searchHistory.slice(-10).join(", ");
     const recentUsed = state.smartFeedUsedTopics.slice(-20).join(", ");
@@ -6710,3 +6794,138 @@ window.addEventListener("message", (event) => {
         showToast("✅ Synced Watch Completion from YouTube", "success");
     }
 });
+
+// ── Ontology Graph Rendering ──
+function renderOntologyView() {
+    // If vis.js isn't loaded yet, load it dynamically
+    if (typeof vis === 'undefined') {
+        const statsEl = document.getElementById("ontology-stats");
+        if (statsEl) statsEl.textContent = "Loading vis.js rendering engine...";
+        
+        const script = document.createElement('script');
+        script.src = "https://unpkg.com/vis-network/standalone/umd/vis-network.min.js";
+        script.onload = () => {
+            renderOntologyView(); // Retry once loaded
+        };
+        document.head.appendChild(script);
+        return;
+    }
+
+    const container = document.getElementById('ontology-graph-container');
+    const statsEl = document.getElementById('ontology-stats');
+    if (!container || !state.ontologyGraph) return;
+
+    // Convert our simplified graph into vis.js format
+    const nodes = new vis.DataSet();
+    const edges = new vis.DataSet();
+
+    const gNodes = state.ontologyGraph.nodes || {};
+    const gEdges = state.ontologyGraph.edges || {};
+    
+    // Stats
+    const nodeCount = Object.keys(gNodes).length;
+    const edgeCount = Object.keys(gEdges).length;
+    if (statsEl) {
+        statsEl.innerHTML = `Nodes: <strong>${nodeCount}</strong> | Edges: <strong>${edgeCount}</strong> | Last Pruned: <em>${state.ontologyGraph.lastPruned ? new Date(state.ontologyGraph.lastPruned).toLocaleString() : 'Never'}</em>`;
+    }
+
+    for (const [id, n] of Object.entries(gNodes)) {
+        let color = "#aaaaaa";
+        let shape = "dot";
+        
+        if (n.type === "Topic") {
+            color = n.weight > 0 ? "#10b981" : "#ef4444"; // Green vs Red
+            shape = "dot";
+        } else if (n.type === "Channel") {
+            color = n.weight > 0 ? "#3b82f6" : "#f59e0b"; // Blue vs Orange
+            shape = "box";
+        }
+        
+        // Scale size by absolute weight
+        const size = Math.max(10, Math.min(40, 10 + (Math.abs(n.weight) * 2)));
+
+        nodes.add({
+            id: id,
+            label: n.label,
+            title: `Type: ${n.type}\nWeight: ${n.weight.toFixed(1)}\nHits: ${n.hits}`,
+            value: size,
+            color: { background: color, border: "#ffffff" },
+            shape: shape,
+            font: { color: "var(--text-primary)", size: 12 }
+        });
+    }
+
+    for (const [id, e] of Object.entries(gEdges)) {
+        edges.add({
+            id: id,
+            from: e.source,
+            to: e.target,
+            value: e.weight,
+            title: `Weight: ${e.weight.toFixed(1)}`,
+            color: { 
+                color: e.weight > 0 ? "rgba(16, 185, 129, 0.4)" : "rgba(239, 68, 68, 0.4)",
+                highlight: e.weight > 0 ? "rgba(16, 185, 129, 0.8)" : "rgba(239, 68, 68, 0.8)"
+            }
+        });
+    }
+
+    const data = { nodes, edges };
+    const options = {
+        physics: {
+            stabilization: false,
+            barnesHut: {
+                gravitationalConstant: -3000,
+                springConstant: 0.04,
+                springLength: 100
+            }
+        },
+        interaction: { hover: true, tooltipDelay: 200 }
+    };
+
+    // Store network instance globally to avoid memory leaks if re-rendered
+    if (window.ontologyNetwork) {
+        window.ontologyNetwork.destroy();
+    }
+    window.ontologyNetwork = new vis.Network(container, data, options);
+    
+    // Add click event for node detail
+    window.ontologyNetwork.on("click", function (params) {
+        const detailEl = document.getElementById("ontology-node-detail");
+        if (params.nodes.length > 0) {
+            const nodeId = params.nodes[0];
+            const n = gNodes[nodeId];
+            if (n && detailEl) {
+                detailEl.style.display = "block";
+                detailEl.innerHTML = `
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 0.5rem;">
+                        <h4 style="margin:0; font-size:1rem;">${escapeHTML(n.label)}</h4>
+                        <span style="font-size:0.75rem; background:var(--card-bg); padding:2px 6px; border-radius:4px; border:1px solid var(--card-border);">${n.type}</span>
+                    </div>
+                    <div style="font-size:0.85rem; color:var(--text-secondary); display:grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+                        <div>Weight: <strong style="${n.weight > 0 ? 'color:var(--success)' : 'color:var(--danger)'}">${n.weight.toFixed(2)}</strong></div>
+                        <div>Total Hits: <strong>${n.hits}</strong></div>
+                        <div>Last Updated: <strong>${new Date(n.lastUpdated).toLocaleDateString()}</strong></div>
+                        ${n.clusterId ? `<div>Cluster: <strong>${n.clusterId}</strong></div>` : ''}
+                    </div>
+                    <button class="btn btn-sm btn-danger" style="margin-top:0.75rem; width:100%;" onclick="deleteNodeFromGraph('${nodeId}')">Delete Node</button>
+                `;
+            }
+        } else {
+            if (detailEl) detailEl.style.display = "none";
+        }
+    });
+}
+
+// Global helper for the delete button
+window.deleteNodeFromGraph = function(nodeId) {
+    if (!confirm("Are you sure you want to delete this node from the knowledge graph?")) return;
+    delete state.ontologyGraph.nodes[nodeId];
+    // Clean up orphan edges
+    for (const [eId, e] of Object.entries(state.ontologyGraph.edges)) {
+        if (e.source === nodeId || e.target === nodeId) {
+            delete state.ontologyGraph.edges[eId];
+        }
+    }
+    saveOntologyGraph();
+    renderOntologyView(); // Refresh
+};
