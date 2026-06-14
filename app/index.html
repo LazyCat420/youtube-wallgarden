@@ -282,13 +282,16 @@
                 </header>
                 <!-- Shorts Dedicated Shelf -->
                 <div id="shorts-shelf" class="shorts-shelf hidden">
-                    <div class="shorts-shelf-header">
+                    <div class="shorts-shelf-header" style="cursor: pointer; user-select: none;" onclick="document.getElementById('shorts-grid').classList.toggle('collapsed'); this.querySelector('.collapse-icon').classList.toggle('rotated')">
                         <h2 class="shorts-shelf-title">
                             <svg class="icon-svg" style="width: 18px; height: 18px; display: inline-block; vertical-align: middle; margin-right: 6px; color: var(--accent);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>Shorts
                         </h2>
-                        <span class="shorts-badge">Filtered Feed</span>
+                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                            <span class="shorts-badge">Filtered Feed</span>
+                            <svg class="icon-svg collapse-icon rotated" style="width: 16px; height: 16px; transition: transform 0.2s; color: var(--text-muted);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                        </div>
                     </div>
-                    <div id="shorts-grid" class="shorts-grid">
+                    <div id="shorts-grid" class="shorts-grid collapsed">
                         <!-- Shorts cards injected dynamically -->
                     </div>
                 </div>
