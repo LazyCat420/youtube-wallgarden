@@ -99,6 +99,22 @@ function initSmartFeed() {
     const randomizedTopics = getWeightedRandomTopics(state.topics);
     
     state.smartFeedTopicsQueue = [...randomizedTopics];
+    
+    // ── Graph-based topic discovery: inject related topics ──
+    const recentLiked = (state.likedTopics || []).slice(-5);
+    if (recentLiked.length > 0 && state.ontologyGraph) {
+        const graphSuggestions = graphGetRelatedForDiscovery(state.ontologyGraph, recentLiked, 5);
+        graphSuggestions.forEach((topic, i) => {
+            if (!state.smartFeedTopicsQueue.includes(topic)) {
+                const insertPos = Math.min(i * 3, state.smartFeedTopicsQueue.length);
+                state.smartFeedTopicsQueue.splice(insertPos, 0, topic);
+            }
+        });
+        if (graphSuggestions.length > 0) {
+            console.log("[Smart Feed] Graph-discovered topics:", graphSuggestions);
+        }
+    }
+    
     console.log("[Smart Feed] Initialized with topics queue:", state.smartFeedTopicsQueue);
     
     // Start background preloading
@@ -467,15 +483,40 @@ function loadState() {
 }
 
 function migrateTopicsToGraph() {
-    if (localStorage.getItem(getProfileKey("ontology_migrated"))) return;
+    // V2 migration: wipe the broken orphan-heavy graph and rebuild with proper edge creation
+    if (localStorage.getItem(getProfileKey("ontology_v2_migrated"))) return;
+    
+    console.log("[Ontology V2] Wiping old graph and rebuilding with proper edge creation...");
+    state.ontologyGraph = { nodes: {}, edges: {}, clusters: {} };
+    
+    // Re-seed from current state
     (state.topics || []).forEach(t => {
-        if (t.weight > 0) graphUpsertNode(state.ontologyGraph, t.phrase, "Topic", t.weight);
-        else if (t.weight < 0) graphUpsertNode(state.ontologyGraph, t.phrase, "Topic", t.weight);
+        if (t.weight !== 0) graphUpsertNode(state.ontologyGraph, t.phrase, "Topic", t.weight);
     });
     (state.likedTopics || []).forEach(t => graphUpsertNode(state.ontologyGraph, t, "Topic", 4));
     (state.dislikedTopics || []).forEach(t => graphUpsertNode(state.ontologyGraph, t, "Topic", -4));
+    
+    // Rebuild edges from video ratings history
+    const ratings = state.videoRatings || {};
+    const cache = state.cache?.videos || {};
+    let rebuiltCount = 0;
+    Object.entries(ratings).forEach(([videoId, rating]) => {
+        for (const channelVideos of Object.values(cache)) {
+            const video = channelVideos.find(v => v.id === videoId);
+            if (video) {
+                graphProcessRating(state.ontologyGraph, video, rating > 0 ? 1 : -1);
+                rebuiltCount++;
+                break;
+            }
+        }
+    });
+    
+    const nodeCount = Object.keys(state.ontologyGraph.nodes).length;
+    const edgeCount = Object.keys(state.ontologyGraph.edges).length;
+    console.log(`[Ontology V2] Rebuilt graph: ${nodeCount} nodes, ${edgeCount} edges from ${rebuiltCount} ratings`);
+    
     saveOntologyGraph();
-    localStorage.setItem(getProfileKey("ontology_migrated"), "1");
+    localStorage.setItem(getProfileKey("ontology_v2_migrated"), "1");
 }
 
 function saveSettings() {
@@ -694,6 +735,12 @@ function setupEventListeners() {
             document.getElementById(e.target.dataset.tab).classList.add("active");
 
             if (e.target.dataset.tab === "tab-ontology") {
+                // Run smart prune + channel similarity before rendering
+                if (state.ontologyGraph) {
+                    graphSmartPrune(state.ontologyGraph);
+                    graphBuildChannelSimilarity(state.ontologyGraph);
+                    saveOntologyGraph();
+                }
                 renderOntologyView();
             }
         });
@@ -2213,6 +2260,26 @@ function createVideoCard(video) {
         };
         setTimeout(() => document.addEventListener("click", closeDropdown), 0);
     });
+    
+    // ── Intersection Observer: passive watch signal for graph ──
+    if (typeof IntersectionObserver !== 'undefined') {
+        const watchObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target._watchTimer = setTimeout(() => {
+                        if (state.ontologyGraph) {
+                            graphProcessWatch(state.ontologyGraph, video);
+                            saveOntologyGraph();
+                        }
+                        watchObserver.unobserve(entry.target);
+                    }, 5000);
+                } else {
+                    clearTimeout(entry.target._watchTimer);
+                }
+            });
+        }, { threshold: 0.5 });
+        watchObserver.observe(card);
+    }
     
     return card;
 }
