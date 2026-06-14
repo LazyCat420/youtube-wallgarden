@@ -96,6 +96,10 @@ function graphUpsertEdge(graph, sourceId, targetId, type, weightDelta, descripti
 // FIXED: Now extracts ALL matched topics, not just the first one.
 
 function graphProcessRating(graph, video, rating) {
+    console.log("[Ontology] graphProcessRating called:", {
+        videoId: video?.id, channelId: video?.channelId, channelName: video?.channelName,
+        matchedTopics: video?.matchedTopics, rating
+    });
     // rating: +1 = like, -1 = dislike
     const isLike = rating > 0;
     const nodeDelta = isLike ? 2 : -3;     // Dislikes punish harder
@@ -354,11 +358,14 @@ function graphSmartPrune(graph) {
     }
 
     graph.lastPruned = now;
+    console.log("[Ontology] graphSmartPrune completed:", stats,
+        `| nodes: ${Object.keys(graph.nodes).length}, edges: ${Object.keys(graph.edges).length}`);
     return stats;
 }
 
 // ── Legacy compat alias — called by Force Prune button ───────
 function graphPrune(graph) {
+    console.log("[Ontology] graphPrune (Force Prune) triggered");
     return graphSmartPrune(graph);
 }
 
