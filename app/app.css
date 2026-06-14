@@ -693,6 +693,53 @@ body {
     color: var(--text-muted);
 }
 
+/* Skeleton Loader */
+@keyframes skeletonPulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.4; }
+    100% { opacity: 1; }
+}
+
+.skeleton-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    backdrop-filter: blur(8px);
+}
+
+.skeleton-thumbnail {
+    aspect-ratio: 16/9;
+    background: rgba(255, 255, 255, 0.05);
+    animation: skeletonPulse 1.5s ease-in-out infinite;
+}
+
+.skeleton-details {
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    flex: 1;
+}
+
+.skeleton-text {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    animation: skeletonPulse 1.5s ease-in-out infinite;
+}
+
+.skeleton-text.title {
+    height: 1rem;
+    margin-bottom: 0.25rem;
+}
+
+.skeleton-text.meta {
+    height: 0.75rem;
+    margin-top: 0.5rem;
+}
+
 /* Empty State / Spinner */
 .empty-state {
     display: flex;

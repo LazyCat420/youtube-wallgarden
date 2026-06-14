@@ -1987,7 +1987,7 @@ function createVideoCard(video) {
     
     card.innerHTML = `
         <div class="thumbnail-area">
-            <img class="thumbnail-img" src="https://i.ytimg.com/vi/${video.id}/hqdefault.jpg" alt="${escapeHTML(video.title)}">
+            <img class="thumbnail-img" src="https://i.ytimg.com/vi/${video.id}/hqdefault.jpg" alt="${escapeHTML(video.title)}" decoding="async">
             <div class="thumbnail-play-overlay">
                 <div class="play-icon-circle">▶</div>
             </div>
@@ -4470,7 +4470,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         
         card.innerHTML = `
             <div class="thumbnail-area">
-                <img class="thumbnail-img" src="https://i.ytimg.com/vi/${enrichedVideo.id}/hqdefault.jpg" alt="${escapeHTML(enrichedVideo.title)}">
+                <img class="thumbnail-img" src="https://i.ytimg.com/vi/${enrichedVideo.id}/hqdefault.jpg" alt="${escapeHTML(enrichedVideo.title)}" decoding="async">
                 <div class="thumbnail-play-overlay">
                     <div class="play-icon-circle">▶</div>
                 </div>
@@ -4520,7 +4520,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         
         card.innerHTML = `
             <div class="thumbnail-area">
-                <img class="thumbnail-img" src="https://i.ytimg.com/vi/${enrichedVideo.id}/hqdefault.jpg" alt="${escapeHTML(enrichedVideo.title)}">
+                <img class="thumbnail-img" src="https://i.ytimg.com/vi/${enrichedVideo.id}/hqdefault.jpg" alt="${escapeHTML(enrichedVideo.title)}" decoding="async">
                 <div class="thumbnail-play-overlay">
                     <div class="play-icon-circle">▶</div>
                 </div>
@@ -5612,15 +5612,24 @@ async function loadNextSmartFeedBatch() {
     }
     
     // Fallback if buffer is empty
-    let loader = suggestionsGrid.querySelector(".smart-feed-loader");
-    if (!loader) {
-        loader = document.createElement("div");
-        loader.className = "smart-feed-loader infinite-scroll-loader";
-        loader.innerHTML = `<div class="loader-spinner"></div><p style="margin: 0.5rem 0 0 0;">Discovering videos via AI topics...</p>`;
-        loader.style.gridColumn = "1 / -1";
-        loader.style.textAlign = "center";
-        loader.style.padding = "2rem";
-        suggestionsGrid.appendChild(loader);
+    let skeletonsAdded = false;
+    if (suggestionsGrid.querySelectorAll(".skeleton-card").length === 0) {
+        const fragment = document.createDocumentFragment();
+        for (let i = 0; i < 12; i++) {
+            const skeleton = document.createElement("div");
+            skeleton.className = "video-card skeleton-card";
+            skeleton.innerHTML = `
+                <div class="skeleton-thumbnail"></div>
+                <div class="skeleton-details">
+                    <div class="skeleton-text title" style="width: 90%;"></div>
+                    <div class="skeleton-text title" style="width: 70%;"></div>
+                    <div class="skeleton-text meta" style="width: 40%; margin-top: 1rem;"></div>
+                </div>
+            `;
+            fragment.appendChild(skeleton);
+        }
+        suggestionsGrid.appendChild(fragment);
+        skeletonsAdded = true;
     }
     
     if (state.smartFeedTopicsQueue.length === 0) {
@@ -5635,8 +5644,7 @@ async function loadNextSmartFeedBatch() {
     
     const topic = state.smartFeedTopicsQueue.shift();
     if (!topic) {
-        const updatedLoader = suggestionsGrid.querySelector(".smart-feed-loader");
-        if (updatedLoader) updatedLoader.remove();
+        suggestionsGrid.querySelectorAll(".skeleton-card").forEach(el => el.remove());
         state.smartFeedLoading = false;
         return;
     }
@@ -5678,8 +5686,7 @@ async function loadNextSmartFeedBatch() {
     } catch (err) {
         console.error(`[Smart Feed] Fallback fetch failed for "${topic}":`, err);
     } finally {
-        const updatedLoader = suggestionsGrid.querySelector(".smart-feed-loader");
-        if (updatedLoader) updatedLoader.remove();
+        suggestionsGrid.querySelectorAll(".skeleton-card").forEach(el => el.remove());
         
         state.smartFeedLoading = false;
         updateStatusText("Ready");
