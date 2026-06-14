@@ -740,22 +740,27 @@ function setupEventListeners() {
     }
 
     // Settings Tabs toggles
-    document.querySelectorAll(".tab-btn").forEach(btn => {
+    document.querySelectorAll(".settings-tab-button").forEach(btn => {
         btn.addEventListener("click", (e) => {
-            document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-            document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
-            
+            // Instant UI update
+            document.querySelectorAll(".settings-tab-button").forEach(b => b.classList.remove("active"));
+            document.querySelectorAll(".settings-tab-content").forEach(c => c.classList.remove("active"));
             e.target.classList.add("active");
-            document.getElementById(e.target.dataset.tab).classList.add("active");
+            document.getElementById(e.target.dataset.tabIdentifier).classList.add("active");
 
-            if (e.target.dataset.tab === "tab-ontology") {
-                // Run smart prune + channel similarity before rendering
-                if (state.ontologyGraph) {
-                    graphSmartPrune(state.ontologyGraph);
-                    graphBuildChannelSimilarity(state.ontologyGraph);
-                    saveOntologyGraph();
-                }
-                renderOntologyView();
+            if (e.target.dataset.tabIdentifier === "tab-ontology") {
+                // Defer heavy graph processing to unblock the main thread and fix poor INP
+                requestAnimationFrame(() => {
+                    setTimeout(() => {
+                        // Run smart prune + channel similarity before rendering
+                        if (state.ontologyGraph) {
+                            graphSmartPrune(state.ontologyGraph);
+                            graphBuildChannelSimilarity(state.ontologyGraph);
+                            saveOntologyGraph();
+                        }
+                        renderOntologyView();
+                    }, 0);
+                });
             }
         });
     });

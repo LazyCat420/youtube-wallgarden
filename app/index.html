@@ -188,8 +188,8 @@
     </style>
 
     <!-- Non-blocking full CSS via preload pattern -->
-    <link rel="preload" href="app.min.css?v=20260614-v50" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="app.min.css?v=20260614-v50"></noscript>
+    <link rel="preload" href="app.min.css?v=20260614-v51" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="app.min.css?v=20260614-v51"></noscript>
 </head>
 <body>
     <div class="app-layout">
@@ -420,15 +420,15 @@
             <div class="settings-body">
                 <!-- Settings Tabs -->
                 <div class="settings-tabs">
-                    <button class="tab-btn active" data-tab="tab-channels">Channels</button>
-                    <button class="tab-btn" data-tab="tab-topics">Topics & Filters</button>
-                    <button class="tab-btn" data-tab="tab-profiles">Profiles</button>
-                    <button class="tab-btn" data-tab="tab-export">Backup & Restore</button>
-                    <button class="tab-btn" data-tab="tab-ontology">🕸️ Knowledge Graph</button>
+                    <button class="settings-tab-button active" data-tab-identifier="tab-channels">Channels</button>
+                    <button class="settings-tab-button" data-tab-identifier="tab-topics">Topics & Filters</button>
+                    <button class="settings-tab-button" data-tab-identifier="tab-profiles">Profiles</button>
+                    <button class="settings-tab-button" data-tab-identifier="tab-export">Backup & Restore</button>
+                    <button class="settings-tab-button" data-tab-identifier="tab-ontology">🕸️ Knowledge Graph</button>
                 </div>
 
                 <!-- Channels Tab Content -->
-                <div id="tab-channels" class="tab-content active">
+                <div id="tab-channels" class="settings-tab-content active">
                     <div class="input-group">
                         <label for="input-channel-handle">Add Channel by Name, Handle, or ID</label>
                         <div class="input-inline">
@@ -520,7 +520,7 @@
                 </div>
 
                 <!-- Topics Tab Content -->
-                <div id="tab-topics" class="tab-content">
+                <div id="tab-topics" class="settings-tab-content">
                     <div class="topic-search-bar">
                         <span class="topic-search-icon">🔍</span>
                         <input type="text" id="input-topic-search" placeholder="Search topics...">
@@ -635,7 +635,7 @@
                 </div>
 
                 <!-- Profiles Tab Content -->
-                <div id="tab-profiles" class="tab-content">
+                <div id="tab-profiles" class="settings-tab-content">
                     <h3>Manage Profiles</h3>
                     <p class="tab-desc">Switch between profiles or create a new one. Each profile has its own topics, subscriptions, search history, and curation data.</p>
                     
@@ -675,7 +675,7 @@
                 </div>
 
                 <!-- Backup & Restore Tab Content -->
-                <div id="tab-export" class="tab-content">
+                <div id="tab-export" class="settings-tab-content">
                     <p class="tab-desc">Export your configurations (channels, topic weights, settings) as a backup file, or restore them onto another device.</p>
                     
                     <div class="backup-actions">
@@ -689,7 +689,7 @@
                 </div>
 
                 <!-- Knowledge Graph Tab Content -->
-                <div id="tab-ontology" class="tab-content">
+                <div id="tab-ontology" class="settings-tab-content">
                     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
                         <h3 style="margin:0;">Learned Ontology</h3>
                         <div style="display:flex; gap:0.5rem;">
@@ -730,8 +730,8 @@
         </div>
     </div>
 
-    <script src="ontology.js?v=20260614-v50" defer></script>
-    <script src="ontologyRenderer.js?v=20260614-v50" defer></script>
-    <script src="app.min.js?v=20260614-v50" defer></script>
+    <script src="ontology.js?v=20260614-v51" defer></script>
+    <script src="ontologyRenderer.js?v=20260614-v51" defer></script>
+    <script src="app.min.js?v=20260614-v51" defer></script>
 </body>
 </html>
