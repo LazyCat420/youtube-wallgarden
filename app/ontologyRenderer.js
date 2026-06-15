@@ -244,6 +244,7 @@ class OntologyGraphCanvas {
         
         this.ctx = this.canvas.getContext('2d');
         this.animationFrameId = null;
+        this.renderRequested = false;
         
         this.nodes = [];
         this.edges = [];
@@ -298,6 +299,7 @@ class OntologyGraphCanvas {
             this.transform.offsetX = this.canvas.width / 2;
             this.transform.offsetY = this.canvas.height / 2;
         }
+        this.requestRender();
     }
     
     setData(nodesData, edgesData) {
@@ -341,9 +343,7 @@ class OntologyGraphCanvas {
             offsetY: canvasHeight / 2 - centerY * scale,
         };
         
-        if (!this.animationFrameId) {
-            this.render();
-        }
+        this.requestRender();
     }
     
     updateData(nodesData, edgesData) {
@@ -416,6 +416,8 @@ class OntologyGraphCanvas {
         } else {
             this.alpha = Math.max(this.alpha, 0.1);
         }
+        
+        this.requestRender();
     }
     
     screenToWorld(screenX, screenY) {
@@ -458,6 +460,7 @@ class OntologyGraphCanvas {
             this.selectedNodeId = null;
             if (this.onNodeSelected) this.onNodeSelected(null);
         }
+        this.requestRender();
     }
     
     handleMouseMove(e) {
@@ -475,19 +478,25 @@ class OntologyGraphCanvas {
                 node.vy = 0;
             }
             this.alpha = Math.max(this.alpha, 0.08);
+            this.requestRender();
             return;
         }
         
         if (this.dragState.isPan && this.dragState.origOx !== undefined) {
             this.transform.offsetX = this.dragState.origOx + (screenX - this.dragState.panStartX);
             this.transform.offsetY = this.dragState.origOy + (screenY - this.dragState.panStartY);
+            this.requestRender();
             return;
         }
         
         const node = this.findNodeAt(worldX, worldY);
+        const prevHoveredId = this.hoveredNodeId;
         this.hoveredNodeId = node ? node.id : null;
         if (!this.dragState.dragging && !this.dragState.isPan) {
             this.canvas.style.cursor = node ? 'pointer' : 'default';
+        }
+        if (this.hoveredNodeId !== prevHoveredId) {
+            this.requestRender();
         }
     }
     
@@ -498,6 +507,7 @@ class OntologyGraphCanvas {
         }
         this.dragState = { dragging: false, nodeId: null, isPan: false, panStartX: 0, panStartY: 0 };
         this.canvas.style.cursor = 'default';
+        this.requestRender();
     }
     
     handleWheel(e) {
@@ -510,12 +520,27 @@ class OntologyGraphCanvas {
         this.transform.offsetX = mouseX - ((mouseX - this.transform.offsetX) / this.transform.scale) * newScale;
         this.transform.offsetY = mouseY - ((mouseY - this.transform.offsetY) / this.transform.scale) * newScale;
         this.transform.scale = newScale;
+        this.requestRender();
+    }
+
+    requestRender() {
+        const isVisible = !!(this.container.offsetWidth || this.container.offsetHeight || this.container.getClientRects().length);
+        if (!isVisible) return;
+        
+        if (!this.renderRequested) {
+            this.renderRequested = true;
+            this.animationFrameId = requestAnimationFrame(this.render);
+        }
     }
     
     render() {
+        this.renderRequested = false;
+        
+        let needsPhysics = false;
         if (this.alpha > 0.005 && this.nodes.length > 0) {
             physicsTick(this.nodes, this.edges, this.nodeMapById, this.alpha);
             this.alpha *= 0.993;
+            needsPhysics = this.alpha > 0.005;
         }
         
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
@@ -701,6 +726,19 @@ class OntologyGraphCanvas {
         });
         
         this.ctx.restore();
-        this.animationFrameId = requestAnimationFrame(this.render);
+        
+        // Schedule next frame only if needed
+        const hasAnimatingNodes = this.nodes.some(node => node._addedAt && (now - node._addedAt < 600));
+        const hasAnimatingEdges = this.edges.some(edge => edge._addedAt && (now - edge._addedAt < 400));
+        const hasPulseNodes = this.nodes.some(node => (node.activation || 0) > 0.5);
+        const isInteracting = this.dragState.dragging || this.dragState.isPan;
+        
+        const needNextFrame = needsPhysics || hasAnimatingNodes || hasAnimatingEdges || hasPulseNodes || isInteracting;
+        
+        if (needNextFrame) {
+            this.requestRender();
+        } else {
+            this.animationFrameId = null;
+        }
     }
 }

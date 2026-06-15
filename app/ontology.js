@@ -221,17 +221,59 @@ function graphProcessWatch(graph, video) {
 function graphBuildChannelSimilarity(graph) {
     const channelNodes = Object.values(graph.nodes).filter(n => n.type === "Channel");
 
-    for (let i = 0; i < channelNodes.length; i++) {
-        for (let j = i + 1; j < channelNodes.length; j++) {
-            const topicsI = _getConnectedTopics(graph, channelNodes[i].id);
-            const topicsJ = _getConnectedTopics(graph, channelNodes[j].id);
-            const shared = topicsI.filter(t => topicsJ.includes(t));
+    // Pre-calculate connected topics for all channels in O(E) time
+    const channelToTopicsMap = {};
+    channelNodes.forEach(c => { channelToTopicsMap[c.id] = []; });
 
-            if (shared.length >= MIN_SHARED_TOPICS_FOR_SIMILARITY) {
+    Object.values(graph.edges).forEach(edge => {
+        const sourceNode = graph.nodes[edge.source];
+        const targetNode = graph.nodes[edge.target];
+        if (!sourceNode || !targetNode) return;
+
+        if (sourceNode.type === "Channel" && targetNode.type === "Topic") {
+            if (channelToTopicsMap[edge.source]) {
+                channelToTopicsMap[edge.source].push(edge.target);
+            }
+        } else if (targetNode.type === "Channel" && sourceNode.type === "Topic") {
+            if (channelToTopicsMap[edge.target]) {
+                channelToTopicsMap[edge.target].push(edge.source);
+            }
+        }
+    });
+
+    // Convert arrays to Sets for O(1) lookups
+    const channelToTopicsSets = {};
+    for (const cid in channelToTopicsMap) {
+        channelToTopicsSets[cid] = new Set(channelToTopicsMap[cid]);
+    }
+
+    // Compare channel pairs
+    for (let i = 0; i < channelNodes.length; i++) {
+        const idI = channelNodes[i].id;
+        const setI = channelToTopicsSets[idI];
+        if (!setI || setI.size < MIN_SHARED_TOPICS_FOR_SIMILARITY) continue;
+
+        for (let j = i + 1; j < channelNodes.length; j++) {
+            const idJ = channelNodes[j].id;
+            const setJ = channelToTopicsSets[idJ];
+            if (!setJ || setJ.size < MIN_SHARED_TOPICS_FOR_SIMILARITY) continue;
+
+            // Count shared topics by iterating over the smaller set
+            let sharedCount = 0;
+            const smallerSet = setI.size < setJ.size ? setI : setJ;
+            const largerSet = smallerSet === setI ? setJ : setI;
+
+            for (const t of smallerSet) {
+                if (largerSet.has(t)) {
+                    sharedCount++;
+                }
+            }
+
+            if (sharedCount >= MIN_SHARED_TOPICS_FOR_SIMILARITY) {
                 graphUpsertEdge(
-                    graph, channelNodes[i].id, channelNodes[j].id,
-                    "SIMILAR_TO", shared.length * 0.5,
-                    (w) => `${shared.length} shared topics (strength: ${w.toFixed(1)})`
+                    graph, idI, idJ,
+                    "SIMILAR_TO", sharedCount * 0.5,
+                    (w) => `${sharedCount} shared topics (strength: ${w.toFixed(1)})`
                 );
             }
         }
@@ -324,15 +366,18 @@ function graphSmartPrune(graph) {
     // They are waiting to be discovered. Only prune nodes that are both:
     //   (a) disconnected (0 edges), AND
     //   (b) have negative weight (user actively disliked them)
+    const activeNodeIds = new Set();
+    Object.values(graph.edges).forEach(e => {
+        activeNodeIds.add(e.source);
+        activeNodeIds.add(e.target);
+    });
+
     Object.keys(graph.nodes).forEach(nodeId => {
         const node = graph.nodes[nodeId];
         if (PERMANENT_NODE_TYPES.has(node.type)) return;
         if (node.weight >= 0) return; // Positive/zero weight = keep even without edges
 
-        const hasEdges = Object.values(graph.edges).some(
-            e => e.source === nodeId || e.target === nodeId
-        );
-        if (!hasEdges) {
+        if (!activeNodeIds.has(nodeId)) {
             delete graph.nodes[nodeId];
             stats.killedOrphans++;
         }

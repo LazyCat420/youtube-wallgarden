@@ -5021,26 +5021,27 @@ Suggest 50 to 100 new topics.`;
     updateStatusText("Ready");
 }
 
-async function generateSimilarTopicsFromSearch(searchQuery) {
+async function generateSimilarTopicsFromSearch(searchQuery, isHighSignal = false) {
     if (!searchQuery) return;
-    console.log(`[Smart Feed] Background similar topics generation started for query: "${searchQuery}"`);
+    console.log(`[Smart Feed] Background similar topics generation started for query: "${searchQuery}" (highSignal: ${isHighSignal})`);
     
-    // On a fresh profile, the search query itself becomes the first positive topic
+    // Auto-add search query with appropriate weight based on signal strength
     const searchNormalized = searchQuery.trim().toLowerCase();
+    const targetWeight = isHighSignal ? 5 : 2;
     const existsAsPositive = state.topics.some(t => t.phrase.toLowerCase() === searchNormalized && t.weight > 0);
     if (!existsAsPositive) {
         const existingIdx = state.topics.findIndex(t => t.phrase.toLowerCase() === searchNormalized);
         if (existingIdx !== -1) {
-            state.topics[existingIdx].weight = Math.max(state.topics[existingIdx].weight, 5);
+            state.topics[existingIdx].weight = Math.max(state.topics[existingIdx].weight, targetWeight);
         } else {
-            state.topics.push({ phrase: searchNormalized, weight: 5 });
+            state.topics.push({ phrase: searchNormalized, weight: targetWeight });
         }
         // Add search query to the smart feed queue as well
         if (!state.smartFeedTopicsQueue.includes(searchNormalized)) {
             state.smartFeedTopicsQueue.push(searchNormalized);
         }
         saveTopics();
-        console.log(`[Smart Feed] Auto-added search query "${searchNormalized}" as a positive topic for this profile.`);
+        console.log(`[Smart Feed] Auto-added query "${searchNormalized}" with weight ${targetWeight} as positive topic.`);
     }
     
     // Truncated context: top 15 liked, last 20 used
@@ -5055,7 +5056,7 @@ Disliked: [${disliked}]
 Recently used (avoid these): [${recentUsed}]
 Failed queries (don't reuse these exact phrases): [${burnedList}]
 
-Suggest 50 to 100 topics related to "${searchQuery}".`;
+Suggest ${isHighSignal ? "50 to 100" : "5 to 10"} topics related to "${searchQuery}".`;
 
     const MAX_RETRIES = 2;
     let attempt = 0;
@@ -5121,7 +5122,7 @@ Suggest 50 to 100 topics related to "${searchQuery}".`;
                 
                 const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
                 if (!existsInTopics) {
-                    state.topics.push({ phrase, weight: 5 });
+                    state.topics.push({ phrase, weight: targetWeight });
                 }
                 
                 const inQueue = state.smartFeedTopicsQueue.includes(phrase);
