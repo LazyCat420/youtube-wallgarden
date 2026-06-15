@@ -130,27 +130,29 @@ function physicsTick(nodes, edges, nodeMapById, alpha) {
         }
     }
 
-    for (let i = 0; i < nodeCount; i++) {
-        for (let j = i + 1; j < nodeCount; j++) {
-            const nodeA = nodes[i];
-            const nodeB = nodes[j];
-            const deltaX = nodeB.x - nodeA.x;
-            const deltaY = nodeB.y - nodeA.y;
-            const distanceSquared = deltaX * deltaX + deltaY * deltaY;
-            const minDist = nodeA.radius + nodeB.radius + 15;
-            if (distanceSquared < minDist * minDist) {
-                const distance = Math.sqrt(distanceSquared) || 1;
-                const overlap = minDist - distance;
-                const pushX = (deltaX / distance) * overlap * 0.4 * alpha;
-                const pushY = (deltaY / distance) * overlap * 0.4 * alpha;
+    if (nodeCount <= 500) {
+        for (let i = 0; i < nodeCount; i++) {
+            for (let j = i + 1; j < nodeCount; j++) {
+                const nodeA = nodes[i];
+                const nodeB = nodes[j];
+                const deltaX = nodeB.x - nodeA.x;
+                const deltaY = nodeB.y - nodeA.y;
+                const distanceSquared = deltaX * deltaX + deltaY * deltaY;
+                const minDist = nodeA.radius + nodeB.radius + 15;
+                if (distanceSquared < minDist * minDist) {
+                    const distance = Math.sqrt(distanceSquared) || 1;
+                    const overlap = minDist - distance;
+                    const pushX = (deltaX / distance) * overlap * 0.4 * alpha;
+                    const pushY = (deltaY / distance) * overlap * 0.4 * alpha;
 
-                if (!nodeA._dragging) {
-                    nodeA.vx -= pushX;
-                    nodeA.vy -= pushY;
-                }
-                if (!nodeB._dragging) {
-                    nodeB.vx += pushX;
-                    nodeB.vy += pushY;
+                    if (!nodeA._dragging) {
+                        nodeA.vx -= pushX;
+                        nodeA.vy -= pushY;
+                    }
+                    if (!nodeB._dragging) {
+                        nodeB.vx += pushX;
+                        nodeB.vy += pushY;
+                    }
                 }
             }
         }
@@ -313,8 +315,9 @@ class OntologyGraphCanvas {
         this.nodes.forEach(n => this.nodeMapById[n.id] = n);
         
         // Settle quickly
-        for (let i = 0; i < 240; i++) {
-            const preAlpha = 1.0 - (i / 240) * 0.8;
+        const settleTicks = nodesData.length > 500 ? 50 : 240;
+        for (let i = 0; i < settleTicks; i++) {
+            const preAlpha = 1.0 - (i / settleTicks) * 0.8;
             physicsTick(this.nodes, this.edges, this.nodeMapById, preAlpha);
         }
         
