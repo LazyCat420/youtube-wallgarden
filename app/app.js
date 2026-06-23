@@ -56,6 +56,7 @@ let state = {
     videoRatings: {}, // explicit ratings set by user
     likedVideos: [], // array of video objects liked by the user
     settings: {
+        useGoogleApiSearch: false,
         useYtdlp: true,
         muteShorts: false,
         altPlayerInstance: "https://yewtu.be",
@@ -83,6 +84,10 @@ const DISCOVER_BATCH_SIZE = 30;
 const DISCOVER_MAX_RESULTS = 150;
 
 // In-memory session cache for topic search discovery results
+let sessionDiscoverOffset = 0; // fallback counter for yt-dlp discover
+
+// Pagination state for Google API search
+let topicSearchPageTokens = {};
 let sessionTopicSearchCache = {};
 let topicSearchLoading = {};
 let renderTimeouts = [];
@@ -484,6 +489,8 @@ function loadState() {
     document.getElementById("blocked-count").textContent = state.blockedChannels.length;
 
     // Set settings toggles UI
+    const googleApiToggle = document.getElementById("toggle-use-google-api-search");
+    if (googleApiToggle) googleApiToggle.checked = state.settings.useGoogleApiSearch;
     document.getElementById("toggle-use-ytdlp").checked = state.settings.useYtdlp;
     document.getElementById("toggle-mute-shorts").checked = state.settings.muteShorts;
     const altPlayerInput = document.getElementById("input-alt-player-instance");
@@ -958,6 +965,13 @@ function setupEventListeners() {
     // Close Inline Player — bound dynamically when player is created by playVideo()
 
     // Global settings toggles
+    const googleApiToggle = document.getElementById("toggle-use-google-api-search");
+    if (googleApiToggle) {
+        googleApiToggle.addEventListener("change", (e) => {
+            state.settings.useGoogleApiSearch = e.target.checked;
+            saveSettings();
+        });
+    }
     document.getElementById("toggle-use-ytdlp").addEventListener("change", (e) => {
         state.settings.useYtdlp = e.target.checked;
         saveSettings();
@@ -4210,7 +4224,100 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
     let videos = [];
     let success = false;
     
-    if (state.settings.useYtdlp) {
+    // --- Google API Search Override ---
+    if (state.settings.useGoogleApiSearch && GOOGLE_API_KEY) {
+        try {
+            updateStatusText(`Searching via Google API for "${topicPhrase}"...`);
+            let pageTokenParam = "";
+            if (offset > 0 && topicSearchPageTokens[cacheKey]) {
+                pageTokenParam = `&pageToken=${topicSearchPageTokens[cacheKey]}`;
+            }
+            
+            const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(topicPhrase)}&type=video&maxResults=${DISCOVER_BATCH_SIZE}&key=${GOOGLE_API_KEY}${pageTokenParam}`;
+            console.log(`[Google API] Fetching search for "${topicPhrase}"`);
+            
+            const searchResp = await fetch(searchUrl);
+            if (searchResp.status === 403) {
+                console.warn("[Google API] Quota Exceeded or Forbidden. Falling back to yt-dlp.");
+                state.settings.useGoogleApiSearch = false;
+                const toggle = document.getElementById("toggle-use-google-api-search");
+                if (toggle) toggle.checked = false;
+                saveSettings();
+                throw new Error("Quota Exceeded");
+            }
+            if (!searchResp.ok) throw new Error(`Google API returned ${searchResp.status}`);
+            
+            const searchData = await searchResp.json();
+            topicSearchPageTokens[cacheKey] = searchData.nextPageToken || null;
+            
+            const items = searchData.items || [];
+            if (items.length > 0) {
+                const videoIds = items.map(i => i.id.videoId).join(",");
+                // Fetch stats and durations
+                const statsUrl = `https://www.googleapis.com/youtube/v3/videos?part=statistics,contentDetails&id=${videoIds}&key=${GOOGLE_API_KEY}`;
+                const statsResp = await fetch(statsUrl);
+                let statsData = { items: [] };
+                if (statsResp.ok) statsData = await statsResp.json();
+                
+                const statsMap = {};
+                for (const item of statsData.items || []) {
+                    statsMap[item.id] = item;
+                }
+                
+                if (!sessionTopicSearchCache[cacheKey]) {
+                    sessionTopicSearchCache[cacheKey] = [];
+                }
+                const existingIds = new Set(sessionTopicSearchCache[cacheKey].map(v => v.id));
+                
+                for (const item of items) {
+                    const id = item.id.videoId;
+                    if (existingIds.has(id)) continue;
+                    
+                    const statItem = statsMap[id];
+                    let durationSecs = 0;
+                    if (statItem && statItem.contentDetails && statItem.contentDetails.duration) {
+                        // Parse ISO 8601 duration (PT1H2M10S)
+                        const match = statItem.contentDetails.duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+                        if (match) {
+                            const h = parseInt(match[1] || '0');
+                            const m = parseInt(match[2] || '0');
+                            const s = parseInt(match[3] || '0');
+                            durationSecs = h * 3600 + m * 60 + s;
+                        }
+                    }
+                    
+                    const video = {
+                        id: id,
+                        title: item.snippet.title,
+                        channelName: item.snippet.channelTitle,
+                        channelId: item.snippet.channelId,
+                        published: item.snippet.publishedAt ? Date.parse(item.snippet.publishedAt) : null,
+                        duration: durationSecs,
+                        viewCount: statItem && statItem.statistics ? statItem.statistics.viewCount : null,
+                        isDiscover: true
+                    };
+                    
+                    existingIds.add(video.id);
+                    sessionTopicSearchCache[cacheKey].push(video);
+                    
+                    const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
+                    const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
+                    if (currentActiveTopic === cacheKey || currentActiveSearch === cacheKey) {
+                        appendStreamedDiscoverVideo(video, topicPhrase);
+                    }
+                }
+                
+                success = true;
+            } else {
+                success = true; // empty results
+            }
+        } catch (err) {
+            console.error("[Google API Search Error]", err);
+        }
+    }
+    // --- End Google API Search Override ---
+    
+    if (!success && state.settings.useYtdlp) {
         try {
             console.log(`[Search Debug] Fetching /scraper/collect stream for "${topicPhrase}" via POST (limit: ${fetchCount})...`);
             updateStatusText(`Searching via yt-dlp for "${topicPhrase}"...`);

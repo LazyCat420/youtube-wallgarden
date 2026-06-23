@@ -555,6 +555,16 @@
                                 <span class="slider"></span>
                             </label>
                         </div>
+                        <div class="filter-option" style="margin-bottom: 1rem; display: flex; align-items: center; justify-content: space-between; gap: 2rem;">
+                            <div>
+                                <label style="font-weight: 500; display: block; margin-bottom: 0.25rem; color: var(--accent);">Use Official Google API for Search</label>
+                                <span style="font-size: 0.85rem; color: var(--text-muted); display: block; line-height: 1.4;">Bypasses yt-dlp to load search results instantly. Uses 100 quota units per search. Will automatically fall back to yt-dlp if quota is exceeded.</span>
+                            </div>
+                            <label class="switch-toggle">
+                                <input type="checkbox" id="toggle-use-google-api-search">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
                         <div class="filter-option" style="display: flex; align-items: center; justify-content: space-between; gap: 2rem;">
                             <div>
                                 <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">Mute Shorts Entirely</label>
