@@ -16,6 +16,24 @@ const DEFAULT_TOPICS = [
     { phrase: "brainrot", weight: -10 }
 ];
 
+// Google API Key from vault
+let GOOGLE_API_KEY = "";
+
+async function fetchGoogleApiKey() {
+    try {
+        const resp = await fetch("/vault/secrets?keys=GOOGLE_API_KEY");
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data.GOOGLE_API_KEY) {
+                GOOGLE_API_KEY = data.GOOGLE_API_KEY;
+                console.log("[Google API] Key fetched successfully.");
+            }
+        }
+    } catch (err) {
+        console.error("[Google API] Failed to fetch API key:", err);
+    }
+}
+
 // State Manager
 let state = {
     channels: [],
@@ -131,6 +149,7 @@ document.addEventListener("DOMContentLoaded", () => {
     renderSearchSuggestions();
     
     fetchWeather();
+    fetchGoogleApiKey();
     
     // Render cached feed immediately so the UI is active and loads discovery videos
     renderFeed();
@@ -3080,6 +3099,7 @@ function playVideo(video) {
             '      <div class="inline-player-meta">',
             '        <h2 class="player-title"></h2>',
             '        <p class="player-channel"></p>',
+            '        <p class="player-stats" style="font-size: 0.85rem; color: #aaa; margin-top: 4px;"></p>',
             '      </div>',
             '      <div class="player-bar-actions" style="display: flex; gap: 0.75rem; align-items: center;">',
             '        <button class="btn btn-primary btn-sm btn-open-youtube" title="Open Video on YouTube (New Tab)">📺 Watch on YouTube</button>',
@@ -3168,9 +3188,30 @@ function playVideo(video) {
     const playerWrapper = inlinePlayer.querySelector(".player-wrapper-box");
     const titleEl = inlinePlayer.querySelector(".player-title");
     const channelEl = inlinePlayer.querySelector(".player-channel");
+    const statsEl = inlinePlayer.querySelector(".player-stats");
 
     if (titleEl) titleEl.textContent = video.title;
     if (channelEl) channelEl.textContent = video.channelName;
+    if (statsEl) statsEl.textContent = "";
+
+    // Fetch YouTube API Statistics if key is available
+    if (GOOGLE_API_KEY && video.id) {
+        fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${video.id}&key=${GOOGLE_API_KEY}`)
+            .then(res => res.json())
+            .then(data => {
+                if (data.items && data.items.length > 0) {
+                    const stats = data.items[0].statistics;
+                    const snippet = data.items[0].snippet;
+                    if (statsEl) {
+                        const views = stats.viewCount ? Number(stats.viewCount).toLocaleString() : 'N/A';
+                        const likes = stats.likeCount ? Number(stats.likeCount).toLocaleString() : 'N/A';
+                        const publishedAt = snippet.publishedAt ? new Date(snippet.publishedAt).toLocaleDateString() : 'N/A';
+                        statsEl.textContent = `${views} views • ${likes} likes • Published ${publishedAt}`;
+                    }
+                }
+            })
+            .catch(err => console.error("[Google API] Failed to fetch stats:", err));
+    }
 
     const isSameVideo = state.currentlyPlayingId === video.id;
     state.currentlyPlayingId = video.id;
