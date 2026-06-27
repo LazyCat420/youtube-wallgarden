@@ -1699,7 +1699,8 @@ async function syncFeeds() {
                             channels: [channel.id],
                             limit: 10,
                             days_back: 0,
-                            require_transcript: false
+                            require_transcript: false,
+                            sort: "date"
                         }),
                         signal: controller.signal
                     });
@@ -5426,7 +5427,8 @@ async function fetchVideosForTopic(topic) {
                             query: query,
                             limit: fetchCountPerRequest,
                             days_back: 0,
-                            require_transcript: false
+                            require_transcript: false,
+                            sort: "date"
                         }),
                         signal: controller.signal
                     });
