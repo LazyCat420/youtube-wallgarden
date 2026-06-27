@@ -60,7 +60,9 @@ let state = {
         useYtdlp: true,
         muteShorts: false,
         altPlayerInstance: "https://yewtu.be",
-        weatherCity: ""
+        weatherCity: "",
+        llmEndpoint: "/prism/",
+        llmModel: ""
     },
     discoverBatchIndex: 0,
     discoverMaxReached: false,
@@ -149,7 +151,7 @@ document.addEventListener("DOMContentLoaded", () => {
     loadState();
     setupEventListeners();
     initSmartFeed();
-    fetchLlmModel();
+    fetchPrismModels();
     updateSubCount();
     renderSearchSuggestions();
     
@@ -421,6 +423,12 @@ function loadState() {
     }
     if (!state.settings.discoverySortOrder) {
         state.settings.discoverySortOrder = "relevance";
+    }
+    if (!state.settings.llmEndpoint) {
+        state.settings.llmEndpoint = "/prism/";
+    }
+    if (!state.settings.llmModel) {
+        state.settings.llmModel = "";
     }
     state.searchHistory = rawSearchHistory ? JSON.parse(rawSearchHistory) : [];
     state.brainstormTopics = rawBrainstorm ? JSON.parse(rawBrainstorm) : [];
@@ -4955,18 +4963,72 @@ CRITICAL INSTRUCTIONS:
 3. ABSOLUTELY DO NOT generate narrow subcategories, specific character names, episode titles, or cast members. (e.g., If the user searches "The Simpsons", DO NOT suggest "Homer Simpson". DO suggest "90s Sitcoms", "Adult Animation").
 4. YOU MUST RETURN VALID JSON matching the suggest_topics schema. Do not return markdown. Do not return plain text.`;
 
-async function fetchLlmModel() {
+async function fetchPrismModels(forceRefresh = false) {
+    const endpoint = state.settings.llmEndpoint || "/prism/";
+    const select = document.getElementById("select-llm-model");
+    if (select) select.innerHTML = '<option value="">Loading models...</option>';
+
     try {
-        const resp = await fetch("/vllm/v1/models");
+        const isPrism = endpoint.includes("prism");
+        const configUrl = isPrism 
+            ? `${endpoint.replace(/\/$/, '')}/config`
+            : `${endpoint.replace(/\/$/, '')}/v1/models`;
+
+        const resp = await fetch(configUrl);
         if (resp.ok) {
             const data = await resp.json();
-            if (data && data.data && data.data.length > 0) {
-                activeLlmModel = data.data[0].id;
-                console.log("vLLM active model detected:", activeLlmModel);
+            if (select) select.innerHTML = '';
+            let firstModel = "";
+            let foundSelected = false;
+
+            if (isPrism) {
+                const textToTextModels = data.models || data.capabilities?.textToText?.models || {};
+                for (const provider in textToTextModels) {
+                    const optgroup = document.createElement("optgroup");
+                    optgroup.label = provider;
+                    textToTextModels[provider].forEach(m => {
+                        const option = document.createElement("option");
+                        const modelId = m.id || m.key || m.name;
+                        option.value = modelId;
+                        option.textContent = m.name || modelId;
+                        optgroup.appendChild(option);
+                        if (!firstModel) firstModel = modelId;
+                        if (state.settings.llmModel === modelId) {
+                            option.selected = true;
+                            foundSelected = true;
+                        }
+                    });
+                    if (select && optgroup.children.length > 0) {
+                        select.appendChild(optgroup);
+                    }
+                }
+            } else {
+                if (data && data.data && data.data.length > 0) {
+                    data.data.forEach(m => {
+                        const option = document.createElement("option");
+                        option.value = m.id;
+                        option.textContent = m.id;
+                        if (select) select.appendChild(option);
+                        if (!firstModel) firstModel = m.id;
+                        if (state.settings.llmModel === m.id) {
+                            option.selected = true;
+                            foundSelected = true;
+                        }
+                    });
+                }
+            }
+
+            if (!foundSelected && firstModel) {
+                state.settings.llmModel = firstModel;
+                saveSettings();
+                if (select) select.value = firstModel;
             }
         }
     } catch (err) {
-        console.warn("Failed to fetch active vLLM model, using default:", err);
+        console.warn("Failed to fetch models from endpoint:", err);
+        if (select) {
+            select.innerHTML = `<option value="${state.settings.llmModel || ''}">${state.settings.llmModel || 'Error loading models'}</option>`;
+        }
     }
 }
 
@@ -5074,11 +5136,17 @@ Suggest 50 to 100 new topics.`;
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 120000);
                 
-                const req = fetch("/vllm/v1/chat/completions", {
+                const endpoint = state.settings.llmEndpoint || "/prism/";
+                const isPrism = endpoint.includes("prism");
+                const chatUrl = isPrism 
+                    ? `${endpoint.replace(/\/$/, '')}/chat`
+                    : `${endpoint.replace(/\/$/, '')}/v1/chat/completions`;
+                
+                const req = fetch(chatUrl, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
-                        model: activeLlmModel,
+                        model: state.settings.llmModel || "default-model",
                         messages: [
                             { role: "system", content: BRAINSTORM_SYSTEM_PROMPT },
                             { role: "user", content: userMessage }
@@ -5094,7 +5162,7 @@ Suggest 50 to 100 new topics.`;
                     clearTimeout(timeoutId);
                     if (!res.ok) {
                         const body = await res.text().catch(() => "");
-                        throw new Error(`vLLM returned ${res.status}: ${body.substring(0, 200)}`);
+                        throw new Error(`LLM returned ${res.status}: ${body.substring(0, 200)}`);
                     }
                     return res.json();
                 });
@@ -5213,8 +5281,8 @@ Suggest ${isHighSignal ? "50 to 100" : "5 to 10"} topics related to "${searchQue
 
     while (attempt <= MAX_RETRIES && !success) {
         try {
-            if (activeLlmModel === "default-model") {
-                await fetchLlmModel();
+            if (!state.settings.llmModel) {
+                await fetchPrismModels();
             }
             
             if (attempt > 0) {
@@ -5223,13 +5291,20 @@ Suggest ${isHighSignal ? "50 to 100" : "5 to 10"} topics related to "${searchQue
             
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 60000);
-            const response = await fetch("/vllm/v1/chat/completions", {
+            
+            const endpoint = state.settings.llmEndpoint || "/prism/";
+            const isPrism = endpoint.includes("prism");
+            const chatUrl = isPrism 
+                ? `${endpoint.replace(/\/$/, '')}/chat`
+                : `${endpoint.replace(/\/$/, '')}/v1/chat/completions`;
+            
+            const response = await fetch(chatUrl, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json"
                 },
                 body: JSON.stringify({
-                    model: activeLlmModel,
+                    model: state.settings.llmModel || "default-model",
                     messages: [
                         { role: "system", content: SIMILAR_SYSTEM_PROMPT },
                         { role: "user", content: userMessage }
@@ -5246,14 +5321,14 @@ Suggest ${isHighSignal ? "50 to 100" : "5 to 10"} topics related to "${searchQue
             
             if (!response.ok) {
                 const body = await response.text().catch(() => "");
-                throw new Error(`vLLM returned ${response.status}: ${body.substring(0, 200)}`);
+                throw new Error(`LLM returned ${response.status}: ${body.substring(0, 200)}`);
             }
             
             const data = await response.json();
             const message = data.choices?.[0]?.message;
             if (!message) {
                 console.warn("[Smart Feed DEBUG] No message in similar response:", JSON.stringify(data).substring(0, 300));
-                throw new Error("No message returned from vLLM server.");
+                throw new Error("No message returned from LLM server.");
             }
             
             const topicsArray = extractTopicsFromLlmResponse(message);
@@ -6253,23 +6328,28 @@ async function generateDiscoverChannels(force = false) {
     const vllmPromise = (async () => {
         if (state.channels.length === 0) return;
         try {
-            if (activeLlmModel === "default-model") {
-                await fetchLlmModel();
+            if (!state.settings.llmModel) {
+                await fetchPrismModels();
             }
             
             const subscribedNames = state.channels.slice(0, 15).map(c => c.name).join(", ");
-            const systemPrompt = `You are a YouTube channel recommendation engine. Recommend 5 high-quality channels that are similar in nature to the channels the user likes. Avoid recommending channels in the user's list. Return a JSON object with a 'channels' array: {"channels": [{"name": "Channel Name", "handle": "@handle", "reason": "1-sentence reason why the user will like it"}]}`;
-            const userMessage = `I like these channels: [${subscribedNames}]. Suggest 5 other high-quality YouTube channels.`;
+            const messages = [
+                { role: "system", content: `You are a YouTube channel recommendation engine. Recommend 5 high-quality channels that are similar in nature to the channels the user likes. Avoid recommending channels in the user's list. Return a JSON object with a 'channels' array: {"channels": [{"name": "Channel Name", "handle": "@handle", "reason": "1-sentence reason why the user will like it"}]}` },
+                { role: "user", content: `I like these channels: [${subscribedNames}]. Suggest 5 other high-quality YouTube channels.` }
+            ];
             
-            const resp = await fetch("/vllm/v1/chat/completions", {
+            const endpoint = state.settings.llmEndpoint || "/prism/";
+            const isPrism = endpoint.includes("prism");
+            const chatUrl = isPrism 
+                ? `${endpoint.replace(/\/$/, '')}/chat`
+                : `${endpoint.replace(/\/$/, '')}/v1/chat/completions`;
+
+            const resp = await fetch(chatUrl, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    model: activeLlmModel,
-                    messages: [
-                        { role: "system", content: systemPrompt },
-                        { role: "user", content: userMessage }
-                    ],
+                    model: state.settings.llmModel || "default-model",
+                    messages: messages,
                     temperature: 0.2,
                     max_tokens: 1000
                 })
