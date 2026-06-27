@@ -5023,6 +5023,8 @@ async function fetchPrismModels(forceRefresh = false) {
                 saveSettings();
                 if (select) select.value = firstModel;
             }
+        } else {
+            throw new Error(`Server returned status ${resp.status}`);
         }
     } catch (err) {
         console.warn("Failed to fetch models from endpoint:", err);
