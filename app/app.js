@@ -989,6 +989,19 @@ function setupEventListeners() {
         saveSettings();
         renderFeed();
     });
+    const selectLlmModel = document.getElementById("select-llm-model");
+    if (selectLlmModel) {
+        selectLlmModel.addEventListener("change", (e) => {
+            state.settings.llmModel = e.target.value;
+            saveSettings();
+        });
+    }
+    const btnRefreshModels = document.getElementById("btn-refresh-models");
+    if (btnRefreshModels) {
+        btnRefreshModels.addEventListener("click", () => {
+            fetchWallgardenModels();
+        });
+    }
     const altPlayerInput = document.getElementById("input-alt-player-instance");
     if (altPlayerInput) {
         altPlayerInput.addEventListener("input", (e) => {
@@ -4920,165 +4933,86 @@ function parseLlmJsonResponse(content) {
     }
 }
 
-// AI Topic Brainstorming Features
-let activeLlmModel = "default-model";
+// AI Topic Brainstorming Features — powered by lazy-tool-service backend
 
-// Tool definition for structured topic generation (agentic harness)
-const TOPIC_TOOL_DEFINITION = {
-    type: "function",
-    function: {
-        name: "suggest_topics",
-        description: "Suggest new topics related to the user's interest graph. Each topic should be 1-3 words.",
-        parameters: {
-            type: "object",
-            properties: {
-                topics: {
-                    type: "array",
-                    items: {
-                        type: "string",
-                        description: "A 1-3 word topic phrase, representing a broader genre, theme, or tangential subject."
-                    },
-                    minItems: 50,
-                    maxItems: 100
-                }
-            },
-            required: ["topics"]
-        }
-    }
-};
-
-const BRAINSTORM_SYSTEM_PROMPT = `/no_think
-You are a creative topic brainstorming discovery engine. You must call the suggest_topics tool to provide exactly 50 to 100 new topics related to the user's interests.
-CRITICAL INSTRUCTIONS:
-1. Act as a lateral-thinking discovery algorithm. We want to find interesting YouTube videos.
-2. Provide a balanced mix: roughly 30% Similar Media, 40% Broader Genres/Themes, and 30% Intellectual Tangents.
-3. ABSOLUTELY DO NOT generate narrow subcategories, specific character names, episode titles, or cast members. (e.g., If the user likes "The Simpsons", DO NOT suggest "Homer Simpson". DO suggest "90s Sitcoms", "Adult Animation").
-4. Expand broadly from what is provided.
-5. YOU MUST RETURN VALID JSON matching the suggest_topics schema. Do not return markdown. Do not return plain text.`;
-
-const SIMILAR_SYSTEM_PROMPT = `/no_think
-You are a creative topic brainstorming discovery engine. You must call the suggest_topics tool to provide exactly 50 to 100 topics related to the user's search query.
-CRITICAL INSTRUCTIONS:
-1. Act as a lateral-thinking discovery algorithm. We want to find interesting YouTube videos.
-2. Provide a balanced mix: roughly 30% Similar Media, 40% Broader Genres/Themes, and 30% Intellectual Tangents.
-3. ABSOLUTELY DO NOT generate narrow subcategories, specific character names, episode titles, or cast members. (e.g., If the user searches "The Simpsons", DO NOT suggest "Homer Simpson". DO suggest "90s Sitcoms", "Adult Animation").
-4. YOU MUST RETURN VALID JSON matching the suggest_topics schema. Do not return markdown. Do not return plain text.`;
-
-async function fetchPrismModels(forceRefresh = false) {
-    const endpoint = state.settings.llmEndpoint || "/prism/";
+async function fetchWallgardenModels() {
     const select = document.getElementById("select-llm-model");
     if (select) select.innerHTML = '<option value="">Loading models...</option>';
 
     try {
-        const isPrism = endpoint.includes("prism");
-        const configUrl = isPrism 
-            ? `${endpoint.replace(/\/$/, '')}/config`
-            : `${endpoint.replace(/\/$/, '')}/v1/models`;
+        const resp = await fetch("/api/wallgarden/models");
+        if (!resp.ok) throw new Error(`Server returned status ${resp.status}`);
+        
+        const data = await resp.json();
+        const boxes = data.boxes || [];
+        
+        if (select) select.innerHTML = '';
+        let firstModel = "";
+        let foundSelected = false;
 
-        const resp = await fetch(configUrl);
-        if (resp.ok) {
-            const data = await resp.json();
-            if (select) select.innerHTML = '';
-            let firstModel = "";
-            let foundSelected = false;
-
-            if (isPrism) {
-                const textToTextModels = data.models || data.capabilities?.textToText?.models || {};
-                for (const provider in textToTextModels) {
-                    const optgroup = document.createElement("optgroup");
-                    optgroup.label = provider;
-                    textToTextModels[provider].forEach(m => {
-                        const option = document.createElement("option");
-                        const modelId = m.id || m.key || m.name;
-                        option.value = modelId;
-                        option.textContent = m.name || modelId;
-                        optgroup.appendChild(option);
-                        if (!firstModel) firstModel = modelId;
-                        if (state.settings.llmModel === modelId) {
-                            option.selected = true;
-                            foundSelected = true;
-                        }
-                    });
-                    if (select && optgroup.children.length > 0) {
-                        select.appendChild(optgroup);
-                    }
-                }
-            } else {
-                if (data && data.data && data.data.length > 0) {
-                    data.data.forEach(m => {
-                        const option = document.createElement("option");
-                        option.value = m.id;
-                        option.textContent = m.id;
-                        if (select) select.appendChild(option);
-                        if (!firstModel) firstModel = m.id;
-                        if (state.settings.llmModel === m.id) {
-                            option.selected = true;
-                            foundSelected = true;
-                        }
-                    });
-                }
+        for (const box of boxes) {
+            if (box.status !== "online" || !box.model) continue;
+            
+            const option = document.createElement("option");
+            option.value = `${box.id}::${box.model}`;
+            option.textContent = `${box.nickname} — ${box.model}`;
+            if (select) select.appendChild(option);
+            
+            if (!firstModel) firstModel = `${box.id}::${box.model}`;
+            if (state.settings.llmModel === `${box.id}::${box.model}`) {
+                option.selected = true;
+                foundSelected = true;
             }
+        }
 
-            if (!foundSelected && firstModel) {
-                state.settings.llmModel = firstModel;
-                saveSettings();
-                if (select) select.value = firstModel;
-            }
-        } else {
-            throw new Error(`Server returned status ${resp.status}`);
+        if (!foundSelected && firstModel) {
+            state.settings.llmModel = firstModel;
+            saveSettings();
+            if (select) select.value = firstModel;
+        }
+        
+        if (boxes.filter(b => b.status === "online").length === 0) {
+            if (select) select.innerHTML = '<option value="">No vLLM boxes online</option>';
         }
     } catch (err) {
-        console.warn("Failed to fetch models from endpoint:", err);
+        console.warn("Failed to fetch models from wallgarden backend:", err);
         if (select) {
             select.innerHTML = `<option value="${state.settings.llmModel || ''}">${state.settings.llmModel || 'Error loading models'}</option>`;
         }
     }
 }
 
-// Extract topics from a vLLM response — supports tool_calls (preferred) and text fallback
-function extractTopicsFromLlmResponse(message) {
-    // 1. Try tool_calls first (structured output from agentic harness)
-    if (message.tool_calls && message.tool_calls.length > 0) {
-        for (const tc of message.tool_calls) {
-            try {
-                const args = typeof tc.function.arguments === "string"
-                    ? JSON.parse(tc.function.arguments)
-                    : tc.function.arguments;
-                if (args && Array.isArray(args.topics)) {
-                    console.log("[Smart Feed] Extracted topics via tool_calls:", args.topics.length);
-                    return args.topics;
-                }
-            } catch (e) {
-                console.warn("[Smart Feed] Failed to parse tool_call arguments:", e, tc.function?.arguments);
-            }
-        }
-    }
+// Keep backward-compatible alias
+const fetchPrismModels = fetchWallgardenModels;
+
+// Parse provider::model from settings value
+function parseModelSetting(val) {
+    if (!val || !val.includes("::")) return { provider: null, model: null };
+    const [provider, ...rest] = val.split("::");
+    return { provider, model: rest.join("::")};
+}
+
+// Build the common context payload for brainstorm/similar calls
+function buildLlmContext() {
+    const liked = state.topics.filter(t => t.weight > 0).sort((a, b) => b.weight - a.weight).slice(0, 15).map(t => t.phrase);
+    const graphTopics = Object.values(state.ontologyGraph?.nodes || {})
+        .filter(n => n.type === "Topic" && n.weight > 3)
+        .sort((a, b) => b.weight - a.weight)
+        .slice(0, 10)
+        .map(n => n.label);
+    const combinedInterests = Array.from(new Set([...liked, ...graphTopics]));
     
-    // 2. Fallback to text content parsing
-    let content = message.content;
-    if (content === null || content === undefined || (typeof content === "string" && content.trim() === "")) {
-        const reasoning = message.reasoning || message.reasoning_content;
-        if (reasoning) content = reasoning;
-    }
+    const { provider, model } = parseModelSetting(state.settings.llmModel);
     
-    if (!content) {
-        console.warn("[Smart Feed DEBUG] No content in message:", JSON.stringify(message).substring(0, 500));
-        return [];
-    }
-    
-    console.log("[Smart Feed DEBUG] Raw vLLM content (first 500 chars):", content.substring(0, 500));
-    
-    const parsed = parseLlmJsonResponse(content);
-    if (!parsed) {
-        console.error("[Smart Feed DEBUG] JSON parsing failed entirely. Full content:", content);
-        return [];
-    }
-    
-    if (Array.isArray(parsed)) return parsed;
-    if (parsed && Array.isArray(parsed.topics)) return parsed.topics;
-    
-    console.warn("[Smart Feed DEBUG] Parsed object has no topics array:", parsed);
-    return [];
+    return {
+        interests: combinedInterests,
+        disliked: state.topics.filter(t => t.weight < 0).slice(0, 10).map(t => t.phrase),
+        recentUsed: state.smartFeedUsedTopics.slice(-20),
+        burnedQueries: state.burnedQueries.slice(-30),
+        searches: state.searchHistory.slice(-10),
+        model: model,
+        provider: provider
+    };
 }
 
 async function generateBrainstormTopics(append, numRequests = 1) {
@@ -5087,152 +5021,67 @@ async function generateBrainstormTopics(append, numRequests = 1) {
     state.brainstormLoading = true;
     state.lastBrainstormAttempt = Date.now();
     
-    console.log(`[Smart Feed] Background LLM brainstorming started (firing ${numRequests} parallel requests)...`);
+    console.log(`[Smart Feed] Background LLM brainstorming via lazy-tool-service...`);
     
-    // Truncated context: top 15 highest-weight topics, last 20 used
     const likedAll = state.topics.filter(t => t.weight > 0).sort((a, b) => b.weight - a.weight);
     if (likedAll.length === 0) {
         console.log("[Smart Feed] No positive topics to brainstorm from. Skipping brainstorm.");
         state.brainstormLoading = false;
         return;
     }
-    // Pull highest-weight liked topics from graph to seed the LLM
-    const graphTopics = Object.values(state.ontologyGraph?.nodes || {})
-        .filter(n => n.type === "Topic" && n.weight > 3)
-        .sort((a, b) => b.weight - a.weight)
-        .slice(0, 10)
-        .map(n => n.label);
+
+    try {
+        const ctx = buildLlmContext();
+        ctx.numTopics = 100;
         
-    // Merge into the prompt's existing topic list
-    const combinedTopics = Array.from(new Set([...likedAll.slice(0, 15).map(t => t.phrase), ...graphTopics]));
-    const liked = combinedTopics.join(", ");
-    const disliked = state.topics.filter(t => t.weight < 0).slice(0, 10).map(t => t.phrase).join(", ");
-    const searches = state.searchHistory.slice(-10).join(", ");
-    const recentUsed = state.smartFeedUsedTopics.slice(-20).join(", ");
-    const burnedList = state.burnedQueries.slice(-30).join(", ");
-    
-    const userMessage = `My interests: [${liked}]
-Disliked: [${disliked}]
-Recent searches: [${searches}]
-Recently used (avoid these): [${recentUsed}]
-Failed queries (don't reuse these exact phrases, they returned bad results): [${burnedList}]
-
-Suggest 50 to 100 new topics.`;
-
-    const MAX_RETRIES = 2;
-    let attempt = 0;
-    let allAddedPhrases = [];
-    let success = false;
-
-    while (attempt <= MAX_RETRIES && !success) {
-        try {
-            if (activeLlmModel === "default-model") {
-                await fetchLlmModel();
-            }
-            
-            if (attempt > 0) {
-                console.log(`[Smart Feed] Brainstorm attempt ${attempt + 1}/${MAX_RETRIES + 1} (increasing temperature)...`);
-            }
-            
-            const fetchPromises = [];
-            for (let i = 0; i < numRequests; i++) {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 120000);
-                
-                const endpoint = state.settings.llmEndpoint || "/prism/";
-                const isPrism = endpoint.includes("prism");
-                const chatUrl = isPrism 
-                    ? `${endpoint.replace(/\/$/, '')}/chat`
-                    : `${endpoint.replace(/\/$/, '')}/v1/chat/completions`;
-                
-                const req = fetch(chatUrl, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        model: state.settings.llmModel || "default-model",
-                        messages: [
-                            { role: "system", content: BRAINSTORM_SYSTEM_PROMPT },
-                            { role: "user", content: userMessage }
-                        ],
-                        tools: [TOPIC_TOOL_DEFINITION],
-                        tool_choice: { type: "function", function: { name: "suggest_topics" } },
-                        temperature: 0.1 + (attempt * 0.15),
-                        max_tokens: 2500,
-                        chat_template_kwargs: { "enable_thinking": false }
-                    }),
-                    signal: controller.signal
-                }).then(async (res) => {
-                    clearTimeout(timeoutId);
-                    if (!res.ok) {
-                        const body = await res.text().catch(() => "");
-                        throw new Error(`LLM returned ${res.status}: ${body.substring(0, 200)}`);
-                    }
-                    return res.json();
-                });
-                fetchPromises.push(req);
-            }
-            
-            const results = await Promise.allSettled(fetchPromises);
-            
-            for (const result of results) {
-                if (result.status === "rejected") {
-                    console.error("[Smart Feed] Batch request failed:", result.reason);
-                    continue;
-                }
-                
-                const data = result.value;
-                const message = data.choices?.[0]?.message;
-                if (!message) {
-                    console.warn("[Smart Feed DEBUG] No message in response:", JSON.stringify(data).substring(0, 300));
-                    continue;
-                }
-                
-                const topicsArray = extractTopicsFromLlmResponse(message);
-                
-                topicsArray.forEach(item => {
-                    const phrase = (typeof item === "string" ? item : (item.phrase || item.topic || item.keyword || ""))?.trim().toLowerCase();
-                    if (!phrase) return;
-                    
-                    // Safety net: skip burned queries even if the LLM re-suggests them
-                    if (state.burnedQueries.includes(phrase)) {
-                        console.log(`[Smart Feed] Skipping burned query "${phrase}" from LLM results.`);
-                        return;
-                    }
-                    
-                    const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
-                    if (!existsInTopics) {
-                        state.topics.push({ phrase, weight: 5 });
-                    }
-                    
-                    const inQueue = state.smartFeedTopicsQueue.includes(phrase);
-                    const inUsed = state.smartFeedUsedTopics.includes(phrase);
-                    if (!inQueue && !inUsed) {
-                        state.smartFeedTopicsQueue.push(phrase);
-                        allAddedPhrases.push(phrase);
-                    }
-                });
-            }
-            
-            if (allAddedPhrases.length > 0) {
-                success = true;
-                saveTopics();
-                console.log("[Smart Feed] Successfully brainstormed and queued new topics:", allAddedPhrases);
-                if (!append) {
-                    renderFeed();
-                }
-            } else {
-                console.warn(`[Smart Feed] Brainstorming returned no new topics on attempt ${attempt + 1}.`);
-                throw new Error("No topics parsed from response");
-            }
-        } catch (err) {
-            console.error(`Brainstorm error on attempt ${attempt + 1}:`, err);
-            attempt++;
+        const resp = await fetch("/api/wallgarden/brainstorm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(ctx),
+            signal: AbortSignal.timeout(120000)
+        });
+        
+        if (!resp.ok) {
+            const errBody = await resp.text().catch(() => "");
+            throw new Error(`Backend returned ${resp.status}: ${errBody.substring(0, 200)}`);
         }
-    }
-    
-    if (!success) {
-        console.error(`[Smart Feed] Background brainstorming completely failed after ${MAX_RETRIES + 1} attempts.`);
-        // Queue will be evaluated again on next interaction
+        
+        const data = await resp.json();
+        const topicsArray = data.topics || [];
+        let allAddedPhrases = [];
+        
+        topicsArray.forEach(phrase => {
+            if (!phrase) return;
+            
+            if (state.burnedQueries.includes(phrase)) {
+                console.log(`[Smart Feed] Skipping burned query "${phrase}" from LLM results.`);
+                return;
+            }
+            
+            const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
+            if (!existsInTopics) {
+                state.topics.push({ phrase, weight: 5 });
+            }
+            
+            const inQueue = state.smartFeedTopicsQueue.includes(phrase);
+            const inUsed = state.smartFeedUsedTopics.includes(phrase);
+            if (!inQueue && !inUsed) {
+                state.smartFeedTopicsQueue.push(phrase);
+                allAddedPhrases.push(phrase);
+            }
+        });
+        
+        if (allAddedPhrases.length > 0) {
+            saveTopics();
+            console.log("[Smart Feed] Successfully brainstormed and queued new topics:", allAddedPhrases);
+            if (!append) {
+                renderFeed();
+            }
+        } else {
+            console.warn("[Smart Feed] Brainstorming returned no new usable topics.");
+        }
+    } catch (err) {
+        console.error(`[Smart Feed] Background brainstorming failed:`, err);
     }
     
     state.brainstormLoading = false;
@@ -5242,7 +5091,7 @@ Suggest 50 to 100 new topics.`;
 
 async function generateSimilarTopicsFromSearch(searchQuery, isHighSignal = false) {
     if (!searchQuery) return;
-    console.log(`[Smart Feed] Background similar topics generation started for query: "${searchQuery}" (highSignal: ${isHighSignal})`);
+    console.log(`[Smart Feed] Background similar topics generation via lazy-tool-service for: "${searchQuery}" (highSignal: ${isHighSignal})`);
     
     // Auto-add search query with appropriate weight based on signal strength
     const searchNormalized = searchQuery.trim().toLowerCase();
@@ -5255,129 +5104,64 @@ async function generateSimilarTopicsFromSearch(searchQuery, isHighSignal = false
         } else {
             state.topics.push({ phrase: searchNormalized, weight: targetWeight });
         }
-        // Add search query to the smart feed queue as well
         if (!state.smartFeedTopicsQueue.includes(searchNormalized)) {
             state.smartFeedTopicsQueue.push(searchNormalized);
         }
         saveTopics();
         console.log(`[Smart Feed] Auto-added query "${searchNormalized}" with weight ${targetWeight} as positive topic.`);
     }
-    
-    // Truncated context: top 15 liked, last 20 used
-    const liked = state.topics.filter(t => t.weight > 0).sort((a, b) => b.weight - a.weight).slice(0, 15).map(t => t.phrase).join(", ");
-    const disliked = state.topics.filter(t => t.weight < 0).slice(0, 10).map(t => t.phrase).join(", ");
-    const recentUsed = state.smartFeedUsedTopics.slice(-20).join(", ");
-    const burnedList = state.burnedQueries.slice(-30).join(", ");
-    
-    const userMessage = `Search query: "${searchQuery}"
-My interests: [${liked}]
-Disliked: [${disliked}]
-Recently used (avoid these): [${recentUsed}]
-Failed queries (don't reuse these exact phrases): [${burnedList}]
 
-Suggest ${isHighSignal ? "50 to 100" : "5 to 10"} topics related to "${searchQuery}".`;
-
-    const MAX_RETRIES = 2;
-    let attempt = 0;
-    let addedPhrases = [];
-    let success = false;
-
-    while (attempt <= MAX_RETRIES && !success) {
-        try {
-            if (!state.settings.llmModel) {
-                await fetchPrismModels();
-            }
-            
-            if (attempt > 0) {
-                console.log(`[Smart Feed] Similar brainstorm attempt ${attempt + 1}/${MAX_RETRIES + 1}...`);
-            }
-            
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 60000);
-            
-            const endpoint = state.settings.llmEndpoint || "/prism/";
-            const isPrism = endpoint.includes("prism");
-            const chatUrl = isPrism 
-                ? `${endpoint.replace(/\/$/, '')}/chat`
-                : `${endpoint.replace(/\/$/, '')}/v1/chat/completions`;
-            
-            const response = await fetch(chatUrl, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    model: state.settings.llmModel || "default-model",
-                    messages: [
-                        { role: "system", content: SIMILAR_SYSTEM_PROMPT },
-                        { role: "user", content: userMessage }
-                    ],
-                    tools: [TOPIC_TOOL_DEFINITION],
-                    tool_choice: { type: "function", function: { name: "suggest_topics" } },
-                    temperature: 0.1 + (attempt * 0.15),
-                    max_tokens: 2500,
-                    chat_template_kwargs: { "enable_thinking": false }
-                }),
-                signal: controller.signal
-            });
-            clearTimeout(timeoutId);
-            
-            if (!response.ok) {
-                const body = await response.text().catch(() => "");
-                throw new Error(`LLM returned ${response.status}: ${body.substring(0, 200)}`);
-            }
-            
-            const data = await response.json();
-            const message = data.choices?.[0]?.message;
-            if (!message) {
-                console.warn("[Smart Feed DEBUG] No message in similar response:", JSON.stringify(data).substring(0, 300));
-                throw new Error("No message returned from LLM server.");
-            }
-            
-            const topicsArray = extractTopicsFromLlmResponse(message);
-            
-            topicsArray.forEach(item => {
-                const phrase = (typeof item === "string" ? item : (item.phrase || item.topic || item.keyword || ""))?.trim().toLowerCase();
-                if (!phrase) return;
-                
-                // Safety net: skip burned queries even if the LLM re-suggests them
-                if (state.burnedQueries.includes(phrase)) {
-                    console.log(`[Smart Feed] Skipping burned query "${phrase}" from similar topics results.`);
-                    return;
-                }
-                
-                const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
-                if (!existsInTopics) {
-                    state.topics.push({ phrase, weight: targetWeight });
-                }
-                
-                const inQueue = state.smartFeedTopicsQueue.includes(phrase);
-                const inUsed = state.smartFeedUsedTopics.includes(phrase);
-                if (!inQueue && !inUsed) {
-                    state.smartFeedTopicsQueue.push(phrase);
-                    addedPhrases.push(phrase);
-                }
-            });
-            
-            if (addedPhrases.length > 0) {
-                success = true;
-                saveTopics();
-                console.log(`[Smart Feed] Successfully brainstormed and queued ${addedPhrases.length} similar topics for "${searchQuery}":`, addedPhrases);
-                showToast(`💡 Queued ${addedPhrases.length} topics similar to "${searchQuery}"`, "success");
-                
-                fillSmartFeedPreloadBuffer();
-            } else {
-                console.warn(`[Smart Feed] Similar brainstorm returned no new topics on attempt ${attempt + 1}.`);
-                throw new Error("No topics parsed from similar topics response");
-            }
-        } catch (err) {
-            console.error(`Similar search topics brainstorm error on attempt ${attempt + 1}:`, err);
-            attempt++;
+    try {
+        const ctx = buildLlmContext();
+        ctx.numTopics = isHighSignal ? 100 : 10;
+        
+        const resp = await fetch("/api/wallgarden/similar", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...ctx, query: searchQuery }),
+            signal: AbortSignal.timeout(60000)
+        });
+        
+        if (!resp.ok) {
+            const errBody = await resp.text().catch(() => "");
+            throw new Error(`Backend returned ${resp.status}: ${errBody.substring(0, 200)}`);
         }
-    }
-    
-    if (!success) {
-        console.error(`[Smart Feed] Background similar brainstorming completely failed after ${MAX_RETRIES + 1} attempts.`);
+        
+        const data = await resp.json();
+        const topicsArray = data.topics || [];
+        let addedPhrases = [];
+        
+        topicsArray.forEach(phrase => {
+            if (!phrase) return;
+            
+            if (state.burnedQueries.includes(phrase)) {
+                console.log(`[Smart Feed] Skipping burned query "${phrase}" from similar topics results.`);
+                return;
+            }
+            
+            const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
+            if (!existsInTopics) {
+                state.topics.push({ phrase, weight: targetWeight });
+            }
+            
+            const inQueue = state.smartFeedTopicsQueue.includes(phrase);
+            const inUsed = state.smartFeedUsedTopics.includes(phrase);
+            if (!inQueue && !inUsed) {
+                state.smartFeedTopicsQueue.push(phrase);
+                addedPhrases.push(phrase);
+            }
+        });
+        
+        if (addedPhrases.length > 0) {
+            saveTopics();
+            console.log(`[Smart Feed] Successfully queued ${addedPhrases.length} similar topics for "${searchQuery}":`, addedPhrases);
+            showToast(`💡 Queued ${addedPhrases.length} topics similar to "${searchQuery}"`, "success");
+            fillSmartFeedPreloadBuffer();
+        } else {
+            console.warn(`[Smart Feed] Similar brainstorm returned no new usable topics.`);
+        }
+    } catch (err) {
+        console.error(`[Smart Feed] Similar topics generation failed:`, err);
     }
 }
 
@@ -6328,31 +6112,24 @@ async function generateDiscoverChannels(force = false) {
     
     const promises = [];
     
-    // 1. vLLM Suggestion
+    // 1. vLLM Suggestion (via prism /chat with corrected port)
     const vllmPromise = (async () => {
         if (state.channels.length === 0) return;
         try {
-            if (!state.settings.llmModel) {
-                await fetchPrismModels();
-            }
-            
             const subscribedNames = state.channels.slice(0, 15).map(c => c.name).join(", ");
             const messages = [
                 { role: "system", content: `You are a YouTube channel recommendation engine. Recommend 5 high-quality channels that are similar in nature to the channels the user likes. Avoid recommending channels in the user's list. Return a JSON object with a 'channels' array: {"channels": [{"name": "Channel Name", "handle": "@handle", "reason": "1-sentence reason why the user will like it"}]}` },
                 { role: "user", content: `I like these channels: [${subscribedNames}]. Suggest 5 other high-quality YouTube channels.` }
             ];
             
-            const endpoint = state.settings.llmEndpoint || "/prism/";
-            const isPrism = endpoint.includes("prism");
-            const chatUrl = isPrism 
-                ? `${endpoint.replace(/\/$/, '')}/chat`
-                : `${endpoint.replace(/\/$/, '')}/v1/chat/completions`;
+            const { provider, model } = parseModelSetting(state.settings.llmModel);
 
-            const resp = await fetch(chatUrl, {
+            const resp = await fetch("/prism/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    model: state.settings.llmModel || "default-model",
+                    model: model || "default-model",
+                    provider: provider || undefined,
                     messages: messages,
                     temperature: 0.2,
                     max_tokens: 1000
@@ -6361,7 +6138,7 @@ async function generateDiscoverChannels(force = false) {
             
             if (resp.ok) {
                 const data = await resp.json();
-                const content = data.choices?.[0]?.message?.content;
+                const content = data.choices?.[0]?.message?.content || data.text;
                 const parsed = parseLlmJsonResponse(content);
                 if (parsed && Array.isArray(parsed.channels)) {
                     parsed.channels.forEach(ch => {

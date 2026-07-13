@@ -593,13 +593,9 @@
 
                     <div class="topic-editor-container" style="margin-bottom: 2rem;">
                         <h3>LLM Configuration</h3>
-                        <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">Configure the LLM endpoint and select the model used for brainstorming topics.</p>
-                        <div class="form-group" style="margin-bottom: 1rem;">
-                            <label for="input-llm-endpoint" style="display: block; margin-bottom: 0.25rem;">Prism / LLM Endpoint URL</label>
-                            <input type="text" id="input-llm-endpoint" placeholder="/prism/" style="width: 100%; padding: 0.5rem; background: rgba(0,0,0,0.25); border: 1px solid var(--card-border); color: var(--text-primary); border-radius: 4px;">
-                        </div>
+                        <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">Select which vLLM box and model to use for brainstorming topics. Models are auto-discovered from your local vLLM instances.</p>
                         <div class="form-group">
-                            <label for="select-llm-model" style="display: block; margin-bottom: 0.25rem;">Active LLM Model <button id="btn-refresh-models" class="btn btn-secondary btn-sm" style="margin-left: 0.5rem; padding: 0.1rem 0.4rem; font-size: 0.7rem;">Refresh</button></label>
+                            <label for="select-llm-model" style="display: block; margin-bottom: 0.25rem;">vLLM Box / Model <button id="btn-refresh-models" class="btn btn-secondary btn-sm" style="margin-left: 0.5rem; padding: 0.1rem 0.4rem; font-size: 0.7rem;">Refresh</button></label>
                             <select id="select-llm-model" style="width: 100%; padding: 0.5rem; background: rgba(0,0,0,0.25); border: 1px solid var(--card-border); color: var(--text-primary); border-radius: 4px;">
                                 <option value="">Loading models...</option>
                             </select>
