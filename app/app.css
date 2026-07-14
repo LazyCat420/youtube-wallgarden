@@ -2901,3 +2901,26 @@ body {
     border-color: var(--accent);
     box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.15);
 }
+
+/* Liked Videos Enhancements */
+.thumbnail-action-btn.unlike-card-btn:hover {
+    background: var(--danger, #ef4444) !important;
+    border-color: var(--danger, #ef4444) !important;
+    color: #fff !important;
+}
+
+.video-card.card-fade-out {
+    animation: fadeOutShrink 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes fadeOutShrink {
+    0% {
+        opacity: 1;
+        transform: scale(1);
+    }
+    100% {
+        opacity: 0;
+        transform: scale(0.9);
+    }
+}
+

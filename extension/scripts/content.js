@@ -1130,13 +1130,29 @@ function startSyncObservers() {
         }
 
         if (hasLike) {
-            console.log("[Wallgarden Sync] LIKE clicked");
-            const metadata = scrapeVideoMetadata();
-            sendSyncEvent('LIKE', metadata);
+            const btn = e.target.closest('button, yt-button-view-model');
+            setTimeout(() => {
+                const isSelected = btn && (
+                    btn.getAttribute('aria-pressed') === 'true' || 
+                    btn.classList.contains('yt-spec-button-shape-next--selected') ||
+                    !!btn.querySelector('button[aria-pressed="true"]')
+                );
+                console.log("[Wallgarden Sync] LIKE clicked, final selected state:", !!isSelected);
+                const metadata = scrapeVideoMetadata();
+                sendSyncEvent(isSelected ? 'LIKE' : 'UNLIKE', metadata);
+            }, 50);
         } else if (hasDislike) {
-            console.log("[Wallgarden Sync] DISLIKE clicked");
-            const metadata = scrapeVideoMetadata();
-            sendSyncEvent('DISLIKE', metadata);
+            const btn = e.target.closest('button, yt-button-view-model');
+            setTimeout(() => {
+                const isSelected = btn && (
+                    btn.getAttribute('aria-pressed') === 'true' || 
+                    btn.classList.contains('yt-spec-button-shape-next--selected') ||
+                    !!btn.querySelector('button[aria-pressed="true"]')
+                );
+                console.log("[Wallgarden Sync] DISLIKE clicked, final selected state:", !!isSelected);
+                const metadata = scrapeVideoMetadata();
+                sendSyncEvent(isSelected ? 'DISLIKE' : 'UNDISLIKE', metadata);
+            }, 50);
         } else if (hasSub) {
             console.log("[Wallgarden Sync] SUBSCRIBE clicked");
             sendSyncEvent('SUBSCRIBE');
