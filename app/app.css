@@ -2036,13 +2036,12 @@ body {
     to { opacity: 0; transform: scale(0.95); }
 }
 
-/* Snappiness performance upgrades */
-.feed-section {
-    content-visibility: auto;
-    contain-intrinsic-size: 1000px;
-}
+/* Snappiness performance upgrades: offscreen cards skip layout and paint
+   entirely. Must live on the cards, not the scroll container — and blanket
+   will-change forced a compositor layer per card, which hurt scrolling. */
 .video-card {
-    will-change: transform, opacity;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 300px;
 }
 
 /* ── AI Brainstorming View Styles ── */

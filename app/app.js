@@ -85,6 +85,9 @@ let state = {
 const DISCOVER_BATCH_SIZE = 30;
 const DISCOVER_MAX_RESULTS = 150;
 
+// Verbose per-video logging in the stream read loop; costs real frame time when on
+const DEBUG = false;
+
 // In-memory session cache for topic search discovery results
 let sessionDiscoverOffset = 0; // fallback counter for yt-dlp discover
 
@@ -93,11 +96,14 @@ let topicSearchPageTokens = {};
 let sessionTopicSearchCache = {};
 let topicSearchLoading = {};
 let renderTimeouts = [];
+let renderRafs = [];
 let searchDebounceTimeout = null;
 
 function clearRenderTimeouts() {
     renderTimeouts.forEach(t => clearTimeout(t));
     renderTimeouts = [];
+    renderRafs.forEach(r => cancelAnimationFrame(r));
+    renderRafs = [];
 }
 
 function getWeightedRandomTopics(topics) {
@@ -612,7 +618,18 @@ function saveSearchHistory() {
     localStorage.setItem(getProfileKey("search_history"), JSON.stringify(state.searchHistory));
 }
 
+// The pool and ontology graph are saved from hot paths (scroll batches, watch
+// signals), and JSON.stringify of those blocks blocks the main thread — so both
+// are debounced. flushPendingSaves() runs before profile switches and on
+// pagehide so pending writes land under the right profile key and survive close.
+let _poolSaveTimer = null;
 function saveSmartFeedSuggestionPool() {
+    clearTimeout(_poolSaveTimer);
+    _poolSaveTimer = setTimeout(flushSmartFeedSuggestionPoolSave, 1500);
+}
+function flushSmartFeedSuggestionPoolSave() {
+    clearTimeout(_poolSaveTimer);
+    _poolSaveTimer = null;
     localStorage.setItem(getProfileKey("smart_feed_pool"), JSON.stringify(state.smartFeedSuggestionPool));
 }
 
@@ -637,9 +654,25 @@ function saveQueue() {
     localStorage.setItem(getProfileKey("queue"), JSON.stringify(state.queue));
 }
 
+let _graphSaveTimer = null;
 function saveOntologyGraph() {
+    clearTimeout(_graphSaveTimer);
+    _graphSaveTimer = setTimeout(flushOntologyGraphSave, 1500);
+}
+function flushOntologyGraphSave() {
+    clearTimeout(_graphSaveTimer);
+    _graphSaveTimer = null;
     localStorage.setItem(getProfileKey("ontology_graph"), JSON.stringify(state.ontologyGraph));
 }
+
+function flushPendingSaves() {
+    if (_poolSaveTimer !== null) flushSmartFeedSuggestionPoolSave();
+    if (_graphSaveTimer !== null) flushOntologyGraphSave();
+}
+window.addEventListener("pagehide", flushPendingSaves);
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushPendingSaves();
+});
 
 function getCachedVideosCount() {
     return Object.values(state.cache.videos).reduce((acc, curr) => acc + curr.length, 0);
@@ -1279,11 +1312,13 @@ function switchProfile(profileName) {
     saveNewsRatings();
     saveLikedVideos();
     saveSearchHistory();
-    saveSmartFeedSuggestionPool();
     saveBurnedQueries();
     savePlaylists();
     saveQueue();
     saveDiscovered();
+    // Debounced saves must land under the OLD profile's keys before the switch
+    flushSmartFeedSuggestionPoolSave();
+    flushOntologyGraphSave();
 
     // Set new current profile
     state.currentProfile = profileName;
@@ -2095,7 +2130,7 @@ function createVideoCard(video) {
     
     card.innerHTML = `
         <div class="thumbnail-area">
-            <img class="thumbnail-img" src="https://i.ytimg.com/vi/${video.id}/hqdefault.jpg" alt="${escapeHTML(video.title)}" decoding="async">
+            <img class="thumbnail-img" src="https://i.ytimg.com/vi/${video.id}/hqdefault.jpg" alt="${escapeHTML(video.title)}" loading="lazy" decoding="async">
             <div class="thumbnail-play-overlay">
                 <div class="play-icon-circle">▶</div>
             </div>
@@ -2389,26 +2424,44 @@ function createVideoCard(video) {
     });
     
     // ── Intersection Observer: passive watch signal for graph ──
-    if (typeof IntersectionObserver !== 'undefined') {
-        const watchObserver = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (entry.isIntersecting) {
-                    entry.target._watchTimer = setTimeout(() => {
-                        if (state.ontologyGraph) {
-                            graphProcessWatch(state.ontologyGraph, video);
-                            saveOntologyGraph();
-                        }
-                        watchObserver.unobserve(entry.target);
-                    }, 5000);
-                } else {
-                    clearTimeout(entry.target._watchTimer);
-                }
-            });
-        }, { threshold: 0.5 });
+    const watchObserver = getWatchSignalObserver();
+    if (watchObserver) {
+        watchSignalVideos.set(card, video);
         watchObserver.observe(card);
     }
-    
+
     return card;
+}
+
+// One shared observer for all cards' passive watch signals — a per-card
+// observer instance made every scroll frame pay for hundreds of observers.
+let watchSignalObserver = null;
+const watchSignalVideos = new WeakMap();
+
+function getWatchSignalObserver() {
+    if (watchSignalObserver || typeof IntersectionObserver === 'undefined') return watchSignalObserver;
+    watchSignalObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            const video = watchSignalVideos.get(entry.target);
+            if (!video) {
+                watchSignalObserver.unobserve(entry.target);
+                return;
+            }
+            if (entry.isIntersecting) {
+                entry.target._watchTimer = setTimeout(() => {
+                    if (state.ontologyGraph) {
+                        graphProcessWatch(state.ontologyGraph, video);
+                        saveOntologyGraph();
+                    }
+                    watchSignalVideos.delete(entry.target);
+                    watchSignalObserver.unobserve(entry.target);
+                }, 5000);
+            } else {
+                clearTimeout(entry.target._watchTimer);
+            }
+        });
+    }, { threshold: 0.5 });
+    return watchSignalObserver;
 }
 
 function renderCard(video, targetContainer) {
@@ -3006,20 +3059,30 @@ function renderFeed() {
             discoverVideos.forEach(video => renderCard(video, discoverFragment));
             grid.appendChild(discoverFragment);
         } else {
-            // Otherwise render the first 18 instantly via fragment, and stagger the rest with a 10ms timeout
+            // Render the first 18 instantly via fragment, then the rest in chunks
+            // of 12 per animation frame — one reflow per chunk instead of per card
             const instantBatch = discoverVideos.slice(0, 18);
             const staggeredBatch = discoverVideos.slice(18);
-            
+
             const discoverFragment = document.createDocumentFragment();
             instantBatch.forEach(video => renderCard(video, discoverFragment));
             grid.appendChild(discoverFragment);
-            
-            staggeredBatch.forEach((video, index) => {
-                const t = setTimeout(() => {
-                    renderCard(video, grid);
-                }, index * 10);
-                renderTimeouts.push(t);
-            });
+
+            let staggerIndex = 0;
+            const renderChunk = () => {
+                const chunkFragment = document.createDocumentFragment();
+                const end = Math.min(staggerIndex + 12, staggeredBatch.length);
+                for (; staggerIndex < end; staggerIndex++) {
+                    renderCard(staggeredBatch[staggerIndex], chunkFragment);
+                }
+                grid.appendChild(chunkFragment);
+                if (staggerIndex < staggeredBatch.length) {
+                    renderRafs.push(requestAnimationFrame(renderChunk));
+                }
+            };
+            if (staggeredBatch.length > 0) {
+                renderRafs.push(requestAnimationFrame(renderChunk));
+            }
         }
 
         // Show infinite scroll loader if currently fetching more
@@ -4285,11 +4348,10 @@ function updateStatusText(text) {
 async function fetchTopicSearchDiscovery(topicPhrase, offset) {
     const cacheKey = topicPhrase.toLowerCase();
     offset = offset || 0;
-    const fetchCount = offset + DISCOVER_BATCH_SIZE;
     const url = `/youtube/results?search_query=${encodeURIComponent(topicPhrase)}&sp=CAI%253D`;
-    console.log(`[Search Debug] fetchTopicSearchDiscovery initiated for: "${topicPhrase}" (cacheKey: "${cacheKey}", offset: ${offset}, fetchCount: ${fetchCount})`);
+    if (DEBUG) console.log(`[Search Debug] fetchTopicSearchDiscovery initiated for: "${topicPhrase}" (cacheKey: "${cacheKey}", offset: ${offset})`);
     if (topicSearchLoading[cacheKey]) {
-        console.log(`[Search Debug] fetchTopicSearchDiscovery already loading for "${cacheKey}". Aborting duplicate call.`);
+        if (DEBUG) console.log(`[Search Debug] fetchTopicSearchDiscovery already loading for "${cacheKey}". Aborting duplicate call.`);
         return;
     }
     topicSearchLoading[cacheKey] = true;
@@ -4386,6 +4448,17 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
             } else {
                 success = true; // empty results
             }
+
+            if (success) {
+                // Cards were already appended by appendStreamedDiscoverVideo();
+                // clear the loading flag so infinite scroll can fetch the next page
+                topicSearchLoading[cacheKey] = false;
+                updateStatusText("Ready");
+                if (!topicSearchPageTokens[cacheKey]) {
+                    state.discoverMaxReached = true;
+                }
+                finishDiscoverBatch(cacheKey, offset);
+            }
         } catch (err) {
             console.error("[Google API Search Error]", err);
         }
@@ -4394,7 +4467,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
     
     if (!success && state.settings.useYtdlp) {
         try {
-            console.log(`[Search Debug] Fetching /scraper/collect stream for "${topicPhrase}" via POST (limit: ${fetchCount})...`);
+            if (DEBUG) console.log(`[Search Debug] Fetching /scraper/collect stream for "${topicPhrase}" via POST (limit: ${DISCOVER_BATCH_SIZE}, offset: ${offset})...`);
             updateStatusText(`Searching via yt-dlp for "${topicPhrase}"...`);
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 15000);
@@ -4406,7 +4479,8 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                 body: JSON.stringify({
                     source: "youtube",
                     query: topicPhrase,
-                    limit: fetchCount,
+                    limit: DISCOVER_BATCH_SIZE,
+                    offset: offset,
                     days_back: 0,
                     require_transcript: false,
                     stream: true,
@@ -4415,7 +4489,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
-            console.log(`[Search Debug] /scraper/collect response status: ${resp.status} (${resp.statusText})`);
+            if (DEBUG) console.log(`[Search Debug] /scraper/collect response status: ${resp.status} (${resp.statusText})`);
             if (resp.ok) {
                 if (!sessionTopicSearchCache[cacheKey]) {
                     sessionTopicSearchCache[cacheKey] = [];
@@ -4426,26 +4500,26 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                 const reader = resp.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = "";
-                console.log("[Search Debug] Stream reader obtained. Starting read loop...");
+                if (DEBUG) console.log("[Search Debug] Stream reader obtained. Starting read loop...");
 
                 while (true) {
-                    console.log("[Search Debug] Awaiting reader.read()...");
+                    if (DEBUG) console.log("[Search Debug] Awaiting reader.read()...");
                     const { value, done } = await reader.read();
-                    console.log(`[Search Debug] Reader chunk received. done: ${done}, chunk size: ${value ? value.length : 0} bytes`);
+                    if (DEBUG) console.log(`[Search Debug] Reader chunk received. done: ${done}, chunk size: ${value ? value.length : 0} bytes`);
                     if (done) {
-                        console.log("[Search Debug] Done flag is true. Exiting read loop.");
+                        if (DEBUG) console.log("[Search Debug] Done flag is true. Exiting read loop.");
                         break;
                     }
 
                     buffer += decoder.decode(value, { stream: true });
                     const lines = buffer.split("\n");
                     buffer = lines.pop();
-                    console.log(`[Search Debug] Split buffer into ${lines.length} lines. Remaining buffer size: ${buffer.length} chars`);
+                    if (DEBUG) console.log(`[Search Debug] Split buffer into ${lines.length} lines. Remaining buffer size: ${buffer.length} chars`);
 
                     for (const line of lines) {
                         if (line.trim()) {
                             try {
-                                console.log(`[Search Debug] Parsing NDJSON line: ${line.substring(0, 120)}...`);
+                                if (DEBUG) console.log(`[Search Debug] Parsing NDJSON line: ${line.substring(0, 120)}...`);
                                 const item = JSON.parse(line);
                                 if (item.error) {
                                     console.warn("[Search Debug] Stream item contains error:", item.error);
@@ -4463,21 +4537,21 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                                 };
 
                                 if (!sessionTopicSearchCache[cacheKey]) {
-                                    console.log("[Search Debug] Re-initializing session cache (must have been cleared by sync).");
+                                    if (DEBUG) console.log("[Search Debug] Re-initializing session cache (must have been cleared by sync).");
                                     sessionTopicSearchCache[cacheKey] = [];
                                 }
                                 // Deduplicate against existing cached results
                                 if (!existingIds.has(video.id)) {
                                     existingIds.add(video.id);
                                     sessionTopicSearchCache[cacheKey].push(video);
-                                    console.log(`[Search Debug] Cached video: "${video.title}" (ID: ${video.id})`);
+                                    if (DEBUG) console.log(`[Search Debug] Cached video: "${video.title}" (ID: ${video.id})`);
 
                                     // Append directly if the user is still looking at this topic or search
                                     const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
                                     const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
-                                    console.log(`[Search Debug] View check - ActiveTopic: "${currentActiveTopic}", ActiveSearch: "${currentActiveSearch}", cacheKey: "${cacheKey}"`);
+                                    if (DEBUG) console.log(`[Search Debug] View check - ActiveTopic: "${currentActiveTopic}", ActiveSearch: "${currentActiveSearch}", cacheKey: "${cacheKey}"`);
                                     if (currentActiveTopic === cacheKey || currentActiveSearch === cacheKey) {
-                                        console.log(`[Search Debug] Match! Appending streamed video card directly.`);
+                                        if (DEBUG) console.log(`[Search Debug] Match! Appending streamed video card directly.`);
                                         appendStreamedDiscoverVideo(video, topicPhrase);
                                     }
                                 }
@@ -4489,7 +4563,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                 }
 
                 // Stream ended, update status
-                console.log("[Search Debug] Stream ended successfully.");
+                if (DEBUG) console.log("[Search Debug] Stream ended successfully.");
                 updateStatusText("Ready");
                 topicSearchLoading[cacheKey] = false;
                 
@@ -4498,29 +4572,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                     state.discoverMaxReached = true;
                 }
                 
-                const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
-                const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
-                if (currentActiveTopic === cacheKey || currentActiveSearch === cacheKey) {
-                    if (offset > 0) {
-                        // Infinite scroll batch — cards are already appended by appendStreamedDiscoverVideo().
-                        // Just remove the loading spinner and show end-of-results if needed.
-                        const grid = document.getElementById("video-grid");
-                        const loader = grid.querySelector(".infinite-scroll-loader");
-                        if (loader) loader.remove();
-                        
-                        if (state.discoverMaxReached) {
-                            const endMsg = document.createElement("div");
-                            endMsg.className = "end-of-results";
-                            endMsg.textContent = `Showing top ${DISCOVER_MAX_RESULTS} results. Refine your search for more.`;
-                            grid.appendChild(endMsg);
-                        }
-                        console.log("[Search Debug] Infinite scroll batch complete. Skipping full renderFeed().");
-                    } else {
-                        // Initial batch — do a full render to set up the grid layout
-                        console.log("[Search Debug] Initial batch complete. Performing final renderFeed().");
-                        renderFeed();
-                    }
-                }
+                finishDiscoverBatch(cacheKey, offset);
             } else {
                 console.warn(`[Search Debug] Scraper-service returned status ${resp.status}. Falling back to HTML scraping.`);
             }
@@ -4532,7 +4584,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
     // Fallback to raw HTML scraping if yt-dlp is off or failed
     if (!success) {
         try {
-            console.log(`[Search Debug] Executing HTML scraper fallback for: "${topicPhrase}"...`);
+            if (DEBUG) console.log(`[Search Debug] Executing HTML scraper fallback for: "${topicPhrase}"...`);
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 12000);
             const resp = await fetch(url, { signal: controller.signal });
@@ -4651,6 +4703,33 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
     }
 }
 
+// Post-batch cleanup for discover fetches. Cards are appended incrementally
+// by appendStreamedDiscoverVideo() as they arrive — a full renderFeed() here
+// would wipe and rebuild the whole grid (re-triggering every thumbnail), so
+// it only runs when nothing streamed in, to surface the empty state.
+function finishDiscoverBatch(cacheKey, offset) {
+    const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
+    const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
+    if (currentActiveTopic !== cacheKey && currentActiveSearch !== cacheKey) return;
+
+    const grid = document.getElementById("video-grid");
+    if (!grid) return;
+
+    const loader = grid.querySelector(".infinite-scroll-loader");
+    if (loader) loader.remove();
+
+    if (state.discoverMaxReached && !grid.querySelector(".end-of-results")) {
+        const endMsg = document.createElement("div");
+        endMsg.className = "end-of-results";
+        endMsg.textContent = `Showing top ${DISCOVER_MAX_RESULTS} results. Refine your search for more.`;
+        grid.appendChild(endMsg);
+    }
+
+    if (offset === 0 && !grid.querySelector(".video-card")) {
+        renderFeed();
+    }
+}
+
 function appendStreamedDiscoverVideo(video, topicPhrase) {
     const grid = document.getElementById("video-grid");
     const emptyState = document.getElementById("empty-state");
@@ -4678,42 +4757,18 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
         return; // Filtered out
     }
     
-    // Render as standard or short
+    // Render as standard or short — same full-featured cards renderFeed()
+    // produces, so the post-stream re-render is no longer needed
     const isShort = isShortVideo(enrichedVideo);
     if (isShort) {
         if (state.settings.muteShorts) return;
         const shortsShelf = document.getElementById("shorts-shelf");
         const shortsGrid = document.getElementById("shorts-grid");
         if (shortsShelf) shortsShelf.classList.remove("hidden");
-        
-        const card = document.createElement("div");
-        card.className = "video-card fade-in discover-card";
-        
-        const relativeTime = enrichedVideo.published ? getRelativeTime(enrichedVideo.published) : "";
-        
-        card.innerHTML = `
-            <div class="thumbnail-area">
-                <img class="thumbnail-img" src="https://i.ytimg.com/vi/${enrichedVideo.id}/hqdefault.jpg" alt="${escapeHTML(enrichedVideo.title)}" decoding="async">
-                <div class="thumbnail-play-overlay">
-                    <div class="play-icon-circle">▶</div>
-                </div>
-                <div class="search-badge">⚡ Short</div>
-            </div>
-            <div class="card-details">
-                <h3 class="video-title">${escapeHTML(enrichedVideo.title)}</h3>
-                <p class="video-channel">${escapeHTML(enrichedVideo.channelName)}</p>
-                <p class="video-time">${relativeTime}</p>
-            </div>
-        `;
-        
-        const openAction = () => playVideo(enrichedVideo);
-        card.querySelector(".thumbnail-area").addEventListener("click", openAction);
-        card.querySelector(".video-title").addEventListener("click", openAction);
-        
+
         // Show up to 30 streaming short results
-        const discoverCardsCount = shortsGrid.querySelectorAll(".discover-card").length;
-        if (discoverCardsCount < DISCOVER_BATCH_SIZE) {
-            shortsGrid.appendChild(card);
+        if (shortsGrid.querySelectorAll(".discover-card").length < DISCOVER_BATCH_SIZE) {
+            renderCard(enrichedVideo, shortsGrid);
         }
     } else {
         // Ensure discovery divider exists
@@ -4731,39 +4786,8 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
             `;
             grid.appendChild(divider);
         }
-        
-        const card = document.createElement("div");
-        card.className = "video-card fade-in discover-card";
-        
-        const relativeTime = enrichedVideo.published ? getRelativeTime(enrichedVideo.published) : "";
-        let metaLine = enrichedVideo.channelName;
-        if (enrichedVideo.viewCount && enrichedVideo.viewCount > 0) {
-            metaLine += ` • ${formatViews(enrichedVideo.viewCount)}`;
-        }
-        
-        card.innerHTML = `
-            <div class="thumbnail-area">
-                <img class="thumbnail-img" src="https://i.ytimg.com/vi/${enrichedVideo.id}/hqdefault.jpg" alt="${escapeHTML(enrichedVideo.title)}" decoding="async">
-                <div class="thumbnail-play-overlay">
-                    <div class="play-icon-circle">▶</div>
-                </div>
-                <div class="search-badge">Search</div>
-            </div>
-            <div class="card-details">
-                <h3 class="video-title">${escapeHTML(enrichedVideo.title)}</h3>
-                <p class="video-channel">${escapeHTML(metaLine)}</p>
-                <p class="video-time">${relativeTime}${relativeTime && enrichedVideo.duration ? ' • ' : ''}${enrichedVideo.duration ? formatDuration(enrichedVideo.duration) : ""}</p>
-            </div>
-        `;
-        
-        const openAction = () => {
-            playVideo(enrichedVideo);
-        };
-        card.querySelector(".thumbnail-area").addEventListener("click", openAction);
-        card.querySelector(".video-title").addEventListener("click", openAction);
-        
-        // Append streamed card to the grid
-        grid.appendChild(card);
+
+        renderCard(enrichedVideo, grid);
     }
 }
 
