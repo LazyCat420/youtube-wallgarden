@@ -56,8 +56,11 @@ chrome.storage.local.get(null, (data) => {
     Object.assign(settings, data);
     if (data.blocklist) blocklist = data.blocklist;
     applyBlockingCSS();
+    syncCollapseClasses();
+    injectCollapseBars();
     startObserver();
     startMenuInterceptor();
+    startCollapseWatcher();
 });
 
 // Re-apply if settings change
@@ -71,7 +74,18 @@ chrome.storage.onChanged.addListener((changes, area) => {
             }
         }
         applyBlockingCSS();
+        syncCollapseClasses();
+        injectCollapseBars();
     }
+});
+
+// YouTube is a SPA: the watch page's chat and sidebar are torn down and rebuilt
+// on every navigation, taking our collapse bars with them. Re-inject on each
+// navigation, and once more after the panels settle in.
+document.addEventListener('yt-navigate-finish', () => {
+    syncCollapseClasses();
+    injectCollapseBars();
+    setTimeout(injectCollapseBars, 800);
 });
 
 // ============================================================
@@ -793,15 +807,12 @@ const COLLAPSIBLE_PANELS = [
         // #chat-container wraps the frame on watch pages; ytd-live-chat-frame
         // is the frame itself, which is what survives on some layouts.
         hostSelector: '#chat-container, ytd-live-chat-frame#chat',
-        // Everything inside the panel except the bar we inject.
-        bodySelector: 'ytd-live-chat-frame, iframe#chatframe, #chat-messages',
     },
     {
         key: 'collapseRelated',
         cls: 'wg-collapsed-related',
         label: 'Suggested videos',
         hostSelector: '#related, ytd-watch-next-secondary-results-renderer',
-        bodySelector: 'ytd-watch-next-secondary-results-renderer, #items, #contents',
     },
 ];
 
@@ -848,9 +859,14 @@ function applyCollapsibleCSS() {
         }
         /* Collapsed: fold the panel body away but leave our bar (and the host
            element) in the DOM, so YouTube keeps updating it and one click
-           brings it straight back. */
+           brings it straight back.
+           Every selector in the list needs its own html.<cls> prefix — a comma
+           list does NOT inherit it, and an unprefixed selector here would hide
+           the panel permanently whether it was collapsed or not. */
         ${COLLAPSIBLE_PANELS.map(p => `
-        html.${p.cls} ${p.hostSelector.split(',').map(s => `${s.trim()} > *:not(.wg-collapse-bar)`).join(', ')} {
+        ${p.hostSelector.split(',')
+            .map(s => `html.${p.cls} ${s.trim()} > *:not(.wg-collapse-bar)`)
+            .join(',\n        ')} {
             display: none !important;
         }
         html.${p.cls} .wg-collapse-bar[data-wg-panel="${p.key}"] .wg-chevron {
@@ -906,6 +922,28 @@ function syncCollapseClasses() {
     COLLAPSIBLE_PANELS.forEach(p => {
         document.documentElement.classList.toggle(p.cls, !!settings[p.key]);
     });
+}
+
+/**
+ * Live chat in particular mounts well after the rest of the watch page, and
+ * YouTube re-renders the sidebar on its own schedule. Watch for a panel that
+ * has lost its bar and put it back — debounced, and cheap enough to sit
+ * alongside the heuristics observer.
+ */
+function startCollapseWatcher() {
+    let pending = null;
+    const observer = new MutationObserver(() => {
+        if (pending) return;
+        pending = setTimeout(() => {
+            pending = null;
+            const missing = COLLAPSIBLE_PANELS.some(p => {
+                const host = document.querySelector(p.hostSelector);
+                return host && !host.querySelector(`:scope > .wg-collapse-bar[data-wg-panel="${p.key}"]`);
+            });
+            if (missing) injectCollapseBars();
+        }, 400);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
 }
 
 // ============================================================

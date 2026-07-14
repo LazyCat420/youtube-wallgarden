@@ -1651,6 +1651,211 @@ body {
     gap: 1rem;
 }
 
+/* ── "Add to playlist" rows: thumbnail + count, not a bare name ─────── */
+.playlist-row {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    width: 100%;
+    padding: 0.45rem 0.6rem;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    color: var(--text-primary);
+    font-family: var(--font-stack);
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.playlist-row:hover {
+    background: rgba(255, 255, 255, 0.09);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.playlist-row-thumb {
+    flex-shrink: 0;
+    width: 54px;
+    height: 32px;
+    border-radius: 5px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.playlist-row-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.playlist-row-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+
+.playlist-row-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.playlist-row-count { font-size: 0.7rem; color: var(--text-muted); }
+
+.playlist-row-add {
+    flex-shrink: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    padding: 0 0.3rem;
+}
+
+.playlist-row:hover .playlist-row-add { color: var(--text-primary); }
+
+/* ── Playlist cards: a stack of thumbnails, not a text row ─────────────
+   The two layers behind the cover are the next videos in the playlist, offset
+   and scaled down so the card reads as a physical stack you can flip through.
+   Hovering fans them out. */
+.playlist-card {
+    position: relative;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.playlist-stack {
+    position: relative;
+    /* Room for the offset layers to peek out at the top/right. */
+    padding: 10px 10px 0 0;
+}
+
+.playlist-stack-layer,
+.playlist-cover {
+    border-radius: 10px;
+    aspect-ratio: 16 / 9;
+    background-size: cover;
+    background-position: center;
+}
+
+.playlist-stack-layer {
+    position: absolute;
+    /* Anchor exactly on top of the cover, so the translate below is the ONLY
+       offset. Anchoring to the padding box instead would double it up. */
+    top: 10px;
+    left: 0;
+    width: calc(100% - 10px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    filter: brightness(0.5);
+    transition: transform 0.22s ease, filter 0.22s ease;
+}
+
+/* layer-1 sits just behind the cover, layer-2 behind that. */
+.playlist-stack-layer.layer-1 { transform: translate(5px, -5px) scale(0.985); }
+.playlist-stack-layer.layer-2 { transform: translate(10px, -10px) scale(0.97); }
+
+.playlist-card:hover .playlist-stack-layer.layer-1 { transform: translate(8px, -8px) scale(0.985); filter: brightness(0.62); }
+.playlist-card:hover .playlist-stack-layer.layer-2 { transform: translate(16px, -16px) scale(0.97); filter: brightness(0.6); }
+
+.playlist-cover {
+    position: relative;
+    overflow: hidden;
+    width: calc(100% - 10px);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    transition: transform 0.22s ease, border-color 0.22s ease;
+}
+
+.playlist-card:hover .playlist-cover {
+    transform: translateY(-2px);
+    border-color: rgba(255, 255, 255, 0.25);
+}
+
+.playlist-cover-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.playlist-cover-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+
+/* The "N videos" tab in the corner, echoing YouTube's own playlist chip. */
+.playlist-count {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0.3rem 0.5rem;
+    background: rgba(0, 0, 0, 0.82);
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 600;
+    border-top-left-radius: 8px;
+}
+
+.playlist-count svg { width: 14px; height: 14px; fill: currentColor; }
+
+.playlist-play {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.45);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.playlist-card:hover .playlist-play { opacity: 1; }
+
+.playlist-play svg {
+    width: 44px;
+    height: 44px;
+    fill: #fff;
+    filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.6));
+}
+
+.playlist-info { padding: 0 0.1rem; }
+
+.playlist-name {
+    font-family: var(--font-stack);
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.playlist-meta {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 0.2rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.playlist-yt-icon { width: 15px; height: 15px; fill: #ff0033; flex-shrink: 0; }
+
+/* Delete stays out of the way until you actually want it. */
+.playlist-card .btn-delete-playlist {
+    position: absolute;
+    top: 14px;
+    left: 8px;
+    opacity: 0;
+    transition: opacity 0.18s ease;
+    z-index: 2;
+}
+
+.playlist-card:hover .btn-delete-playlist,
+.playlist-card:focus-within .btn-delete-playlist { opacity: 1; }
+
 .channel-card {
     background: var(--card-bg);
     border: 1px solid var(--card-border);

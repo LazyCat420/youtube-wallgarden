@@ -11,7 +11,9 @@ const SETTING_KEYS = [
     // Global
     'blockPremiumUpsell', 'blockNotifPopup', 'blockMusicUpsell',
     // Heuristics
-    'blockAllCaps', 'blockPunctuation'
+    'blockAllCaps', 'blockPunctuation',
+    // Collapsible panels (fold away, don't delete)
+    'collapseChat', 'collapseRelated'
 ];
 
 const TEXT_KEYS = [];
