@@ -6849,16 +6849,51 @@ function renderPlaylistsView() {
     
     playlists.forEach(pl => {
         const card = document.createElement("div");
-        card.className = "channel-card fade-in";
-        card.style.cursor = "pointer";
+        card.className = "playlist-card fade-in";
+
+        // Render the playlist as a stack of thumbnails, so you can see what is
+        // inside it without opening it. The two cards peeking out behind the
+        // cover are the next videos in the list — they give the stack depth and
+        // hint at how much is in there.
+        const videos = (pl.videos || []).filter(Boolean);
+        const cover = videos[0];
+        const behind = videos.slice(1, 3);
+
+        const layers = behind
+            .map((v, i) => `<div class="playlist-stack-layer layer-${i + 1}"
+                    style="background-image:url('https://i.ytimg.com/vi/${v.id}/hqdefault.jpg')"></div>`)
+            .reverse()
+            .join("");
+
+        const coverInner = cover
+            ? `<img class="playlist-cover-img" src="https://i.ytimg.com/vi/${cover.id}/hqdefault.jpg"
+                    alt="${escapeHTML(cover.title || pl.name)}" loading="lazy" decoding="async">`
+            : `<div class="playlist-cover-empty">Empty</div>`;
+
         card.innerHTML = `
-            <div class="channel-card-name">${escapeHTML(pl.name)}</div>
-            <div class="channel-card-meta">${pl.videos.length} videos</div>
-            <div class="channel-card-actions">
-                <button class="btn btn-danger btn-sm btn-delete-playlist">Delete</button>
+            <div class="playlist-stack">
+                ${layers}
+                <div class="playlist-cover">
+                    ${coverInner}
+                    <div class="playlist-count">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h11v2H4V6zm0 5h11v2H4v-2zm0 5h7v2H4v-2zm13-4 5 3-5 3v-6z"/></svg>
+                        <span>${videos.length}</span>
+                    </div>
+                    <div class="playlist-play">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+                    </div>
+                </div>
             </div>
+            <div class="playlist-info">
+                <div class="playlist-name">${escapeHTML(pl.name)}</div>
+                <div class="playlist-meta">
+                    <svg class="playlist-yt-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M23 12s0-3.9-.5-5.8c-.3-1-1.1-1.8-2.1-2.1C18.5 3.6 12 3.6 12 3.6s-6.5 0-8.4.5c-1 .3-1.8 1.1-2.1 2.1C1 8.1 1 12 1 12s0 3.9.5 5.8c.3 1 1.1 1.8 2.1 2.1 1.9.5 8.4.5 8.4.5s6.5 0 8.4-.5c1-.3 1.8-1.1 2.1-2.1.5-1.9.5-5.8.5-5.8zM9.9 15.5v-7l6.1 3.5-6.1 3.5z"/></svg>
+                    <span>${videos.length} ${videos.length === 1 ? "video" : "videos"}</span>
+                </div>
+            </div>
+            <button class="btn btn-danger btn-sm btn-delete-playlist">Delete</button>
         `;
-        
+
         card.addEventListener("click", (e) => {
             if (e.target.classList.contains("btn-delete-playlist")) {
                 e.stopPropagation();
@@ -6934,9 +6969,22 @@ function showPlaylistModal(videoOrVideos) {
         } else {
             playlists.forEach(pl => {
                 const btn = document.createElement("button");
-                btn.className = "btn";
-                btn.style.textAlign = "left";
-                btn.textContent = pl.name;
+                // Show the playlist's cover and size here too — picking a
+                // destination out of a column of identical name-only buttons
+                // meant remembering what was in each one.
+                btn.className = "playlist-row";
+                const first = (pl.videos || []).filter(Boolean)[0];
+                const count = (pl.videos || []).length;
+                btn.innerHTML = `
+                    <span class="playlist-row-thumb">${first
+                        ? `<img src="https://i.ytimg.com/vi/${first.id}/default.jpg" alt="" loading="lazy" decoding="async">`
+                        : ""}</span>
+                    <span class="playlist-row-text">
+                        <span class="playlist-row-name">${escapeHTML(pl.name)}</span>
+                        <span class="playlist-row-count">${count} ${count === 1 ? "video" : "videos"}</span>
+                    </span>
+                    <span class="playlist-row-add">+</span>
+                `;
                 btn.onclick = () => {
                     if (videos.length > 0) {
                         let addedCount = 0;
