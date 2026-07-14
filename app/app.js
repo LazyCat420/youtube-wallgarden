@@ -671,6 +671,8 @@ function setupEventListeners() {
             if (searchInput) searchInput.value = "";
             const clearBtn = document.getElementById("btn-clear-search");
             if (clearBtn) clearBtn.classList.add("hidden");
+            const inputFilterLiked = document.getElementById("input-filter-liked");
+            if (inputFilterLiked) inputFilterLiked.value = "";
 
             state.currentView = btn.dataset.view;
             state.discoverBatchIndex = 0;
@@ -1179,6 +1181,57 @@ function setupEventListeners() {
             mainHeader.style.backdropFilter = `blur(${blurAmt}px)`;
             mainHeader.style.webkitBackdropFilter = `blur(${blurAmt}px)`;
             mainHeader.style.borderColor = `rgba(59, 130, 246, ${ratio * 0.12})`;
+        });
+    }
+
+    // Liked Videos controls
+    const inputFilterLiked = document.getElementById("input-filter-liked");
+    if (inputFilterLiked) {
+        inputFilterLiked.addEventListener("input", (e) => {
+            const query = e.target.value.trim().toLowerCase();
+            const cards = document.querySelectorAll("#liked-videos-grid .video-card");
+            cards.forEach(card => {
+                const title = (card.querySelector(".video-title")?.textContent || "").toLowerCase();
+                const channel = (card.querySelector(".channel-link")?.textContent || "").toLowerCase();
+                if (title.includes(query) || channel.includes(query)) {
+                    card.classList.remove("hidden");
+                } else {
+                    card.classList.add("hidden");
+                }
+            });
+        });
+    }
+
+    const btnClearLiked = document.getElementById("btn-clear-liked-videos");
+    if (btnClearLiked) {
+        btnClearLiked.addEventListener("click", () => {
+            if (!state.likedVideos || state.likedVideos.length === 0) {
+                showToast("No liked videos to clear", "info");
+                return;
+            }
+            if (confirm("Are you sure you want to clear all liked videos? This will also revert their weights in the ontology graph.")) {
+                // Revert ontology graph weights
+                if (state.ontologyGraph) {
+                    state.likedVideos.forEach(video => {
+                        graphProcessRating(state.ontologyGraph, {
+                            ...video,
+                            matchedTopics: video._matchedTopics || video.matchedTopics || []
+                        }, -1);
+                    });
+                    saveOntologyGraph();
+                }
+                
+                // Clear state
+                state.likedVideos.forEach(v => {
+                    delete state.videoRatings[v.id];
+                });
+                state.likedVideos = [];
+                saveLikedVideos();
+                saveVideoRatings();
+                
+                showToast("🗑️ Cleared all liked videos", "success");
+                renderLikedVideosView();
+            }
         });
     }
 }
@@ -6679,6 +6732,12 @@ function showPlaylistModal(videoOrVideos) {
 }
 
 function renderLikedVideosView() {
+    const introEl = document.getElementById("liked-videos-intro");
+    const likedCount = state.likedVideos ? state.likedVideos.length : 0;
+    if (introEl) {
+        introEl.textContent = `Videos you have liked (${likedCount})`;
+    }
+
     const grid = document.getElementById("liked-videos-grid");
     if (!grid) return;
     grid.innerHTML = "";
@@ -6693,29 +6752,68 @@ function renderLikedVideosView() {
         if (!video) return;
         const vCard = createVideoCard(video);
         
-        // Add a small unlike button overlay
+        // Add a small unlike button overlay inside thumbnail actions
         const unlikeBtn = document.createElement("button");
-        unlikeBtn.className = "btn btn-danger btn-sm";
-        unlikeBtn.textContent = "✕";
-        unlikeBtn.style.position = "absolute";
-        unlikeBtn.style.top = "5px";
-        unlikeBtn.style.right = "5px";
-        unlikeBtn.style.zIndex = "10";
-        unlikeBtn.style.padding = "2px 6px";
+        unlikeBtn.className = "thumbnail-action-btn unlike-card-btn";
         unlikeBtn.title = "Remove from Liked Videos";
+        unlikeBtn.innerHTML = `
+            <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 14px; height: 14px;">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+        `;
         unlikeBtn.onclick = (ev) => {
             ev.stopPropagation();
-            state.likedVideos = state.likedVideos.filter(v => v.id !== video.id);
-            delete state.videoRatings[video.id];
-            saveLikedVideos();
-            saveVideoRatings();
-            renderLikedVideosView(); // re-render
+            
+            // Add card fade-out class for animation
+            vCard.classList.add("card-fade-out");
+            
+            vCard.addEventListener("animationend", () => {
+                // Revert ontology graph impact
+                if (state.ontologyGraph) {
+                    graphProcessRating(state.ontologyGraph, {
+                        ...video,
+                        matchedTopics: video._matchedTopics || video.matchedTopics || []
+                    }, -1);
+                    saveOntologyGraph();
+                }
+
+                state.likedVideos = state.likedVideos.filter(v => v.id !== video.id);
+                delete state.videoRatings[video.id];
+                saveLikedVideos();
+                saveVideoRatings();
+                renderLikedVideosView(); // re-render
+            }, { once: true });
         };
-        vCard.style.position = "relative";
-        vCard.appendChild(unlikeBtn);
+        
+        const actionsContainer = vCard.querySelector(".thumbnail-actions");
+        if (actionsContainer) {
+            actionsContainer.appendChild(unlikeBtn);
+        } else {
+            unlikeBtn.style.position = "absolute";
+            unlikeBtn.style.top = "5px";
+            unlikeBtn.style.right = "5px";
+            unlikeBtn.style.zIndex = "10";
+            vCard.appendChild(unlikeBtn);
+        }
         
         fragment.appendChild(vCard);
     });
+
+    // Re-apply filter if search query exists
+    const inputFilterLiked = document.getElementById("input-filter-liked");
+    if (inputFilterLiked && inputFilterLiked.value.trim()) {
+        const query = inputFilterLiked.value.trim().toLowerCase();
+        const cards = fragment.querySelectorAll(".video-card");
+        cards.forEach(card => {
+            const title = (card.querySelector(".video-title")?.textContent || "").toLowerCase();
+            const channel = (card.querySelector(".channel-link")?.textContent || "").toLowerCase();
+            if (!title.includes(query) && !channel.includes(query)) {
+                card.classList.add("hidden");
+            }
+        });
+    }
+    
     grid.appendChild(fragment);
 }
 
@@ -6855,9 +6953,11 @@ window.addEventListener("message", (event) => {
     if (payload.action === 'LIKE') {
         state.videoRatings[payload.videoId] = 5;
         
+        let targetVideo = null;
         // Find full video metadata and sync to state.likedVideos
         const video = findVideoById(payload.videoId);
         if (video) {
+            targetVideo = video;
             if (!state.likedVideos.some(v => v.id === video.id)) {
                 state.likedVideos.push(video);
             }
@@ -6874,9 +6974,18 @@ window.addEventListener("message", (event) => {
                 duration: payload.duration || 0,
                 viewCount: payload.viewCount || 0
             };
+            targetVideo = fallbackVideo;
             if (!state.likedVideos.some(v => v.id === fallbackVideo.id)) {
                 state.likedVideos.push(fallbackVideo);
             }
+        }
+
+        if (state.ontologyGraph && targetVideo) {
+            graphProcessRating(state.ontologyGraph, {
+                ...targetVideo,
+                matchedTopics: targetVideo.matchedTopics || []
+            }, 1);
+            saveOntologyGraph();
         }
         
         saveVideoRatings();
@@ -6893,9 +7002,35 @@ window.addEventListener("message", (event) => {
             if (likeBtn) likeBtn.classList.add("active");
             if (dislikeBtn) dislikeBtn.classList.remove("active");
         }
+    } else if (payload.action === 'UNLIKE') {
+        delete state.videoRatings[payload.videoId];
+        state.likedVideos = state.likedVideos.filter(v => v.id !== payload.videoId);
+        
+        if (state.ontologyGraph) {
+            graphProcessRating(state.ontologyGraph, { id: payload.videoId }, -1); // Reverse like
+            saveOntologyGraph();
+        }
+        
+        saveVideoRatings();
+        saveLikedVideos();
+        renderFeed();
+        if (state.currentView === "liked-videos") {
+            renderLikedVideosView();
+        }
+        
+        showToast("Removed Like synced from YouTube", "info");
+        if (state.currentlyPlayingId === payload.videoId) {
+            const likeBtn = document.querySelector(".sidebar-btn-like");
+            if (likeBtn) likeBtn.classList.remove("active");
+        }
     } else if (payload.action === 'DISLIKE') {
         state.videoRatings[payload.videoId] = -5;
         state.likedVideos = state.likedVideos.filter(v => v.id !== payload.videoId);
+
+        if (state.ontologyGraph) {
+            graphProcessRating(state.ontologyGraph, { id: payload.videoId }, -1);
+            saveOntologyGraph();
+        }
         
         saveVideoRatings();
         saveLikedVideos();
@@ -6910,6 +7045,25 @@ window.addEventListener("message", (event) => {
             const dislikeBtn = document.querySelector(".sidebar-btn-dislike");
             if (likeBtn) likeBtn.classList.remove("active");
             if (dislikeBtn) dislikeBtn.classList.add("active");
+        }
+    } else if (payload.action === 'UNDISLIKE') {
+        delete state.videoRatings[payload.videoId];
+        
+        if (state.ontologyGraph) {
+            graphProcessRating(state.ontologyGraph, { id: payload.videoId }, 1); // Reverse dislike
+            saveOntologyGraph();
+        }
+        
+        saveVideoRatings();
+        renderFeed();
+        if (state.currentView === "liked-videos") {
+            renderLikedVideosView();
+        }
+        
+        showToast("Removed Dislike synced from YouTube", "info");
+        if (state.currentlyPlayingId === payload.videoId) {
+            const dislikeBtn = document.querySelector(".sidebar-btn-dislike");
+            if (dislikeBtn) dislikeBtn.classList.remove("active");
         }
     } else if (payload.action === 'WATCHED') {
         if (!state.watchedHistory) state.watchedHistory = {};

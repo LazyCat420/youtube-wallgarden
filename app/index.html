@@ -353,8 +353,17 @@
 
                 <!-- Liked Videos View -->
                 <div id="liked-videos-container" class="liked-videos-container hidden">
-                    <div class="discover-header-row" style="margin-bottom: 1rem;">
-                        <p class="discover-intro">Videos you have liked.</p>
+                    <div class="discover-header-row" style="align-items: center; margin-bottom: 1rem;">
+                        <div>
+                            <p class="discover-intro" id="liked-videos-intro">Videos you have liked.</p>
+                        </div>
+                        <div style="display: flex; gap: 0.75rem; align-items: center;">
+                            <input type="text" id="input-filter-liked" placeholder="Search liked videos..." style="padding: 0.45rem 0.75rem; font-size: 0.85rem; border-radius: 6px; border: 1px solid var(--card-border); background: rgba(0,0,0,0.2); color: var(--text-primary); width: 220px; outline: none; transition: border-color 0.2s;">
+                            <button id="btn-clear-liked-videos" class="btn btn-danger btn-sm" style="display: flex; align-items: center; gap: 4px; padding: 0.45rem 0.75rem;">
+                                <svg class="icon-svg" style="width: 14px; height: 14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                                Clear All
+                            </button>
+                        </div>
                     </div>
                     <div id="liked-videos-grid" class="video-grid">
                         <!-- Liked video cards injected here dynamically -->
