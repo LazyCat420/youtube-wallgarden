@@ -1071,12 +1071,12 @@ function startSyncObservers() {
 
         const segmentedContainer = e.target.closest('ytd-watch-metadata segmented-like-dislike-button-view-model');
         if (segmentedContainer) {
-            // If we clicked inside the segmented container, determine if it's the first button (like) or second (dislike)
-            const buttons = Array.from(segmentedContainer.querySelectorAll('button, yt-button-view-model'));
-            const clickedBtn = e.target.closest('button, yt-button-view-model');
-            if (clickedBtn && buttons.length >= 2) {
-                if (clickedBtn === buttons[0]) hasLike = true;
-                if (clickedBtn === buttons[1]) hasDislike = true;
+            // Find the two major button wrappers (yt-button-view-model elements)
+            const btnViewModels = Array.from(segmentedContainer.querySelectorAll('yt-button-view-model'));
+            if (btnViewModels.length >= 2) {
+                const targetVM = e.target.closest('yt-button-view-model');
+                if (targetVM === btnViewModels[0]) hasLike = true;
+                else if (targetVM === btnViewModels[1]) hasDislike = true;
             }
         }
 
@@ -1130,29 +1130,27 @@ function startSyncObservers() {
         }
 
         if (hasLike) {
-            const btn = e.target.closest('button, yt-button-view-model');
+            const buttonEl = e.target.closest('button');
             setTimeout(() => {
-                const isSelected = btn && (
-                    btn.getAttribute('aria-pressed') === 'true' || 
-                    btn.classList.contains('yt-spec-button-shape-next--selected') ||
-                    !!btn.querySelector('button[aria-pressed="true"]')
+                const isSelected = buttonEl && (
+                    buttonEl.getAttribute('aria-pressed') === 'true' || 
+                    buttonEl.classList.contains('yt-spec-button-shape-next--selected')
                 );
                 console.log("[Wallgarden Sync] LIKE clicked, final selected state:", !!isSelected);
                 const metadata = scrapeVideoMetadata();
                 sendSyncEvent(isSelected ? 'LIKE' : 'UNLIKE', metadata);
-            }, 50);
+            }, 100);
         } else if (hasDislike) {
-            const btn = e.target.closest('button, yt-button-view-model');
+            const buttonEl = e.target.closest('button');
             setTimeout(() => {
-                const isSelected = btn && (
-                    btn.getAttribute('aria-pressed') === 'true' || 
-                    btn.classList.contains('yt-spec-button-shape-next--selected') ||
-                    !!btn.querySelector('button[aria-pressed="true"]')
+                const isSelected = buttonEl && (
+                    buttonEl.getAttribute('aria-pressed') === 'true' || 
+                    buttonEl.classList.contains('yt-spec-button-shape-next--selected')
                 );
                 console.log("[Wallgarden Sync] DISLIKE clicked, final selected state:", !!isSelected);
                 const metadata = scrapeVideoMetadata();
                 sendSyncEvent(isSelected ? 'DISLIKE' : 'UNDISLIKE', metadata);
-            }, 50);
+            }, 100);
         } else if (hasSub) {
             console.log("[Wallgarden Sync] SUBSCRIBE clicked");
             sendSyncEvent('SUBSCRIBE');
