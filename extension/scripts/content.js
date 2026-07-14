@@ -119,15 +119,59 @@ function startMenuInterceptor() {
                                 handleRejection(text, lastMenuTarget);
                             });
                         }
-                    } else if (text.includes('save to playlist') || text.includes('watch later') || text.includes('save to queue')) {
+                    } else if (text.includes('watch later')) {
+                        // Direct "Save to Watch later" menu item (cards + watch page)
                         if (!item.dataset.wallgardenSyncHooked) {
                             item.dataset.wallgardenSyncHooked = 'true';
                             item.addEventListener('click', () => {
-                                console.log("[Wallgarden Sync] PLAYLIST_SAVE clicked via menu item");
-                                sendSyncEvent('PLAYLIST_SAVE');
+                                const ctx = getActionContext();
+                                console.log("[Wallgarden Sync] WATCHLIST_ADD via menu item:", ctx);
+                                if (ctx) sendSyncEvent('WATCHLIST_ADD', ctx);
+                            });
+                        }
+                    } else if (text.includes('save to playlist') || text.includes('save to queue')) {
+                        // Opens the "Save video to..." dialog — capture which video it's for.
+                        // The actual add/remove is detected on the dialog checkboxes below.
+                        if (!item.dataset.wallgardenSyncHooked) {
+                            item.dataset.wallgardenSyncHooked = 'true';
+                            item.addEventListener('click', () => {
+                                pendingSaveContext = getActionContext();
+                                console.log("[Wallgarden Sync] Save dialog opening for:", pendingSaveContext);
                             });
                         }
                     }
+                });
+
+                // "Save video to..." dialog: each playlist row is a checkbox option.
+                // Detect toggles on "Watch later" (and other playlists) with accurate state.
+                const saveOptions = node.querySelectorAll
+                    ? node.querySelectorAll('ytd-playlist-add-to-option-renderer')
+                    : [];
+                saveOptions.forEach(opt => {
+                    if (opt.dataset.wallgardenPlHooked) return;
+                    opt.dataset.wallgardenPlHooked = 'true';
+                    opt.addEventListener('click', () => {
+                        setTimeout(() => {
+                            const checkbox = opt.querySelector('tp-yt-paper-checkbox, #checkbox');
+                            const checked = checkbox && (
+                                checkbox.hasAttribute('checked') ||
+                                checkbox.getAttribute('aria-checked') === 'true'
+                            );
+                            const label = (opt.querySelector('#label')?.textContent || '').trim();
+                            const ctx = pendingSaveContext || getActionContext();
+                            if (!ctx) {
+                                console.warn("[Wallgarden Sync] Save dialog toggle but no video context");
+                                return;
+                            }
+                            if (label.toLowerCase() === 'watch later') {
+                                console.log(`[Wallgarden Sync] Watch Later ${checked ? 'ADD' : 'REMOVE'}:`, ctx);
+                                sendSyncEvent(checked ? 'WATCHLIST_ADD' : 'WATCHLIST_REMOVE', ctx);
+                            } else if (checked) {
+                                console.log(`[Wallgarden Sync] PLAYLIST_SAVE to "${label}":`, ctx);
+                                sendSyncEvent('PLAYLIST_SAVE', { ...ctx, playlistName: label });
+                            }
+                        }, 150);
+                    });
                 });
             });
         });
@@ -924,13 +968,87 @@ function hideVideo(element, reason) {
 
 function getVideoIdFromUrl() {
     const urlParams = new URLSearchParams(window.location.search);
-    return urlParams.get('v');
+    const v = urlParams.get('v');
+    if (v) return v;
+    // Shorts pages: /shorts/<videoId>
+    const shortsMatch = window.location.pathname.match(/\/shorts\/([\w-]{5,})/);
+    return shortsMatch ? shortsMatch[1] : null;
+}
+
+// Context of the video whose "Save to..." dialog is currently open
+let pendingSaveContext = null;
+
+/**
+ * Extract videoId + metadata from a feed/search/sidebar card element,
+ * so sync events work anywhere on YouTube — not just the watch page.
+ */
+function scrapeCardMetadata(cardEl) {
+    if (!cardEl || !cardEl.querySelector) return null;
+
+    let videoId = '';
+    const watchLink = cardEl.querySelector('a[href*="watch?v="]');
+    if (watchLink) {
+        const m = (watchLink.getAttribute('href') || '').match(/[?&]v=([\w-]{5,})/);
+        if (m) videoId = m[1];
+    }
+    if (!videoId) {
+        const shortsLink = cardEl.querySelector('a[href*="/shorts/"]');
+        if (shortsLink) {
+            const m = (shortsLink.getAttribute('href') || '').match(/\/shorts\/([\w-]{5,})/);
+            if (m) videoId = m[1];
+        }
+    }
+    if (!videoId) return null;
+
+    const titleEl = cardEl.querySelector('#video-title, yt-formatted-string#video-title, h3 a, a[title]');
+    const title = titleEl
+        ? (titleEl.getAttribute('title') || titleEl.textContent || '').trim()
+        : '';
+
+    let channelName = '';
+    let channelId = '';
+    const channelEl = cardEl.querySelector(
+        '#channel-name .yt-simple-endpoint, #channel-name a, ' +
+        'ytd-channel-name a, .yt-content-metadata-view-model__metadata-text, a[href^="/@"]'
+    );
+    if (channelEl) {
+        channelName = channelEl.textContent.trim();
+        const href = channelEl.getAttribute('href') || '';
+        if (href.startsWith('/channel/')) {
+            channelId = href.replace('/channel/', '');
+        } else if (href.startsWith('/@')) {
+            channelId = href.replace('/', '');
+        }
+    }
+
+    return { videoId, title, channelName, channelId };
+}
+
+/**
+ * Resolve the video an action applies to: the card whose ⋮ menu is open,
+ * falling back to the currently playing watch page.
+ */
+function getActionContext(preferWatchPage = false) {
+    const watchPageContext = () => {
+        const videoId = getVideoIdFromUrl();
+        return videoId ? { videoId, ...scrapeVideoMetadata() } : null;
+    };
+
+    if (preferWatchPage) {
+        const wp = watchPageContext();
+        if (wp) return wp;
+    }
+    if (lastMenuTarget && lastMenuTarget.isConnected) {
+        const meta = scrapeCardMetadata(lastMenuTarget);
+        if (meta) return meta;
+    }
+    return watchPageContext();
 }
 
 function sendSyncEvent(action, data = {}) {
-    const videoId = getVideoIdFromUrl();
+    const videoId = data.videoId || getVideoIdFromUrl();
     if (!videoId) {
-        console.warn("[Wallgarden Sync] sendSyncEvent failed: videoId not found in URL");
+        console.warn("[Wallgarden Sync] sendSyncEvent failed: no videoId (not on a watch page and no card context)");
         return;
     }
     console.log(`[Wallgarden Sync] sendSyncEvent: Sending ${action} for ${videoId}`);
@@ -1153,10 +1271,14 @@ function startSyncObservers() {
             }, 100);
         } else if (hasSub) {
             console.log("[Wallgarden Sync] SUBSCRIBE clicked");
-            sendSyncEvent('SUBSCRIBE');
+            sendSyncEvent('SUBSCRIBE', scrapeVideoMetadata());
         } else if (hasPlaylist) {
-            console.log("[Wallgarden Sync] PLAYLIST_SAVE clicked");
-            sendSyncEvent('PLAYLIST_SAVE');
+            // Opens the "Save video to..." dialog — capture context; the
+            // dialog checkbox observer sends the accurate WATCHLIST_ADD/
+            // WATCHLIST_REMOVE/PLAYLIST_SAVE event once a playlist is toggled.
+            const fromWatchPage = !!e.target.closest('ytd-watch-metadata');
+            pendingSaveContext = getActionContext(fromWatchPage);
+            console.log("[Wallgarden Sync] Save dialog opening for:", pendingSaveContext);
         }
     }, false);
 }

@@ -88,3 +88,27 @@ Added `processShelves()` function as a text-based fallback for shelf elements th
 2. **Shorts ⋮ menu block**: Shorts use a different popup (`yt-sheet-view-model` → `yt-list-view-model`) instead of `tp-yt-paper-listbox`. New `injectShortsBlockItem()` function creates a styled block item for the sheet popup. `tryInjectBlockItem()` now has dual-path detection (regular listbox vs Shorts sheet popup).
 
 3. **Smooth 🚫 hover animation**: Block icon uses CSS `transform: scale(0.7→1.0)` + `opacity: 0→1` with 0.25s ease transition for a polished pop-in effect on video card hover.
+
+---
+
+### V8 (2026-07-13): Watchlist Sync + Smarter/Faster Discovery
+
+**Extension `content.js`** — likes AND watchlist now sync to the Wallgarden app:
+
+1. **Watch Later / playlist saves are now captured accurately**: instead of firing a blind `PLAYLIST_SAVE` the moment the "Save" menu item is clicked, the extension hooks the actual "Save video to..." dialog checkboxes (`ytd-playlist-add-to-option-renderer`) and sends `WATCHLIST_ADD` / `WATCHLIST_REMOVE` (for Watch Later) or `PLAYLIST_SAVE` with the playlist name — based on the checkbox's real post-click state.
+2. **Card-level sync (not just watch pages)**: new `scrapeCardMetadata()` extracts videoId + title + channel from feed/search/sidebar cards, and `sendSyncEvent()` accepts an explicit videoId. Saving a video to Watch Later from the homepage now syncs with full metadata; previously it silently failed because the video ID was only read from the watch-page URL.
+3. **Shorts URL support**: `getVideoIdFromUrl()` now parses `/shorts/<id>` paths, so likes on Shorts pages sync too.
+4. `SUBSCRIBE` events now include scraped video metadata.
+
+**App `app.js`**:
+
+1. **New sync handlers** for `WATCHLIST_ADD` / `PLAYLIST_SAVE` / `WATCHLIST_REMOVE`: saved videos are mirrored into the Play Queue (watchlist), persisted, and fed into the ontology graph as a positive rating — so watch-later saves on YouTube now train the recommendation graph just like likes.
+2. **LLM context upgraded**: `buildLlmContext()` now sends the last 15 liked video titles and last 15 watchlist titles (with channel names) to the brainstorm/similar endpoints — the strongest taste signals the LLM previously never saw.
+3. **Feed accuracy**: `fetchVideosForTopic()` filters out already-watched (incl. YouTube-synced watch history) and disliked videos so they never resurface in the smart feed.
+4. **Cold-start latency**: preloader fans out to 6 parallel topic fetches when the pool is empty (was 3), so the first feed render needs one round-trip instead of several. Pool inserts are now deduped against the existing pool and rendered feed.
+
+**Backend `lazy-tool-service` (WallgardenService/WallgardenRoutes)**:
+
+1. **Rewritten system prompts** for brainstorm + similar topics: "infer the person, not the list" framing, a ladder-of-distance quota (adjacent/lateral/wildcard/time-shift), "name the niche, not the category" rule, and moods/formats-as-topics — designed to produce dynamic, non-literal discovery topics instead of flat word associations.
+2. **Temperature schedule inverted**: starts at 0.9 for creative variety and cools to 0.4 on JSON-format retries (was 0.1 rising — nearly deterministic, hence the boring literal topics).
+3. New `likedVideos` / `watchlist` context fields accepted and injected into the user prompt, labeled by signal strength.

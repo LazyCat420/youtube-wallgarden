@@ -5054,15 +5054,27 @@ function buildLlmContext() {
         .slice(0, 10)
         .map(n => n.label);
     const combinedInterests = Array.from(new Set([...liked, ...graphTopics]));
-    
+
     const { provider, model } = parseModelSetting(state.settings.llmModel);
-    
+
+    // Strongest taste signals: actual videos the user liked or saved to the
+    // watchlist (including ones synced from YouTube via the extension).
+    const formatVideoSignal = v => v.channelName && v.channelName !== "YouTube Curation"
+        ? `${v.title} (${v.channelName})`
+        : v.title;
+    const likedVideos = (state.likedVideos || []).slice(-15)
+        .map(formatVideoSignal).filter(Boolean);
+    const watchlist = (state.queue || []).slice(-15)
+        .map(formatVideoSignal).filter(Boolean);
+
     return {
         interests: combinedInterests,
         disliked: state.topics.filter(t => t.weight < 0).slice(0, 10).map(t => t.phrase),
         recentUsed: state.smartFeedUsedTopics.slice(-20),
         burnedQueries: state.burnedQueries.slice(-30),
         searches: state.searchHistory.slice(-10),
+        likedVideos: likedVideos,
+        watchlist: watchlist,
         model: model,
         provider: provider
     };
@@ -5417,14 +5429,18 @@ async function fetchVideosForTopic(topic) {
             const evaluation = getScoreAndMatches(v);
             v.score = evaluation.score;
             v.matchedTopics = evaluation.matches;
-            
+
             const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === v.channelId);
             const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && v.channelName && v.channelName.toLowerCase().includes(bc.name.toLowerCase()));
-            
-            return !isBlockedId && !isBlockedName && v.score > -10;
+
+            // Never resurface videos already watched (incl. synced from YouTube) or disliked
+            const isWatched = state.watchedHistory && state.watchedHistory[v.id];
+            const isDisliked = state.videoRatings && state.videoRatings[v.id] < 0;
+
+            return !isBlockedId && !isBlockedName && !isWatched && !isDisliked && v.score > -10;
         });
     }
-    
+
     return [];
 }
 
@@ -5529,8 +5545,10 @@ async function fillSmartFeedPreloadBuffer() {
     
     // If pool is empty or low, fetch multiple topics in parallel for speed and topic diversity
     const isPoolLow = state.smartFeedSuggestionPool.length < 24;
-    const parallelCount = isPoolLow ? 3 : 1;
     const isPoolEmpty = state.smartFeedSuggestionPool.length === 0;
+    // Cold start is the latency-critical path: fan out wider so the first
+    // batch renders after ONE round-trip instead of several sequential rounds.
+    const parallelCount = isPoolEmpty ? 6 : (isPoolLow ? 3 : 1);
     
     const topicsToFetch = [];
     for (let i = 0; i < parallelCount; i++) {
@@ -5563,16 +5581,21 @@ async function fillSmartFeedPreloadBuffer() {
             const results = await Promise.all(fetchPromises);
             const timestamp = Date.now();
             let totalAdded = 0;
-            
+
+            // Dedupe against everything already in the pool or rendered in the feed
+            const knownIds = new Set(state.smartFeedSuggestionPool.map(v => v.id));
+            (state.smartFeedVideos || []).forEach(v => knownIds.add(v.id));
+
             for (const { topic, videos } of results) {
                 if (videos.length > 0) {
                     videos.forEach(v => {
                         v._topic = topic;
                         v.crawledAt = timestamp;
                     });
-                    
+
                     // Limit to a max of 8 videos per topic to ensure a diverse mix in the feed
-                    const limitedVideos = videos.slice(0, 8);
+                    const limitedVideos = videos.filter(v => !knownIds.has(v.id)).slice(0, 8);
+                    limitedVideos.forEach(v => knownIds.add(v.id));
                     state.smartFeedSuggestionPool.push(...limitedVideos);
                     totalAdded += limitedVideos.length;
                 } else {
@@ -7070,6 +7093,54 @@ window.addEventListener("message", (event) => {
         state.watchedHistory[payload.videoId] = Date.now();
         localStorage.setItem("wallgarden_watched", JSON.stringify(state.watchedHistory));
         showToast("✅ Synced Watch Completion from YouTube", "success");
+    } else if (payload.action === 'WATCHLIST_ADD' || payload.action === 'PLAYLIST_SAVE') {
+        // User saved a video to Watch Later / a playlist on YouTube —
+        // mirror it into the wallgarden queue and treat it as a positive
+        // taste signal for the ontology graph.
+        let video = findVideoById(payload.videoId);
+        if (!video) {
+            video = {
+                id: payload.videoId,
+                title: payload.title || "Saved Video (Synced)",
+                channelName: payload.channelName || "YouTube Curation",
+                channelId: payload.channelId || "",
+                published: Math.floor(Date.now() / 1000),
+                thumbnailUrl: `https://i.ytimg.com/vi/${payload.videoId}/hqdefault.jpg`,
+                description: payload.playlistName
+                    ? `Synced from YouTube playlist "${payload.playlistName}".`
+                    : "Synced from YouTube Watch Later.",
+                duration: payload.duration || 0,
+                viewCount: payload.viewCount || 0
+            };
+        }
+
+        const alreadyQueued = state.queue.some(v => v.id === video.id);
+        if (!alreadyQueued) {
+            state.queue.push(video);
+            saveQueue();
+            renderQueueUI();
+        }
+
+        if (state.ontologyGraph) {
+            graphProcessRating(state.ontologyGraph, {
+                ...video,
+                matchedTopics: video.matchedTopics || []
+            }, 1);
+            saveOntologyGraph();
+        }
+
+        const label = payload.action === 'WATCHLIST_ADD'
+            ? "⏳ Synced Watch Later from YouTube"
+            : `📃 Synced save to "${payload.playlistName || 'playlist'}" from YouTube`;
+        showToast(alreadyQueued ? "Already in Watchlist (synced)" : label, alreadyQueued ? "info" : "success");
+    } else if (payload.action === 'WATCHLIST_REMOVE') {
+        const before = state.queue.length;
+        state.queue = state.queue.filter(v => v.id !== payload.videoId);
+        if (state.queue.length !== before) {
+            saveQueue();
+            renderQueueUI();
+            showToast("Removed from Watchlist (synced from YouTube)", "info");
+        }
     }
 });
 
