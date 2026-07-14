@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Wallgarden",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Filters out YouTube Brainrot, Shorts, clickbait, and spam using CSS rules and heuristics.",
   "permissions": [
     "storage",
-    "activeTab"
+    "activeTab",
+    "tabs"
   ],
   "host_permissions": [
     "*://*.youtube.com/*"
@@ -25,11 +26,8 @@
     },
     {
       "matches": [
-        "http://10.0.0.16:8007/*",
         "http://10.0.0.16/*",
-        "http://localhost:8007/*",
         "http://localhost/*",
-        "http://127.0.0.1:8007/*",
         "http://127.0.0.1/*"
       ],
       "js": [
