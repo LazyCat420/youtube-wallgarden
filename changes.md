@@ -124,3 +124,18 @@ Root-caused likes not syncing to the app. All fixes are extension-side:
 3. **Layered like/dislike detection**: view-model elements (`like-button-view-model`/`dislike-button-view-model`) first, aria-label second (dislike checked before like since "Dislike this video" contains "like this video"), positional segmented fallback last.
 4. **Offline queue** (`background.js` + `wallgarden-bridge.js`): events with no reachable Wallgarden tab are persisted to `chrome.storage.local` (last 200) and replayed when the app next loads (`WALLGARDEN_APP_READY` handshake, flushed 1.5s after window load). Likes no longer require the app tab to be open.
 5. **Manifest v1.1.0**: added `tabs` permission so `chrome.tabs.query` reliably exposes tab URLs for app-tab matching; removed invalid port-qualified match patterns (`http://10.0.0.16:8007/*` — match patterns don't support ports; port-less patterns match all ports).
+
+---
+
+### V8.2 (2026-07-13): Feed Scrolling Performance Pass
+
+Diagnosed and fixed six stacking causes of scroll lag when fetching videos and infinite-scrolling. App-side (`app.js`/`app.css`) plus one scraper-service change:
+
+1. **Lazy thumbnails**: card templates now use `loading="lazy"` — a 270-card search view no longer kicks off 270 eager image downloads that starve the fetch/stream requests.
+2. **CSS containment fixed**: `content-visibility: auto` moved from `.feed-section` (where it did nothing) to `.video-card`, so offscreen cards skip layout/paint entirely; removed blanket `will-change` that forced a compositor layer per card.
+3. **Shared watch-signal observer**: one `IntersectionObserver` + WeakMap for all cards instead of a per-card observer instance that leaked on every grid wipe.
+4. **Constant-cost paging**: new `offset` field on scraper-service `CollectRequest`, threaded through `search()`/`search_generator()` — scroll batch N no longer re-fetches and re-streams all previous batches (`limit: offset+30` → `limit: 30, offset: N`). Client sends `offset`; old servers safely ignore it.
+5. **Incremental stream rendering**: streamed cards are now full-featured `createVideoCard()` cards, and the post-stream full `renderFeed()` rebuild (grid wipe + re-render + thumbnail re-fetch + scroll jump) is replaced by `finishDiscoverBatch()` cleanup. Also fixes the Google API path never clearing `topicSearchLoading` (stuck loader, dead infinite scroll).
+6. **Main-thread hygiene**: hot-path `localStorage` saves (suggestion pool, ontology graph) debounced 1.5s with flush on profile switch/pagehide/hidden; per-video `[Search Debug]` console logging gated behind `DEBUG=false`; staggered discover rendering switched from one `setTimeout`+reflow per card to 12-card chunks per animation frame.
+
+Rebuilt `app.min.js`/`app.min.css`, bumped asset version to `v54`. Deploy note: ship scraper-service and the app together — new app against an old scraper falls back to re-fetch-and-dedup behavior (works, just slower).
