@@ -773,6 +773,139 @@ function applyBlockingCSS() {
     } else {
         styleEl.textContent = '';
     }
+
+    applyCollapsibleCSS();
+}
+
+// ============================================================
+//  Collapsible Panels — live chat + related-videos sidebar
+// ============================================================
+// Distinct from the block* settings above: blocking deletes a panel outright,
+// collapsing folds it into a title bar you can click open again. The related
+// sidebar in particular is the single biggest source of "just one more video",
+// but you still want it reachable, so it earns a fold rather than a delete.
+
+const COLLAPSIBLE_PANELS = [
+    {
+        key: 'collapseChat',
+        cls: 'wg-collapsed-chat',
+        label: 'Live chat',
+        // #chat-container wraps the frame on watch pages; ytd-live-chat-frame
+        // is the frame itself, which is what survives on some layouts.
+        hostSelector: '#chat-container, ytd-live-chat-frame#chat',
+        // Everything inside the panel except the bar we inject.
+        bodySelector: 'ytd-live-chat-frame, iframe#chatframe, #chat-messages',
+    },
+    {
+        key: 'collapseRelated',
+        cls: 'wg-collapsed-related',
+        label: 'Suggested videos',
+        hostSelector: '#related, ytd-watch-next-secondary-results-renderer',
+        bodySelector: 'ytd-watch-next-secondary-results-renderer, #items, #contents',
+    },
+];
+
+function applyCollapsibleCSS() {
+    let el = document.getElementById('wallgarden-collapse-css');
+    if (!el) {
+        el = document.createElement('style');
+        el.id = 'wallgarden-collapse-css';
+        document.head.appendChild(el);
+    }
+
+    el.textContent = `
+        .wg-collapse-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+            box-sizing: border-box;
+            padding: 8px 12px;
+            margin-bottom: 8px;
+            background: var(--yt-spec-badge-chip-background, rgba(255,255,255,0.08));
+            border: 1px solid var(--yt-spec-10-percent-layer, rgba(255,255,255,0.1));
+            border-radius: 10px;
+            color: var(--yt-spec-text-primary, #f1f1f1);
+            font-family: "Roboto", Arial, sans-serif;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            user-select: none;
+        }
+        .wg-collapse-bar:hover {
+            background: var(--yt-spec-10-percent-layer, rgba(255,255,255,0.14));
+        }
+        .wg-collapse-bar .wg-chevron {
+            transition: transform 0.18s ease;
+            font-size: 11px;
+            opacity: 0.75;
+        }
+        .wg-collapse-bar .wg-hint {
+            margin-left: auto;
+            font-size: 11px;
+            font-weight: 400;
+            opacity: 0.55;
+        }
+        /* Collapsed: fold the panel body away but leave our bar (and the host
+           element) in the DOM, so YouTube keeps updating it and one click
+           brings it straight back. */
+        ${COLLAPSIBLE_PANELS.map(p => `
+        html.${p.cls} ${p.hostSelector.split(',').map(s => `${s.trim()} > *:not(.wg-collapse-bar)`).join(', ')} {
+            display: none !important;
+        }
+        html.${p.cls} .wg-collapse-bar[data-wg-panel="${p.key}"] .wg-chevron {
+            transform: rotate(-90deg);
+        }`).join('\n')}
+    `;
+}
+
+/** Put a click-to-toggle bar at the top of each collapsible panel. */
+function injectCollapseBars() {
+    COLLAPSIBLE_PANELS.forEach(panel => {
+        const host = document.querySelector(panel.hostSelector);
+        if (!host) return;
+
+        let bar = host.querySelector(`:scope > .wg-collapse-bar[data-wg-panel="${panel.key}"]`);
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.className = 'wg-collapse-bar';
+            bar.dataset.wgPanel = panel.key;
+            bar.addEventListener('click', () => setPanelCollapsed(panel, !settings[panel.key]));
+            host.prepend(bar);
+        }
+        renderCollapseBar(bar, panel);
+    });
+}
+
+function renderCollapseBar(bar, panel) {
+    const collapsed = !!settings[panel.key];
+    bar.innerHTML = '';
+    const chevron = document.createElement('span');
+    chevron.className = 'wg-chevron';
+    chevron.textContent = '▼';
+    const label = document.createElement('span');
+    label.textContent = panel.label;
+    const hint = document.createElement('span');
+    hint.className = 'wg-hint';
+    hint.textContent = collapsed ? 'Show' : 'Hide';
+    bar.append(chevron, label, hint);
+    bar.title = collapsed
+        ? `Show ${panel.label.toLowerCase()}`
+        : `Collapse ${panel.label.toLowerCase()} (stays one click away)`;
+}
+
+function setPanelCollapsed(panel, collapsed) {
+    settings[panel.key] = collapsed;
+    chrome.storage.local.set({ [panel.key]: collapsed });
+    syncCollapseClasses();
+    const bar = document.querySelector(`.wg-collapse-bar[data-wg-panel="${panel.key}"]`);
+    if (bar) renderCollapseBar(bar, panel);
+}
+
+function syncCollapseClasses() {
+    COLLAPSIBLE_PANELS.forEach(p => {
+        document.documentElement.classList.toggle(p.cls, !!settings[p.key]);
+    });
 }
 
 // ============================================================
