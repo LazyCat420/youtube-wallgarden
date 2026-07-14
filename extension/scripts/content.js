@@ -1180,42 +1180,41 @@ function startSyncObservers() {
         const pathTagNames = path.map(el => el.tagName ? el.tagName.toLowerCase() : '').filter(Boolean);
         console.log("[Wallgarden Sync] Clicked path:", pathTagNames);
 
-        // Let's use ultra-robust DOM closest targeting instead of path scanning
-        // Segmented button on modern Youtube: <segmented-like-dislike-button-view-model>
-        // It contains two yt-smartimation, the first is Like, the second is Dislike.
-        
+        // Like/Dislike detection — layered from most to least specific.
         let hasLike = false;
         let hasDislike = false;
 
-        const segmentedContainer = e.target.closest('ytd-watch-metadata segmented-like-dislike-button-view-model');
-        if (segmentedContainer) {
-            // Find the two major button wrappers (yt-button-view-model elements)
-            const btnViewModels = Array.from(segmentedContainer.querySelectorAll('yt-button-view-model'));
-            if (btnViewModels.length >= 2) {
-                const targetVM = e.target.closest('yt-button-view-model');
-                if (targetVM === btnViewModels[0]) hasLike = true;
-                else if (targetVM === btnViewModels[1]) hasDislike = true;
+        // Path 1: Modern YouTube wraps each button in a dedicated view-model
+        // element (inside segmented-like-dislike-button-view-model on watch
+        // pages, standalone on Shorts). Most reliable signal.
+        const likeVM = e.target.closest('like-button-view-model');
+        const dislikeVM = e.target.closest('dislike-button-view-model');
+        if (likeVM) hasLike = true;
+        else if (dislikeVM) hasDislike = true;
+
+        // Path 2: aria-label on the clicked button. Note "Dislike this video"
+        // contains "like this video", so dislike must be checked first.
+        if (!hasLike && !hasDislike) {
+            const ariaBtn = e.target.closest('button[aria-label], yt-icon-button[aria-label]');
+            if (ariaBtn) {
+                const aria = (ariaBtn.getAttribute('aria-label') || '').toLowerCase();
+                if (aria.includes('dislike this video')) hasDislike = true;
+                else if (aria.includes('like this video')) hasLike = true;
             }
         }
 
-        // Fallbacks for standard DOM nodes
+        // Path 3: positional fallback inside the segmented container
+        // (first yt-button-view-model = Like, second = Dislike)
         if (!hasLike && !hasDislike) {
-            const btn = e.target.closest('like-button-view-model, dislike-button-view-model');
-            if (btn) {
-                const tag = btn.tagName.toLowerCase();
-                const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
-                const title = (btn.getAttribute('title') || '').toLowerCase();
-                
-                if (tag === 'like-button-view-model' || 
-                    aria.includes('like this video') || 
-                    (title.includes('like') && !title.includes('dislike')) ||
-                    btn.querySelector('yt-icon.ytd-thumb-up, path[d^="M3,11h3v10H3V11z M18.59,10"]')) {
-                    hasLike = true;
-                } else if (tag === 'dislike-button-view-model' || 
-                           aria.includes('dislike this video') || 
-                           title.includes('dislike') ||
-                           btn.querySelector('yt-icon.ytd-thumb-down, path[d^="M15,3H6c-0.83,0-1.54,0.5-1.84,1.22l-3.02,7.05C1.05,11.5"]')) {
-                    hasDislike = true;
+            const segmentedContainer = e.target.closest(
+                'segmented-like-dislike-button-view-model, ytd-segmented-like-dislike-button-renderer'
+            );
+            if (segmentedContainer) {
+                const btnViewModels = Array.from(segmentedContainer.querySelectorAll('yt-button-view-model'));
+                const targetVM = e.target.closest('yt-button-view-model');
+                if (btnViewModels.length >= 2 && targetVM) {
+                    if (targetVM === btnViewModels[0]) hasLike = true;
+                    else if (targetVM === btnViewModels[1]) hasDislike = true;
                 }
             }
         }
@@ -1247,28 +1246,34 @@ function startSyncObservers() {
             hasPlaylist = !!e.target.closest('ytd-menu-popup-renderer ytd-menu-service-item-renderer:has(yt-icon.ytd-playlist-add-icon)');
         }
 
-        if (hasLike) {
-            const buttonEl = e.target.closest('button');
+        if (hasLike || hasDislike) {
+            const vmSelector = hasLike ? 'like-button-view-model' : 'dislike-button-view-model';
+            const clickedVM = e.target.closest(vmSelector);
+            const clickedBtn = e.target.closest('button');
             setTimeout(() => {
-                const isSelected = buttonEl && (
-                    buttonEl.getAttribute('aria-pressed') === 'true' || 
-                    buttonEl.classList.contains('yt-spec-button-shape-next--selected')
-                );
-                console.log("[Wallgarden Sync] LIKE clicked, final selected state:", !!isSelected);
+                // Re-locate the button AFTER YouTube processes the toggle —
+                // the originally clicked node may have been re-rendered.
+                const btn = (clickedVM && clickedVM.isConnected && clickedVM.querySelector('button'))
+                    || (clickedBtn && clickedBtn.isConnected && clickedBtn)
+                    || document.querySelector(`ytd-watch-metadata ${vmSelector} button, ${vmSelector} button`);
+
+                let isSelected;
+                if (btn) {
+                    isSelected = btn.getAttribute('aria-pressed') === 'true' ||
+                        btn.classList.contains('yt-spec-button-shape-next--selected');
+                } else {
+                    // Can't read the toggle state — assume the click turned it ON.
+                    // (Dropping the event loses a like; a rare duplicate is harmless.)
+                    console.warn("[Wallgarden Sync] Could not read toggle state, assuming selected");
+                    isSelected = true;
+                }
+
+                const positive = hasLike ? 'LIKE' : 'DISLIKE';
+                const negative = hasLike ? 'UNLIKE' : 'UNDISLIKE';
+                console.log(`[Wallgarden Sync] ${positive} clicked, final selected state:`, !!isSelected);
                 const metadata = scrapeVideoMetadata();
-                sendSyncEvent(isSelected ? 'LIKE' : 'UNLIKE', metadata);
-            }, 100);
-        } else if (hasDislike) {
-            const buttonEl = e.target.closest('button');
-            setTimeout(() => {
-                const isSelected = buttonEl && (
-                    buttonEl.getAttribute('aria-pressed') === 'true' || 
-                    buttonEl.classList.contains('yt-spec-button-shape-next--selected')
-                );
-                console.log("[Wallgarden Sync] DISLIKE clicked, final selected state:", !!isSelected);
-                const metadata = scrapeVideoMetadata();
-                sendSyncEvent(isSelected ? 'DISLIKE' : 'UNDISLIKE', metadata);
-            }, 100);
+                sendSyncEvent(isSelected ? positive : negative, metadata);
+            }, 250);
         } else if (hasSub) {
             console.log("[Wallgarden Sync] SUBSCRIBE clicked");
             sendSyncEvent('SUBSCRIBE', scrapeVideoMetadata());
@@ -1280,7 +1285,8 @@ function startSyncObservers() {
             pendingSaveContext = getActionContext(fromWatchPage);
             console.log("[Wallgarden Sync] Save dialog opening for:", pendingSaveContext);
         }
-    }, false);
+    }, true); // capture phase — YouTube stopPropagation()s many button clicks,
+              // so bubble-phase listeners on document never see them
 }
 
 // Start sync observers

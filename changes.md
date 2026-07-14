@@ -112,3 +112,15 @@ Added `processShelves()` function as a text-based fallback for shelf elements th
 1. **Rewritten system prompts** for brainstorm + similar topics: "infer the person, not the list" framing, a ladder-of-distance quota (adjacent/lateral/wildcard/time-shift), "name the niche, not the category" rule, and moods/formats-as-topics — designed to produce dynamic, non-literal discovery topics instead of flat word associations.
 2. **Temperature schedule inverted**: starts at 0.9 for creative variety and cools to 0.4 on JSON-format retries (was 0.1 rising — nearly deterministic, hence the boring literal topics).
 3. New `likedVideos` / `watchlist` context fields accepted and injected into the user prompt, labeled by signal strength.
+
+---
+
+### V8.1 (2026-07-13): Like Sync Fix — Capture Phase + Offline Queue
+
+Root-caused likes not syncing to the app. All fixes are extension-side:
+
+1. **Capture-phase click listener** (`content.js`): the sync listener ran in bubble phase, but YouTube's like button `stopPropagation()`s clicks — the handler often never fired. Now uses capture phase like the blocklist interceptor.
+2. **UNLIKE misfire fixed**: the selected-state check read `aria-pressed` from `e.target.closest('button')` after 100ms; when the click landed on the SVG or the node re-rendered, it silently sent `UNLIKE` instead of `LIKE`. Now re-locates the button after 250ms (view-model → clicked button → global query) and defaults to LIKE when the state is unreadable.
+3. **Layered like/dislike detection**: view-model elements (`like-button-view-model`/`dislike-button-view-model`) first, aria-label second (dislike checked before like since "Dislike this video" contains "like this video"), positional segmented fallback last.
+4. **Offline queue** (`background.js` + `wallgarden-bridge.js`): events with no reachable Wallgarden tab are persisted to `chrome.storage.local` (last 200) and replayed when the app next loads (`WALLGARDEN_APP_READY` handshake, flushed 1.5s after window load). Likes no longer require the app tab to be open.
+5. **Manifest v1.1.0**: added `tabs` permission so `chrome.tabs.query` reliably exposes tab URLs for app-tab matching; removed invalid port-qualified match patterns (`http://10.0.0.16:8007/*` — match patterns don't support ports; port-less patterns match all ports).
