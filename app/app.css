@@ -303,15 +303,61 @@ body {
 /* Suggestion Pills */
 .search-suggestions {
     display: flex;
-    gap: 0.4rem;
-    flex-wrap: wrap; /* Wrap up to 3-4 rows */
-    justify-content: center;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
     max-width: 100%;
     width: 100%;
     margin: 0.6rem auto 0;
-    max-height: 10rem; /* Allow up to 4 rows */
+    max-height: 22rem;
     overflow-y: auto;
     scrollbar-width: thin;
+}
+
+/* One wrapping row of chips. Collapsed this is a single tidy line; expanded it
+   is one of these per provenance group. */
+.suggestion-row {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    justify-content: center;
+    width: 100%;
+}
+
+.suggestion-group {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.3rem;
+    width: 100%;
+}
+
+.suggestion-group-label {
+    font-family: var(--font-stack);
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    opacity: 0.65;
+}
+
+.suggestion-toggle {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-family: var(--font-stack);
+    font-size: 0.72rem;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 0.15rem 0.5rem;
+    border-radius: 10px;
+    transition: color 0.15s ease, background 0.15s ease;
+}
+
+.suggestion-toggle:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.06);
 }
 
 .search-suggestions::-webkit-scrollbar {
@@ -358,23 +404,45 @@ body {
     color: var(--text-primary);
 }
 
+/* Provenance tint: a topic you chose should not look identical to one the AI
+   guessed. Subtle — this is a hierarchy cue, not decoration. */
+.suggestion-pill.grp-yours {
+    background: rgba(96, 165, 250, 0.10);
+    border-color: rgba(96, 165, 250, 0.22);
+    color: var(--text-primary);
+}
+.suggestion-pill.grp-recent {
+    background: rgba(255, 255, 255, 0.03);
+    border-style: dashed;
+}
+
+/* The ✕ used to sit on all 50 chips at once, which read as 50 pieces of
+   clutter. Reveal it on hover; keep the chip's width stable so nothing jumps. */
 .suggestion-pill .delete-suggestion {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 14px;
+    width: 0;
     height: 14px;
+    overflow: hidden;
     border-radius: 50%;
     font-size: 0.65rem;
     color: var(--text-muted);
     cursor: pointer;
-    transition: all 0.15s ease;
+    opacity: 0;
+    transition: opacity 0.15s ease, width 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.suggestion-pill:hover .delete-suggestion,
+.suggestion-pill:focus-within .delete-suggestion {
+    width: 14px;
+    opacity: 1;
     margin-left: 0.15rem;
 }
 
 .suggestion-pill .delete-suggestion:hover {
-    background: rgba(255, 255, 255, 0.15);
-    color: var(--text-primary);
+    background: rgba(248, 113, 113, 0.25);
+    color: #fca5a5;
 }
 
 .suggestion-pill:active {

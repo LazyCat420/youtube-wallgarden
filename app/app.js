@@ -127,14 +127,18 @@ function initSmartFeed() {
     state.smartFeedPreloadLoading = false;
     
     // Get positive topics randomized by weight
-    const randomizedTopics = getWeightedRandomTopics(state.topics);
-    
+    const randomizedTopics = getWeightedRandomTopics(state.topics).filter(t => !isBurned(t));
+
     state.smartFeedTopicsQueue = [...randomizedTopics];
-    
+
     // ── Graph-based topic discovery: inject related topics ──
     const recentLiked = (state.likedTopics || []).slice(-5);
     if (recentLiked.length > 0 && state.ontologyGraph) {
-        const graphSuggestions = graphGetRelatedForDiscovery(state.ontologyGraph, recentLiked, 5);
+        // Filter burns here too: the graph is a separate path into the queue
+        // and it used to let a topic you had explicitly nuked walk right back
+        // in through its neighbours.
+        const graphSuggestions = graphGetRelatedForDiscovery(state.ontologyGraph, recentLiked, 5)
+            .filter(t => !isBurned(t));
         graphSuggestions.forEach((topic, i) => {
             if (!state.smartFeedTopicsQueue.includes(topic)) {
                 const insertPos = Math.min(i * 3, state.smartFeedTopicsQueue.length);
@@ -155,6 +159,9 @@ function initSmartFeed() {
 // Initialize Application
 document.addEventListener("DOMContentLoaded", () => {
     loadState();
+    // Existing profiles carry a topic pool that has been growing unbounded
+    // since day one; clear the silt before anything reads from it.
+    pruneTopicPool();
     setupEventListeners();
     initSmartFeed();
     fetchPrismModels();
@@ -195,7 +202,7 @@ function getSuggestionsPool() {
         const normalized = phrase.trim().toLowerCase();
         if (!normalized) return;
         if ((state.dislikedTopics || []).some(dt => dt.toLowerCase() === normalized)) return;
-        if ((state.burnedQueries || []).some(bq => bq.toLowerCase() === normalized)) return;
+        if (isBurned(normalized)) return;
         if (!seen.has(normalized)) {
             seen.add(normalized);
             pool.push(normalized);
@@ -214,33 +221,175 @@ function getSuggestionsPool() {
     return pool;
 }
 
-function deleteSuggestion(topic) {
-    const normalized = topic.toLowerCase();
-    
-    // Remove from likedTopics
-    state.likedTopics = (state.likedTopics || []).filter(t => t.toLowerCase() !== normalized);
-    saveLikedTopics();
-    
-    // Remove from searchHistory
-    state.searchHistory = (state.searchHistory || []).filter(q => q.toLowerCase() !== normalized);
-    saveSearchHistory();
-    
-    // Remove from smartFeedTopicsQueue
-    state.smartFeedTopicsQueue = (state.smartFeedTopicsQueue || []).filter(t => t.toLowerCase() !== normalized);
-    
-    // Remove from state.topics
-    state.topics = (state.topics || []).filter(t => t.phrase.toLowerCase() !== normalized);
-    saveTopics();
-    
-    // Burn the query so it is never suggested again by LLM brainstormer
-    if (!state.burnedQueries.includes(normalized)) {
+// ── Burning a topic ─────────────────────────────────────────────────────
+// Deleting a topic used to just blacklist the exact string, so burning
+// "self care" bought you "mindful living" on the next brainstorm. A burn now
+// has to GENERALISE, which means three things beyond forgetting the phrase:
+//   1. it becomes a disliked topic, so its videos take the scoring penalty;
+//   2. it goes negative in the ontology graph and propagates to neighbours,
+//      which damps the whole semantic cluster it came from;
+//   3. its siblings — topics sharing its distinctive words — get demoted, so
+//      the shape of the mistake dies with it and not just the one instance.
+
+// Words too common to carry a topic's identity. "long term aging" is generic
+// because of "aging", not because of "long"/"term".
+const TOPIC_STOPWORDS = new Set([
+    "the", "a", "an", "of", "and", "for", "in", "on", "to", "with", "at", "by",
+    "long", "term", "new", "best", "top", "how", "diy", "advanced", "basic",
+    "modern", "high", "low", "big", "small", "good", "great",
+]);
+
+/** The words that actually give a topic its identity. */
+function topicSignature(phrase) {
+    return (phrase || "")
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter(w => w.length > 2 && !TOPIC_STOPWORDS.has(w));
+}
+
+/**
+ * True if `phrase` is burned outright, or is a close relative of something
+ * burned. "self care" burned also rejects "self care routines" — a re-word of
+ * a rejected idea is still a rejected idea.
+ */
+function isBurned(phrase) {
+    const normalized = (phrase || "").trim().toLowerCase();
+    if (!normalized) return false;
+    const burned = state.burnedQueries || [];
+    if (burned.some(b => b.toLowerCase() === normalized)) return true;
+
+    const sig = topicSignature(normalized);
+    if (sig.length === 0) return false;
+    return burned.some(b => {
+        const bs = topicSignature(b);
+        if (bs.length === 0) return false;
+        // Reject only when the burned topic's identity is fully contained in
+        // this one (or vice versa). Sharing a single word is not enough —
+        // that would let burning "kiln safety" take out "kiln atmosphere".
+        const shared = sig.filter(w => bs.includes(w)).length;
+        return shared === bs.length || shared === sig.length;
+    });
+}
+
+/**
+ * Burn a topic and everything it teaches us. Returns the sibling topics that
+ * were demoted as collateral, so callers can tell the user what just happened.
+ */
+function burnTopic(phrase) {
+    const normalized = (phrase || "").trim().toLowerCase();
+    if (!normalized) return [];
+
+    // A profile saved before these lists existed will be missing them.
+    if (!Array.isArray(state.burnedQueries)) state.burnedQueries = [];
+    if (!Array.isArray(state.dislikedTopics)) state.dislikedTopics = [];
+    if (!Array.isArray(state.topics)) state.topics = [];
+
+    // 1. Remember it — permanently. The old 50-entry cap meant an old burn
+    //    silently expired and the LLM was free to suggest it all over again.
+    if (!state.burnedQueries.some(b => b.toLowerCase() === normalized)) {
         state.burnedQueries.push(normalized);
-        if (state.burnedQueries.length > 50) {
-            state.burnedQueries.shift();
-        }
+        if (state.burnedQueries.length > 500) state.burnedQueries.shift();
         saveBurnedQueries();
     }
-    
+
+    // 2. Make it an actual negative signal. Without this the topic kept its
+    //    positive weight everywhere except the suggestion list.
+    if (!state.dislikedTopics.some(t => t.toLowerCase() === normalized)) {
+        state.dislikedTopics.push(normalized);
+        saveDislikedTopics();
+    }
+
+    // 3. Drive it negative in the graph and let the penalty spread to its
+    //    neighbours, so the cluster it belongs to cools off too.
+    if (state.ontologyGraph && typeof graphUpsertNode === "function") {
+        const nodeId = graphUpsertNode(state.ontologyGraph, normalized, "Topic", -8);
+        if (typeof graphPropagateNegative === "function") {
+            graphPropagateNegative(state.ontologyGraph, nodeId);
+        }
+        if (typeof saveOntologyGraph === "function") saveOntologyGraph();
+    }
+
+    // 4. Demote the siblings that share its identity. This is the part that
+    //    generalises: burning "hazard analysis" should also cost "hazard
+    //    assessment" and "hazard protocols", not leave them at full weight.
+    const sig = topicSignature(normalized);
+    const demoted = [];
+    if (sig.length > 0) {
+        (state.topics || []).forEach(t => {
+            const tp = t.phrase.toLowerCase();
+            if (tp === normalized) return;
+            const shared = topicSignature(tp).filter(w => sig.includes(w)).length;
+            // Needs to share the burned topic's whole identity, not one word.
+            if (shared === sig.length && t.weight > 0) {
+                t.weight = Math.max(0, t.weight - 4);
+                demoted.push(t.phrase);
+            }
+        });
+    }
+
+    // 5. Now forget it everywhere it could still surface.
+    state.likedTopics = (state.likedTopics || []).filter(t => t.toLowerCase() !== normalized);
+    saveLikedTopics();
+    state.searchHistory = (state.searchHistory || []).filter(q => q.toLowerCase() !== normalized);
+    saveSearchHistory();
+    state.smartFeedTopicsQueue = (state.smartFeedTopicsQueue || []).filter(t => t.toLowerCase() !== normalized);
+    state.topics = (state.topics || []).filter(t => t.phrase.toLowerCase() !== normalized);
+    saveTopics();
+    invalidateScoreCache();
+
+    console.log(`[Learn] Burned "${normalized}"`
+        + (demoted.length ? `; demoted ${demoted.length} sibling(s): ${demoted.join(", ")}` : ""));
+    return demoted;
+}
+
+/**
+ * Keep the topic pool from turning into a junk drawer. It was append-only:
+ * every topic the LLM ever produced lived forever at weight 5, good ones got
+ * consumed by the feed while duds just accumulated, and the suggestion chips
+ * sampled that silt at random. Decay what goes unused and evict the tail.
+ */
+const TOPIC_POOL_MAX = 400;
+const TOPIC_DECAY_PER_PRUNE = 0.5;
+
+function pruneTopicPool() {
+    if (!Array.isArray(state.topics)) return;
+    const before = state.topics.length;
+
+    state.topics.forEach(t => {
+        // Never decay the user's own negative weights or their hand-added
+        // topics — only the AI-generated bulk, which is what silts up.
+        if (t.weight > 0 && !(state.likedTopics || []).some(l => l.toLowerCase() === t.phrase.toLowerCase())) {
+            const used = (state.smartFeedUsedTopics || []).includes(t.phrase.toLowerCase());
+            if (used) t.weight = Math.max(0.5, t.weight - TOPIC_DECAY_PER_PRUNE);
+        }
+    });
+
+    // Drop topics that decayed to nothing, plus anything a burn has since
+    // caught up with.
+    state.topics = state.topics.filter(t => t.weight !== 0 && !isBurned(t.phrase));
+
+    // Hard cap: keep the strongest, drop the tail.
+    if (state.topics.length > TOPIC_POOL_MAX) {
+        const negatives = state.topics.filter(t => t.weight < 0);
+        const positives = state.topics
+            .filter(t => t.weight >= 0)
+            .sort((a, b) => b.weight - a.weight)
+            .slice(0, Math.max(0, TOPIC_POOL_MAX - negatives.length));
+        state.topics = [...negatives, ...positives];
+    }
+
+    if (state.topics.length !== before) {
+        console.log(`[Learn] Pruned topic pool: ${before} -> ${state.topics.length}`);
+    }
+    saveTopics();
+    invalidateScoreCache();
+}
+
+function deleteSuggestion(topic) {
+    const normalized = topic.toLowerCase();
+
+    burnTopic(normalized);
+
     // Remove from current active suggestion list
     const index = currentSearchSuggestions.indexOf(normalized);
     if (index > -1) {
@@ -262,62 +411,73 @@ function deleteSuggestion(topic) {
     renderSearchSuggestions(true);
 }
 
+// How many chips to show before the "show more" fold. The old cloud dumped a
+// random 50 in one flat wall, reshuffled on every render — nothing was ranked,
+// so an AI dud and a topic you chose yourself looked identical and competed for
+// the same attention. Show a short, RANKED, stable list instead.
+const SUGGESTIONS_VISIBLE = 12;
+let suggestionsExpanded = false;
+
+/** Build the chip list: grouped by provenance, ranked by weight within group. */
+function buildSuggestionGroups() {
+    const seen = new Set();
+    const take = (phrase) => {
+        const n = (phrase || "").trim().toLowerCase();
+        if (!n || seen.has(n)) return null;
+        if ((state.dislikedTopics || []).some(dt => dt.toLowerCase() === n)) return null;
+        if (isBurned(n)) return null;
+        seen.add(n);
+        return n;
+    };
+    const weightOf = (phrase) => {
+        const t = (state.topics || []).find(x => x.phrase.toLowerCase() === phrase);
+        return t ? t.weight : 0;
+    };
+
+    // Order matters: a topic you picked yourself outranks one the AI guessed.
+    const yours = (state.likedTopics || [])
+        .map(take).filter(Boolean)
+        .sort((a, b) => weightOf(b) - weightOf(a));
+
+    const recent = (state.searchHistory || []).slice(-8).reverse()
+        .map(take).filter(Boolean);
+
+    // Rank AI topics by the weight the backend's anchoring grade gave them, so
+    // specific topics ("raku reduction firing") sit above broad ones
+    // ("chemical reactions") instead of being shuffled together.
+    const discovered = (state.topics || [])
+        .filter(t => t.weight > 0)
+        .sort((a, b) => b.weight - a.weight)
+        .map(t => take(t.phrase)).filter(Boolean);
+
+    return [
+        { label: "Your interests", topics: yours, cls: "grp-yours" },
+        { label: "Recent searches", topics: recent, cls: "grp-recent" },
+        { label: "AI discoveries", topics: discovered, cls: "grp-ai" },
+    ].filter(g => g.topics.length > 0);
+}
+
 // Render suggestion pills under the search bar
 function renderSearchSuggestions(useExisting = false) {
     const container = document.getElementById("search-suggestions");
     if (!container) return;
     container.innerHTML = "";
-    
-    if (!useExisting || currentSearchSuggestions.length === 0) {
-        const suggestions = new Set();
-        const shuffleArray = (arr) => [...arr].sort(() => 0.5 - Math.random());
-        
-        // 1. Liked topics (random up to 15)
-        const liked = (state.likedTopics || []).map(t => t.toLowerCase());
-        shuffleArray(liked).slice(0, 15).forEach(t => suggestions.add(t));
-        
-        // 2. Recent search history (random up to 10)
-        const searches = (state.searchHistory || []).map(q => q.toLowerCase());
-        shuffleArray(searches).slice(0, 10).forEach(t => suggestions.add(t));
-        
-        // 3. User preferred (highly weighted topics, weight > 0, random up to 25)
-        const highlyWeighted = state.topics
-            .filter(t => t.weight > 0 && !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t.phrase.toLowerCase()))
-            .map(t => t.phrase.toLowerCase());
-        shuffleArray(highlyWeighted).slice(0, 25).forEach(t => suggestions.add(t));
-        
-        // 4. Trending new (from the AI-brainstormed queue, random up to 20)
-        const newQueue = (state.smartFeedTopicsQueue || [])
-            .map(t => t.toLowerCase())
-            .filter(t => !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t));
-        shuffleArray(newQueue).slice(0, 20).forEach(t => suggestions.add(t));
-        
-        // 5. Unexplored topics (weight === 5, not liked, not searched, random up to 15)
-        const unexplored = state.topics
-            .filter(t => t.weight === 5 && 
-                        !liked.includes(t.phrase.toLowerCase()) && 
-                        !searches.includes(t.phrase.toLowerCase()) &&
-                        !(state.dislikedTopics || []).some(dt => dt.toLowerCase() === t.phrase.toLowerCase()))
-            .map(t => t.phrase.toLowerCase());
-        shuffleArray(unexplored).slice(0, 15).forEach(t => suggestions.add(t));
-        
-        // Filter out burned queries and empty strings
-        const finalPool = [...suggestions].filter(phrase => {
-            const normalized = phrase.trim().toLowerCase();
-            if (!normalized) return false;
-            if ((state.dislikedTopics || []).some(dt => dt.toLowerCase() === normalized)) return false;
-            if ((state.burnedQueries || []).some(bq => bq.toLowerCase() === normalized)) return false;
-            return true;
-        });
 
-        // Combine, shuffle the final list, and limit to 50 pills
-        currentSearchSuggestions = shuffleArray(finalPool).slice(0, 50);
+    if (!useExisting || currentSearchSuggestions.length === 0) {
+        const groups = buildSuggestionGroups();
+        currentSearchSuggestions = groups.flatMap(g => g.topics);
+        container.dataset.groups = JSON.stringify(
+            groups.map(g => ({ label: g.label, cls: g.cls, n: g.topics.length }))
+        );
     }
-    
-    currentSearchSuggestions.forEach(topic => {
+
+    const groups = buildSuggestionGroups();
+    if (groups.length === 0) return;
+
+    const makePill = (topic, cls) => {
         const pill = document.createElement("div");
-        pill.className = "suggestion-pill";
-        
+        pill.className = `suggestion-pill ${cls}`;
+
         const textSpan = document.createElement("span");
         textSpan.className = "suggestion-text";
         textSpan.textContent = topic.split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
@@ -329,19 +489,69 @@ function renderSearchSuggestions(useExisting = false) {
             triggerGlobalSearch(topic);
         });
         pill.appendChild(textSpan);
-        
+
         const deleteSpan = document.createElement("span");
         deleteSpan.className = "delete-suggestion";
         deleteSpan.textContent = "✕";
-        deleteSpan.title = "Delete topic from suggestions";
+        deleteSpan.title = `Remove "${topic}" — also damps similar topics`;
         deleteSpan.addEventListener("click", (e) => {
             e.stopPropagation();
             deleteSuggestion(topic);
         });
         pill.appendChild(deleteSpan);
-        
-        container.appendChild(pill);
-    });
+        return pill;
+    };
+
+    // Collapsed: one tight ranked row. Expanded: the full set, grouped.
+    if (!suggestionsExpanded) {
+        const row = document.createElement("div");
+        row.className = "suggestion-row";
+        // Keep a little of each provenance rather than 12 AI topics in a row.
+        const quota = [
+            [groups.find(g => g.cls === "grp-yours"), 5],
+            [groups.find(g => g.cls === "grp-recent"), 2],
+            [groups.find(g => g.cls === "grp-ai"), SUGGESTIONS_VISIBLE],
+        ];
+        const shown = [];
+        for (const [g, n] of quota) {
+            if (!g) continue;
+            for (const t of g.topics.slice(0, n)) {
+                if (shown.length < SUGGESTIONS_VISIBLE && !shown.includes(t)) {
+                    shown.push(t);
+                    row.appendChild(makePill(t, g.cls));
+                }
+            }
+        }
+        container.appendChild(row);
+    } else {
+        groups.forEach(g => {
+            const section = document.createElement("div");
+            section.className = "suggestion-group";
+            const h = document.createElement("span");
+            h.className = "suggestion-group-label";
+            h.textContent = g.label;
+            section.appendChild(h);
+            const row = document.createElement("div");
+            row.className = "suggestion-row";
+            g.topics.forEach(t => row.appendChild(makePill(t, g.cls)));
+            section.appendChild(row);
+            container.appendChild(section);
+        });
+    }
+
+    const total = groups.reduce((n, g) => n + g.topics.length, 0);
+    if (total > SUGGESTIONS_VISIBLE) {
+        const toggle = document.createElement("button");
+        toggle.className = "suggestion-toggle";
+        toggle.textContent = suggestionsExpanded
+            ? "Show less"
+            : `Show all ${total} topics`;
+        toggle.addEventListener("click", () => {
+            suggestionsExpanded = !suggestionsExpanded;
+            renderSearchSuggestions(true);
+        });
+        container.appendChild(toggle);
+    }
 }
 
 // Helper to get profile-prefixed key for localstorage
@@ -5136,22 +5346,29 @@ async function generateBrainstormTopics(append, numRequests = 1) {
         }
         
         const data = await resp.json();
-        const topicsArray = data.topics || [];
+        // The backend grades each topic for domain-anchoring and hands back a
+        // starting weight: specific topics ("raku reduction firing") outrank
+        // broad ones ("chemical reactions"), and floating abstractions
+        // ("hazard analysis") are dropped before they ever reach us. Older
+        // backends only return `topics`, so fall back to the flat weight.
+        const rated = Array.isArray(data.rated) && data.rated.length
+            ? data.rated
+            : (data.topics || []).map(topic => ({ topic, weight: 5 }));
         let allAddedPhrases = [];
-        
-        topicsArray.forEach(phrase => {
+
+        rated.forEach(({ topic: phrase, weight }) => {
             if (!phrase) return;
-            
-            if (state.burnedQueries.includes(phrase)) {
+
+            if (isBurned(phrase)) {
                 console.log(`[Smart Feed] Skipping burned query "${phrase}" from LLM results.`);
                 return;
             }
-            
-            const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
-            if (!existsInTopics) {
-                state.topics.push({ phrase, weight: 5 });
+
+            const existing = state.topics.find(t => t.phrase.toLowerCase() === phrase);
+            if (!existing) {
+                state.topics.push({ phrase, weight: weight || 5, addedAt: Date.now() });
             }
-            
+
             const inQueue = state.smartFeedTopicsQueue.includes(phrase);
             const inUsed = state.smartFeedUsedTopics.includes(phrase);
             if (!inQueue && !inUsed) {
@@ -5159,6 +5376,8 @@ async function generateBrainstormTopics(append, numRequests = 1) {
                 allAddedPhrases.push(phrase);
             }
         });
+
+        pruneTopicPool();
         
         if (allAddedPhrases.length > 0) {
             saveTopics();
@@ -5880,27 +6099,11 @@ function nukeDiscoverTopic(topic) {
     if (!topic) return;
     
     const normalizedTopic = topic.trim().toLowerCase();
-    
-    // 1. Add to burned queries (rolling cap of 50) — LLM will avoid these exact phrases
-    if (!state.burnedQueries.includes(normalizedTopic)) {
-        state.burnedQueries.push(normalizedTopic);
-        // Rolling cap: keep only the 50 most recent burned queries
-        if (state.burnedQueries.length > 50) {
-            state.burnedQueries = state.burnedQueries.slice(-50);
-        }
-        saveBurnedQueries();
-    }
-    
-    // 2. Remove from active topics completely
-    state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== normalizedTopic);
-    saveTopics();
-    
-    // Remove from liked topics if present
-    if (state.likedTopics.includes(normalizedTopic)) {
-        state.likedTopics = state.likedTopics.filter(t => t !== normalizedTopic);
-        saveLikedTopics();
-    }
-    
+
+    // 1-2. Burn it: blacklist permanently, mark disliked, drive it negative in
+    // the graph so its neighbours cool off, and demote its siblings.
+    burnTopic(normalizedTopic);
+
     // 3. Clear from queue/preload states
     state.smartFeedUsedTopics = state.smartFeedUsedTopics.filter(t => t !== normalizedTopic);
     state.smartFeedTopicsQueue = state.smartFeedTopicsQueue.filter(t => t !== normalizedTopic);

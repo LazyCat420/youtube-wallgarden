@@ -28,7 +28,12 @@ let settings = {
     blockAllCaps: true,
     blockPunctuation: true,
     // Smart Blocklist
-    enableSmartBlock: true
+    enableSmartBlock: true,
+    // Collapsible panels — these HIDE rather than BLOCK: the panel folds down to
+    // a title bar you can click to bring it back. Default off, so nothing moves
+    // until you ask it to.
+    collapseChat: false,
+    collapseRelated: false
 };
 
 // Persistent blocklist data
