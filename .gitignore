@@ -10,6 +10,7 @@ desktop.ini
 # IDE
 .vscode/
 .idea/
+*.code-workspace
 
 # Node (if added later)
 node_modules/
@@ -21,3 +22,6 @@ app/app.min.css
 
 # Gemini agent artifacts
 .gemini/
+
+# LLM debug dumps
+raw_*.txt
