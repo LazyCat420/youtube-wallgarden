@@ -140,4 +140,23 @@ pruneTopicPool();
 assert.ok(w("kiln atmosphere control") < before, "a used topic decays");
 console.log(`✅ used topic decays ${before} -> ${w("kiln atmosphere control")}`);
 
+// ── 7. a SPECIFIC burn spares the broader topic it specialises ────
+reset(fresh());
+burnTopic("quantum computing");
+assert.ok(isBurned("quantum computing"), "exact burn holds");
+assert.ok(isBurned("quantum computing basics"), "reworded/elaborated superset still rejected");
+assert.ok(!isBurned("computing"), "the general topic 'computing' survives a specific burn");
+assert.ok(!isBurned("quantum"), "the general topic 'quantum' survives a specific burn");
+console.log("✅ specific burn does not swallow the broader topic");
+
+// ── 8. used-topic decay survives mixed-case data ──────────────────
+// The queue historically stored topics in the backend's own casing, so the
+// used-list and the topic pool could both be Title-Case. Decay must still fire.
+reset(fresh());
+S.topics.push({ phrase: "Raku Firing", weight: 6 });
+S.smartFeedUsedTopics = ["Raku Firing"];   // mixed-case, as the queue stored it
+pruneTopicPool();
+assert.ok(w("Raku Firing") < 6, "a used topic decays even when case differs");
+console.log("✅ decay matches used topics case-insensitively");
+
 console.log("\nAll learning tests passed.");

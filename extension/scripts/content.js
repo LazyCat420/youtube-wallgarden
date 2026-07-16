@@ -943,7 +943,11 @@ function startCollapseWatcher() {
             if (missing) injectCollapseBars();
         }, 400);
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    // Scope to the watch-page content container when present: the panels live
+    // under it, so there's no need to wake on masthead/guide/popup churn
+    // elsewhere in <body>. Falls back to body before #page-manager mounts.
+    const root = document.getElementById('page-manager') || document.body;
+    observer.observe(root, { childList: true, subtree: true });
 }
 
 // ============================================================
