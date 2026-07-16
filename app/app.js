@@ -26,7 +26,7 @@ async function fetchGoogleApiKey() {
             const data = await resp.json();
             if (data.GOOGLE_API_KEY) {
                 GOOGLE_API_KEY = data.GOOGLE_API_KEY;
-                console.log("[Google API] Key fetched successfully.");
+                debug("[Google API] Key fetched successfully.");
             }
         }
     } catch (err) {
@@ -87,6 +87,10 @@ const DISCOVER_MAX_RESULTS = 150;
 
 // Verbose per-video logging in the stream read loop; costs real frame time when on
 const DEBUG = false;
+// Debug logging is silenced in production. Flip DEBUG (or set window.WG_DEBUG in
+// the console) to see the [Smart Feed]/[Learn]/[Performance] traces. Real
+// problems still go through console.error/console.warn, which are never gated.
+function debug(...args) { if (DEBUG || (typeof window !== "undefined" && window.WG_DEBUG)) console.log(...args); }
 
 // In-memory session cache for topic search discovery results
 let sessionDiscoverOffset = 0; // fallback counter for yt-dlp discover
@@ -146,11 +150,11 @@ function initSmartFeed() {
             }
         });
         if (graphSuggestions.length > 0) {
-            console.log("[Smart Feed] Graph-discovered topics:", graphSuggestions);
+            debug("[Smart Feed] Graph-discovered topics:", graphSuggestions);
         }
     }
     
-    console.log("[Smart Feed] Initialized with topics queue:", state.smartFeedTopicsQueue);
+    debug("[Smart Feed] Initialized with topics queue:", state.smartFeedTopicsQueue);
     
     // Start background preloading
     fillSmartFeedPreloadBuffer();
@@ -180,7 +184,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // Run background brainstorm topics on load to populate the feed and hit vLLM (if positive topics exist)
     setTimeout(() => {
         if (state.topics.filter(t => t.weight > 0).length > 0) {
-            console.log("[Smart Feed] Launch brainstorm started...");
+            debug("[Smart Feed] Launch brainstorm started...");
             generateBrainstormTopics(true, 1); // Appends new topics with 1 request
         }
     }, 1000);
@@ -239,36 +243,57 @@ const TOPIC_STOPWORDS = new Set([
     "modern", "high", "low", "big", "small", "good", "great",
 ]);
 
+/** Canonical form of a topic phrase, for storage and all comparisons. */
+function normalizeTopic(phrase) {
+    return (phrase || "").trim().toLowerCase();
+}
+
 /** The words that actually give a topic its identity. */
 function topicSignature(phrase) {
-    return (phrase || "")
-        .toLowerCase()
+    return normalizeTopic(phrase)
         .split(/[^a-z0-9]+/)
         .filter(w => w.length > 2 && !TOPIC_STOPWORDS.has(w));
 }
 
+// isBurned runs once per topic across the whole pool (suggestions, prune,
+// brainstorm). Recomputing every burned query's signature on each call was
+// O(topics × burned × words); cache them and rebuild only when the burned list
+// changes (new identity or length), plus an explicit bust in burnTopic for the
+// at-cap push+shift case that leaves the length unchanged.
+let _burnedSigCache = null;
+function invalidateBurnedSignatures() { _burnedSigCache = null; }
+function getBurnedSignatures() {
+    const burned = state.burnedQueries || [];
+    if (!_burnedSigCache || _burnedSigCache.ref !== burned || _burnedSigCache.n !== burned.length) {
+        _burnedSigCache = {
+            ref: burned,
+            n: burned.length,
+            exact: new Set(burned.map(normalizeTopic)),
+            sigs: burned.map(topicSignature).filter(s => s.length > 0),
+        };
+    }
+    return _burnedSigCache;
+}
+
 /**
- * True if `phrase` is burned outright, or is a close relative of something
- * burned. "self care" burned also rejects "self care routines" — a re-word of
- * a rejected idea is still a rejected idea.
+ * True if `phrase` is burned outright, or is a reworded/elaborated version of
+ * something burned — one that contains the burned topic's full identity
+ * ("self care" burned also rejects "self care routines"). Burning a specific
+ * phrase does NOT take out the broader topic it specialises: burning
+ * "kiln safety" leaves "kiln atmosphere control" alone, and burning
+ * "quantum computing" leaves the general topic "computing" alone.
  */
 function isBurned(phrase) {
-    const normalized = (phrase || "").trim().toLowerCase();
+    const normalized = normalizeTopic(phrase);
     if (!normalized) return false;
-    const burned = state.burnedQueries || [];
-    if (burned.some(b => b.toLowerCase() === normalized)) return true;
+    const { exact, sigs } = getBurnedSignatures();
+    if (exact.has(normalized)) return true;
 
     const sig = topicSignature(normalized);
     if (sig.length === 0) return false;
-    return burned.some(b => {
-        const bs = topicSignature(b);
-        if (bs.length === 0) return false;
-        // Reject only when the burned topic's identity is fully contained in
-        // this one (or vice versa). Sharing a single word is not enough —
-        // that would let burning "kiln safety" take out "kiln atmosphere".
-        const shared = sig.filter(w => bs.includes(w)).length;
-        return shared === bs.length || shared === sig.length;
-    });
+    const sigSet = new Set(sig);
+    // The candidate must contain EVERY word of some burned topic's identity.
+    return sigs.some(bs => bs.every(w => sigSet.has(w)));
 }
 
 /**
@@ -289,6 +314,7 @@ function burnTopic(phrase) {
     if (!state.burnedQueries.some(b => b.toLowerCase() === normalized)) {
         state.burnedQueries.push(normalized);
         if (state.burnedQueries.length > 500) state.burnedQueries.shift();
+        invalidateBurnedSignatures();
         saveBurnedQueries();
     }
 
@@ -337,7 +363,7 @@ function burnTopic(phrase) {
     saveTopics();
     invalidateScoreCache();
 
-    console.log(`[Learn] Burned "${normalized}"`
+    debug(`[Learn] Burned "${normalized}"`
         + (demoted.length ? `; demoted ${demoted.length} sibling(s): ${demoted.join(", ")}` : ""));
     return demoted;
 }
@@ -355,12 +381,20 @@ function pruneTopicPool() {
     if (!Array.isArray(state.topics)) return;
     const before = state.topics.length;
 
+    // Normalize once so the comparison survives legacy mixed-case data: used
+    // topics and liked topics were historically stored in whatever case the
+    // backend produced, so a raw === would silently never match and no topic
+    // would ever decay.
+    const usedSet = new Set((state.smartFeedUsedTopics || []).map(normalizeTopic));
+    const likedSet = new Set((state.likedTopics || []).map(normalizeTopic));
+
     state.topics.forEach(t => {
         // Never decay the user's own negative weights or their hand-added
         // topics — only the AI-generated bulk, which is what silts up.
-        if (t.weight > 0 && !(state.likedTopics || []).some(l => l.toLowerCase() === t.phrase.toLowerCase())) {
-            const used = (state.smartFeedUsedTopics || []).includes(t.phrase.toLowerCase());
-            if (used) t.weight = Math.max(0.5, t.weight - TOPIC_DECAY_PER_PRUNE);
+        if (t.weight > 0 && !likedSet.has(normalizeTopic(t.phrase))) {
+            if (usedSet.has(normalizeTopic(t.phrase))) {
+                t.weight = Math.max(0.5, t.weight - TOPIC_DECAY_PER_PRUNE);
+            }
         }
     });
 
@@ -379,7 +413,7 @@ function pruneTopicPool() {
     }
 
     if (state.topics.length !== before) {
-        console.log(`[Learn] Pruned topic pool: ${before} -> ${state.topics.length}`);
+        debug(`[Learn] Pruned topic pool: ${before} -> ${state.topics.length}`);
     }
     saveTopics();
     invalidateScoreCache();
@@ -463,15 +497,12 @@ function renderSearchSuggestions(useExisting = false) {
     if (!container) return;
     container.innerHTML = "";
 
+    const groups = buildSuggestionGroups();
+
     if (!useExisting || currentSearchSuggestions.length === 0) {
-        const groups = buildSuggestionGroups();
         currentSearchSuggestions = groups.flatMap(g => g.topics);
-        container.dataset.groups = JSON.stringify(
-            groups.map(g => ({ label: g.label, cls: g.cls, n: g.topics.length }))
-        );
     }
 
-    const groups = buildSuggestionGroups();
     if (groups.length === 0) return;
 
     const makePill = (topic, cls) => {
@@ -600,7 +631,7 @@ function loadState() {
             // Check legacy un-prefixed key
             const legacyVal = localStorage.getItem(`wallgarden_${key}`);
             if (legacyVal !== null) {
-                console.log(`[Profile Migration] Migrating legacy key wallgarden_${key} to ${prefixedKey}`);
+                debug(`[Profile Migration] Migrating legacy key wallgarden_${key} to ${prefixedKey}`);
                 localStorage.setItem(prefixedKey, legacyVal);
                 val = legacyVal;
             }
@@ -676,7 +707,7 @@ function loadState() {
         v.crawledAt && v.crawledAt > fourteenDaysAgo
     );
     if (state.smartFeedSuggestionPool.length !== initialPoolSize) {
-        console.log(`[Smart Feed] Discarded ${initialPoolSize - state.smartFeedSuggestionPool.length} expired suggestions older than 14 days.`);
+        debug(`[Smart Feed] Discarded ${initialPoolSize - state.smartFeedSuggestionPool.length} expired suggestions older than 14 days.`);
         saveSmartFeedSuggestionPool();
     }
 
@@ -737,13 +768,13 @@ function migrateTopicsToGraph() {
     if (localStorage.getItem(getProfileKey("ontology_v2_migrated")) === "1"
         && Object.keys(state.ontologyGraph.edges || {}).length === 0
         && Object.keys(state.ontologyGraph.nodes || {}).length > 0) {
-        console.log("[Ontology V2] Detected broken migration (nodes but 0 edges) — re-running...");
+        debug("[Ontology V2] Detected broken migration (nodes but 0 edges) — re-running...");
         localStorage.removeItem(getProfileKey("ontology_v2_migrated"));
     }
     
     if (localStorage.getItem(getProfileKey("ontology_v2_migrated"))) return;
     
-    console.log("[Ontology V2] Wiping old graph and rebuilding with proper edge creation...");
+    debug("[Ontology V2] Wiping old graph and rebuilding with proper edge creation...");
     state.ontologyGraph = { nodes: {}, edges: {}, clusters: {} };
     
     // Re-seed from current state
@@ -777,56 +808,40 @@ function migrateTopicsToGraph() {
     
     const nodeCount = Object.keys(state.ontologyGraph.nodes).length;
     const edgeCount = Object.keys(state.ontologyGraph.edges).length;
-    console.log(`[Ontology V2] Rebuilt graph: ${nodeCount} nodes, ${edgeCount} edges from ${rebuiltCount} ratings`);
+    debug(`[Ontology V2] Rebuilt graph: ${nodeCount} nodes, ${edgeCount} edges from ${rebuiltCount} ratings`);
     
     saveOntologyGraph();
     localStorage.setItem(getProfileKey("ontology_v2_migrated"), "1");
 }
 
-function saveSettings() {
-    localStorage.setItem(getProfileKey("settings"), JSON.stringify(state.settings));
+// One place that turns "field -> JSON in this profile's slot" into a write, so
+// each saver is a name + a value instead of a copy of the same setItem line.
+// (The debounced pool/graph savers below deliberately don't route through it.)
+function persistField(key, value) {
+    localStorage.setItem(getProfileKey(key), JSON.stringify(value));
 }
 
+function saveSettings() { persistField("settings", state.settings); }
+
 function saveBlocked() {
-    localStorage.setItem(getProfileKey("blocked_channels"), JSON.stringify(state.blockedChannels));
+    persistField("blocked_channels", state.blockedChannels);
     document.getElementById("blocked-count").textContent = state.blockedChannels.length;
 }
 
 // Save helpers
 function saveChannels() {
-    localStorage.setItem(getProfileKey("channels"), JSON.stringify(state.channels));
+    persistField("channels", state.channels);
     document.getElementById("subscribed-count").textContent = state.channels.length;
 }
 
-function saveTopics() {
-    localStorage.setItem(getProfileKey("topics"), JSON.stringify(state.topics));
-}
-
-function saveLikedTopics() {
-    localStorage.setItem(getProfileKey("liked_topics"), JSON.stringify(state.likedTopics));
-}
-
-function saveDislikedTopics() {
-    localStorage.setItem(getProfileKey("disliked_topics"), JSON.stringify(state.dislikedTopics));
-}
-
-function saveCache() {
-    localStorage.setItem(getProfileKey("cache"), JSON.stringify(state.cache));
-}
-
-function saveVideoRatings() {
-    localStorage.setItem(getProfileKey("video_ratings"), JSON.stringify(state.videoRatings));
-}
-function saveNewsRatings() {
-    localStorage.setItem(getProfileKey("news_ratings"), JSON.stringify(state.newsSourceRatings));
-}
-function saveLikedVideos() {
-    localStorage.setItem(getProfileKey("liked_videos"), JSON.stringify(state.likedVideos));
-}
-
-function saveSearchHistory() {
-    localStorage.setItem(getProfileKey("search_history"), JSON.stringify(state.searchHistory));
-}
+function saveTopics()         { persistField("topics", state.topics); }
+function saveLikedTopics()    { persistField("liked_topics", state.likedTopics); }
+function saveDislikedTopics() { persistField("disliked_topics", state.dislikedTopics); }
+function saveCache()          { persistField("cache", state.cache); }
+function saveVideoRatings()   { persistField("video_ratings", state.videoRatings); }
+function saveNewsRatings()    { persistField("news_ratings", state.newsSourceRatings); }
+function saveLikedVideos()    { persistField("liked_videos", state.likedVideos); }
+function saveSearchHistory()  { persistField("search_history", state.searchHistory); }
 
 // The pool and ontology graph are saved from hot paths (scroll batches, watch
 // signals), and JSON.stringify of those blocks blocks the main thread — so both
@@ -840,29 +855,24 @@ function saveSmartFeedSuggestionPool() {
 function flushSmartFeedSuggestionPoolSave() {
     clearTimeout(_poolSaveTimer);
     _poolSaveTimer = null;
-    localStorage.setItem(getProfileKey("smart_feed_pool"), JSON.stringify(state.smartFeedSuggestionPool));
+    persistField("smart_feed_pool", state.smartFeedSuggestionPool);
 }
 
-function saveBurnedQueries() {
-    localStorage.setItem(getProfileKey("burned_queries"), JSON.stringify(state.burnedQueries));
-}
+function saveBurnedQueries() { persistField("burned_queries", state.burnedQueries); }
+
 function savePlaylists() {
     if (state.playlists) {
         Object.values(state.playlists).forEach(pl => {
             if (pl && !pl.videos) pl.videos = [];
         });
     }
-    localStorage.setItem(getProfileKey("playlists"), JSON.stringify(state.playlists));
+    persistField("playlists", state.playlists);
 }
 
 // Save discovered channels helper (profile-aware)
-function saveDiscovered() {
-    localStorage.setItem(getProfileKey("discovered_channels"), JSON.stringify(state.discoveredChannels));
-}
+function saveDiscovered() { persistField("discovered_channels", state.discoveredChannels); }
 
-function saveQueue() {
-    localStorage.setItem(getProfileKey("queue"), JSON.stringify(state.queue));
-}
+function saveQueue() { persistField("queue", state.queue); }
 
 let _graphSaveTimer = null;
 function saveOntologyGraph() {
@@ -884,10 +894,6 @@ document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") flushPendingSaves();
 });
 
-function getCachedVideosCount() {
-    return Object.values(state.cache.videos).reduce((acc, curr) => acc + curr.length, 0);
-}
-
 // Mobile Sidebar Helpers
 function closeMobileSidebar() {
     const sidebar = document.querySelector(".sidebar");
@@ -898,6 +904,18 @@ function closeMobileSidebar() {
 
 // Setup Interactive UI Listeners
 function setupEventListeners() {
+    setupNavListeners();
+    setupSettingsModalListeners();
+    setupSettingsTabListeners();
+    setupChannelListeners();
+    setupTopicPrefListeners();
+    setupSettingsToggleListeners();
+    setupSearchListeners();
+    setupProfilesUI();
+    setupHeaderAndLikedListeners();
+}
+
+function setupNavListeners() {
     // Navigation
     document.querySelectorAll(".nav-item").forEach(item => {
         item.addEventListener("click", (e) => {
@@ -952,7 +970,9 @@ function setupEventListeners() {
     if (sidebarOverlay) {
         sidebarOverlay.addEventListener("click", closeMobileSidebar);
     }
+}
 
+function setupSettingsModalListeners() {
     // Sync button
     const btnSync = document.getElementById("btn-sync-now");
     if (btnSync) {
@@ -1017,7 +1037,9 @@ function setupEventListeners() {
             renderPlaylistsView();
         });
     }
+}
 
+function setupSettingsTabListeners() {
     // Settings Tabs toggles
     document.querySelectorAll(".settings-tab-button").forEach(btn => {
         btn.addEventListener("click", (e) => {
@@ -1064,7 +1086,9 @@ function setupEventListeners() {
             showToast("🧹 Graph successfully pruned", "success");
         });
     }
+}
 
+function setupChannelListeners() {
     // Add channel input
     const btnAddChannel = document.getElementById("btn-add-channel");
     const inputChannel = document.getElementById("input-channel-handle");
@@ -1123,7 +1147,9 @@ function setupEventListeners() {
             handleOPMLFile(e.target.files[0]);
         }
     });
+}
 
+function setupTopicPrefListeners() {
     // LLM Topic Preferences
     document.getElementById("btn-add-liked-topic").addEventListener("click", () => {
         const phrase = document.getElementById("input-liked-topic").value.trim().toLowerCase();
@@ -1214,7 +1240,9 @@ function setupEventListeners() {
             importSettings(e.target.files[0]);
         }
     });
+}
 
+function setupSettingsToggleListeners() {
     // Close Inline Player — bound dynamically when player is created by playVideo()
 
     // Global settings toggles
@@ -1275,7 +1303,9 @@ function setupEventListeners() {
             }
         });
     }
+}
 
+function setupSearchListeners() {
     // Search input handlers
     const searchForm = document.getElementById("search-form");
     const searchInput = document.getElementById("input-search-videos");
@@ -1402,10 +1432,9 @@ function setupEventListeners() {
             renderTopicsList();
         });
     }
+}
 
-    // Setup Profiles UI Event Listeners
-    setupProfilesUI();
-
+function setupHeaderAndLikedListeners() {
     // Scroll listener for sticky main header background color / backdrop filter fade
     const feedSection = document.querySelector(".feed-section");
     const mainHeader = document.querySelector(".main-header");
@@ -1508,7 +1537,7 @@ function renderProfileDropdowns() {
 function switchProfile(profileName) {
     if (!state.profiles.includes(profileName)) return;
     
-    console.log(`[Profiles] Switching from ${state.currentProfile} to ${profileName}`);
+    debug(`[Profiles] Switching from ${state.currentProfile} to ${profileName}`);
     
     // Save current profile settings/state
     saveSettings();
@@ -1661,10 +1690,6 @@ function setupProfilesUI() {
             if (selectDelete) deleteProfile(selectDelete.value);
         });
     }
-}
-
-function renderSidebarTopics() {
-    // Consolidated into Smart Feed - no sidebar topic tabs anymore
 }
 
 // Add/Resolve YouTube Channel via Nginx proxy / scraping
@@ -1874,7 +1899,7 @@ let isSyncingFeeds = false;
 // Fetch Feeds in parallel via Nginx proxy and parse XML
 async function syncFeeds() {
     if (isSyncingFeeds) {
-        console.log("syncFeeds is already running. Skipping concurrent request.");
+        debug("syncFeeds is already running. Skipping concurrent request.");
         return;
     }
     if (state.channels.length === 0) {
@@ -1996,7 +2021,7 @@ async function syncFeeds() {
             // Fallback to Scraper Service (yt-dlp) if RSS failed or useYtdlp is true
             if (!success && !channel.id.startsWith("reddit:")) {
                 try {
-                    console.log(`Syncing channel ${channel.name} (${channel.id}) via scraper-service...`);
+                    debug(`Syncing channel ${channel.name} (${channel.id}) via scraper-service...`);
                     const controller = new AbortController();
                     // Increased timeout to 120s to allow fetching all videos from the channel
                     const timeoutId = setTimeout(() => controller.abort(), 120000);
@@ -2077,7 +2102,7 @@ async function syncFeeds() {
             const graphBlocked = graphGetDislikedChannels(state.ontologyGraph, -6);
             graphBlocked.forEach(gc => {
                 if (!state.blockedChannels.some(bc => bc.id === gc.id)) {
-                    console.log(`[Ontology] Auto-suppressing channel ${gc.id} (graph weight: ${gc.weight})`);
+                    debug(`[Ontology] Auto-suppressing channel ${gc.id} (graph weight: ${gc.weight})`);
                     state.blockedChannels.push({ name: gc.id, id: gc.id, autoBlocked: true });
                 }
             });
@@ -2103,7 +2128,7 @@ async function syncFeeds() {
 
 // Compute custom interest score for a video
 function invalidateScoreCache() {
-    console.log("[Performance] Invalidating video score cache...");
+    debug("[Performance] Invalidating video score cache...");
     Object.values(state.cache.videos).forEach(channelVideos => {
         channelVideos.forEach(v => {
             delete v._score;
@@ -2391,6 +2416,36 @@ function createVideoCard(video) {
 
     const videoTopicForRating = video.discoveryTopic || (video.matchedTopics ? video.matchedTopics.find(t => t !== "all-caps" && t !== "punctuation" && !t.startsWith("disliked:")) : null) || "";
 
+    wireCardRatingButtons(card, video, videoTopicForRating);
+
+    const channelLink = card.querySelector(".channel-link");
+    if (channelLink) {
+        channelLink.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const chId = channelLink.dataset.id;
+            const chName = channelLink.dataset.name;
+            if (chId) {
+                navigateToChannel(chId, chName);
+            } else {
+                resolveAndInspectChannelByName(chName);
+            }
+        });
+    }
+    
+    // 3-dot action menu
+    wireCardActionMenu(card, video, isSubscribed);
+    
+    // ── Intersection Observer: passive watch signal for graph ──
+    const watchObserver = getWatchSignalObserver();
+    if (watchObserver) {
+        watchSignalVideos.set(card, video);
+        watchObserver.observe(card);
+    }
+
+    return card;
+}
+
+function wireCardRatingButtons(card, video, videoTopicForRating) {
     card.querySelectorAll(".title-rating-btn").forEach(btn => {
         btn.addEventListener("click", (ev) => {
             ev.stopPropagation();
@@ -2480,22 +2535,9 @@ function createVideoCard(video) {
             }
         });
     });
+}
 
-    const channelLink = card.querySelector(".channel-link");
-    if (channelLink) {
-        channelLink.addEventListener("click", (e) => {
-            e.stopPropagation();
-            const chId = channelLink.dataset.id;
-            const chName = channelLink.dataset.name;
-            if (chId) {
-                navigateToChannel(chId, chName);
-            } else {
-                resolveAndInspectChannelByName(chName);
-            }
-        });
-    }
-    
-    // 3-dot action menu
+function wireCardActionMenu(card, video, isSubscribed) {
     const actionBtn = card.querySelector(".card-action-btn");
     actionBtn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -2632,16 +2674,8 @@ function createVideoCard(video) {
         };
         setTimeout(() => document.addEventListener("click", closeDropdown), 0);
     });
-    
-    // ── Intersection Observer: passive watch signal for graph ──
-    const watchObserver = getWatchSignalObserver();
-    if (watchObserver) {
-        watchSignalVideos.set(card, video);
-        watchObserver.observe(card);
-    }
-
-    return card;
 }
+
 
 // One shared observer for all cards' passive watch signals — a per-card
 // observer instance made every scroll frame pay for hundreds of observers.
@@ -3310,241 +3344,10 @@ function renderFeed() {
     }
 }
 }
-
-// Floating Player (Picture-in-Picture)
-function openFloatingPlayer(videoId, title = "YouTube Video") {
-    let player = document.getElementById("floating-player-popup");
-    if (!player) {
-        player = document.createElement("div");
-        player.id = "floating-player-popup";
-        player.className = "floating-player";
-        
-        player.innerHTML = `
-            <div class="floating-player-header" id="floating-player-header">
-                <div class="floating-player-title" id="floating-player-title"></div>
-                <div class="floating-player-actions">
-                    <button class="btn-popout" title="Open full YouTube site (use if restricted)">↗ Popout</button>
-                    <button class="btn-close" title="Close">✕</button>
-                </div>
-            </div>
-            <div class="floating-player-content">
-                <div id="floating-player-iframe-container" style="width: 100%; height: 100%;"></div>
-            </div>
-        `;
-        document.body.appendChild(player);
-        
-        // Drag logic
-        const header = player.querySelector("#floating-player-header");
-        let isDragging = false;
-        let startX, startY, initialX, initialY;
-        
-        header.addEventListener("mousedown", (e) => {
-            if (e.target.closest("button")) return;
-            isDragging = true;
-            player.classList.add("is-dragging");
-            startX = e.clientX;
-            startY = e.clientY;
-            
-            const rect = player.getBoundingClientRect();
-            player.style.transform = "none";
-            player.style.left = rect.left + "px";
-            player.style.top = rect.top + "px";
-            player.style.margin = "0";
-            
-            initialX = rect.left;
-            initialY = rect.top;
-        });
-        
-        document.addEventListener("mousemove", (e) => {
-            if (!isDragging) return;
-            const dx = e.clientX - startX;
-            const dy = e.clientY - startY;
-            player.style.left = (initialX + dx) + "px";
-            player.style.top = (initialY + dy) + "px";
-        });
-        
-        document.addEventListener("mouseup", () => {
-            if (isDragging) {
-                isDragging = false;
-                player.classList.remove("is-dragging");
-            }
-        });
-        
-        // Buttons
-        player.querySelector(".btn-close").addEventListener("click", () => {
-            player.style.display = "none";
-            if (window.floatingYtPlayer) {
-                try { window.floatingYtPlayer.destroy(); } catch (e) {}
-                window.floatingYtPlayer = null;
-            }
-        });
-        
-        player.querySelector(".btn-popout").addEventListener("click", () => {
-            const currentVideoId = player.dataset.videoId;
-            if (currentVideoId) {
-                window.open(`https://www.youtube.com/watch?v=${currentVideoId}`, "_blank");
-                if (window.logYouTubeLaunch) window.logYouTubeLaunch(currentVideoId);
-                
-                player.style.display = "none";
-                if (window.floatingYtPlayer) {
-                    try { window.floatingYtPlayer.destroy(); } catch (e) {}
-                    window.floatingYtPlayer = null;
-                }
-            }
-        });
-    }
-    
-    player.dataset.videoId = videoId;
-    player.querySelector("#floating-player-title").textContent = title;
-    player.style.display = "flex";
-    
-    if (!player.style.transform && !player.style.left) {
-        player.style.transform = "translate(-50%, -50%)";
-        player.style.left = "50%";
-        player.style.top = "50%";
-    }
-    
-    const contentDiv = player.querySelector(".floating-player-content");
-    contentDiv.innerHTML = '<div id="floating-player-iframe-container" style="width: 100%; height: 100%;"></div>';
-    
-    loadYouTubeApi().then((YT) => {
-        if (window.floatingYtPlayer) {
-            try { window.floatingYtPlayer.destroy(); } catch (e) {}
-            window.floatingYtPlayer = null;
-        }
-
-        window.floatingYtPlayer = new YT.Player('floating-player-iframe-container', {
-            height: '100%',
-            width: '100%',
-            videoId: videoId,
-            playerVars: {
-                autoplay: 1,
-                rel: 0,
-                modestbranding: 1,
-                playsinline: 1
-            },
-            events: {
-                onError: (event) => {
-                    console.warn(`[Floating Player] YouTube embed failed with error code ${event.data} for ${videoId}`);
-                    showToast("YouTube embed restricted. Auto-opening in new window...", "warning");
-                    
-                    window.open(`https://www.youtube.com/watch?v=${videoId}`, "_blank");
-                    if (window.logYouTubeLaunch) window.logYouTubeLaunch(videoId);
-                    
-                    player.style.display = "none";
-                    if (window.floatingYtPlayer) {
-                        try { window.floatingYtPlayer.destroy(); } catch (e) {}
-                        window.floatingYtPlayer = null;
-                    }
-                }
-            }
-        });
-    });
-}
-
 // Display Video in Inline Player (above feed, no overlay)
 function playVideo(video) {
     // Get or create the inline player element
-    let inlinePlayer = document.getElementById("inline-player");
-    if (!inlinePlayer) {
-        // Dynamically create the inline player and insert before feed-section
-        inlinePlayer = document.createElement("div");
-        inlinePlayer.id = "inline-player";
-        inlinePlayer.className = "inline-player";
-        inlinePlayer.innerHTML = [
-            '<div class="inline-player-inner">',
-            '  <div class="inline-player-main">',
-            '    <div class="inline-player-video">',
-            '      <div class="player-wrapper-box"></div>',
-            '    </div>',
-            '    <div class="inline-player-bar">',
-            '      <div class="inline-player-meta">',
-            '        <h2 class="player-title"></h2>',
-            '        <p class="player-channel"></p>',
-            '        <p class="player-stats" style="font-size: 0.85rem; color: #aaa; margin-top: 4px;"></p>',
-            '      </div>',
-            '      <div class="player-bar-actions" style="display: flex; gap: 0.75rem; align-items: center;">',
-            '        <button class="btn btn-primary btn-sm btn-open-youtube" title="Open Video on YouTube (New Tab)">📺 Watch on YouTube</button>',
-            '        <button class="inline-player-close" title="Close Player">✕ Close</button>',
-            '      </div>',
-            '    </div>',
-            '  </div>',
-            '  <div class="inline-player-sidebar">',
-            '  </div>',
-            '</div>'
-        ].join("");
-        // Create resizer bar
-        const resizer = document.createElement("div");
-        resizer.id = "watch-resizer";
-        resizer.className = "watch-resizer";
-
-        // Insert before .feed-section inside .main-content
-        const feedSection = document.querySelector(".feed-section");
-        if (feedSection && feedSection.parentNode) {
-            feedSection.parentNode.insertBefore(inlinePlayer, feedSection);
-            feedSection.parentNode.insertBefore(resizer, feedSection);
-        } else {
-            const mainContent = document.querySelector(".main-content");
-            if (mainContent) {
-                mainContent.appendChild(inlinePlayer);
-                mainContent.appendChild(resizer);
-            }
-        }
-
-        // Setup resizer dragging logic (pointer events)
-        let isDragging = false;
-        resizer.addEventListener("pointerdown", (e) => {
-            e.preventDefault();
-            isDragging = true;
-            resizer.classList.add("dragging");
-            resizer.setPointerCapture(e.pointerId);
-        });
-
-        resizer.addEventListener("pointermove", (e) => {
-            if (!isDragging) return;
-            const mainContent = document.querySelector(".main-content");
-            if (!mainContent) return;
-
-            const rect = mainContent.getBoundingClientRect();
-            const minRight = 300; // minimum width of feed-section in px
-            const minLeft = 400;  // minimum width of inline-player in px
-
-            let rightWidth = rect.right - e.clientX;
-
-            if (rightWidth < minRight) rightWidth = minRight;
-            if (rect.width - rightWidth < minLeft) rightWidth = rect.width - minLeft;
-
-            mainContent.style.gridTemplateColumns = `1fr 6px ${rightWidth}px`;
-            localStorage.setItem("watch-sidebar-width", rightWidth);
-        });
-
-        const stopDragging = (e) => {
-            if (isDragging) {
-                isDragging = false;
-                resizer.classList.remove("dragging");
-                try {
-                    resizer.releasePointerCapture(e.pointerId);
-                } catch (err) {}
-            }
-        };
-
-        resizer.addEventListener("pointerup", stopDragging);
-        resizer.addEventListener("pointercancel", stopDragging);
-
-        // Bind close button using querySelector on the element itself
-        inlinePlayer.querySelector(".inline-player-close").addEventListener("click", closePlayer);
-
-        // Bind open on YouTube button
-        const btnOpenYoutube = inlinePlayer.querySelector(".btn-open-youtube");
-        if (btnOpenYoutube) {
-            btnOpenYoutube.addEventListener("click", () => {
-                if (state.currentlyPlayingId) {
-                    window.open(`https://www.youtube.com/watch?v=${state.currentlyPlayingId}`, "_blank");
-                    if (window.logYouTubeLaunch) window.logYouTubeLaunch(state.currentlyPlayingId);
-                }
-            });
-        }
-    }
+    const inlinePlayer = ensureInlinePlayer();
 
     // Use querySelector on the player element - never document.getElementById
     const playerWrapper = inlinePlayer.querySelector(".player-wrapper-box");
@@ -3584,7 +3387,7 @@ function playVideo(video) {
         
         // Try stream proxy first (bypasses age restrictions), then fall back to YouTube embed
         playViaStreamProxy(video.id, playerWrapper).catch(() => {
-            console.log("[Player] Stream proxy failed, falling back to YouTube embed");
+            debug("[Player] Stream proxy failed, falling back to YouTube embed");
             playViaYouTubeEmbed(video.id, playerWrapper);
         });
     }
@@ -3614,57 +3417,7 @@ function playVideo(video) {
             }
         }
 
-        sidebar.innerHTML = `
-            <div class="sidebar-meta" style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem; border-bottom: 1px solid var(--card-border); padding-bottom: 0.5rem; display: none;">
-                <!-- Publish date removed -->
-            </div>
-            <div class="sidebar-description-box">
-                ${escapeHTML(video.description || "No description available.").replace(/\n/g, '<br>')}
-            </div>
-            <div class="sidebar-actions-grid" style="grid-template-columns: 1fr 1fr;">
-                <button type="button" class="btn sidebar-btn-like${currentRating === 5 ? ' active' : ''}">
-                    <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
-                    Like
-                </button>
-                <button type="button" class="btn sidebar-btn-dislike${currentRating === -5 ? ' active' : ''}">
-                    <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm12-3h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"></path></svg>
-                    Dislike
-                </button>
-                <button type="button" class="btn sidebar-btn-subscribe${isSubscribed ? ' active' : ''}">
-                    ${isSubscribed ? `
-                        <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="23" y1="11" x2="17" y2="11"></line></svg>
-                        Unsubscribe
-                    ` : `
-                        <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="20" y1="8" x2="20" y2="14"></line><line x1="23" y1="11" x2="17" y2="11"></line></svg>
-                        Subscribe
-                    `}
-                </button>
-                <button type="button" class="btn sidebar-btn-playlist">
-                    <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
-                    Save
-                </button>
-            </div>
-            ${topicBtnHtml}
-            <button type="button" class="btn sidebar-btn-block" style="margin-top: 0.75rem; width: 100%;">
-                <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>
-                Block Channel
-            </button>
-            
-            <div class="sidebar-queue-section" style="margin-top: 1.25rem; border-top: 1px solid var(--card-border); padding-top: 1rem;">
-                <h4 style="font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
-                    <span style="display: inline-flex; align-items: center; gap: 6px;">
-                        <svg class="icon-svg" style="width: 14px; height: 14px; color: var(--accent);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                        Play Queue (<span class="queue-count">0</span>)
-                    </span>
-                    <div style="display: flex; gap: 0.4rem; align-items: center;">
-                        <button type="button" class="btn-save-queue btn-primary btn-sm" style="padding: 2px 6px; font-size: 0.7rem; border-radius: 4px; display: none;">Save</button>
-                        <button type="button" class="btn-clear-queue btn-danger btn-sm" style="padding: 2px 6px; font-size: 0.7rem; border-radius: 4px; display: none;">Clear</button>
-                    </div>
-                </h4>
-                <div class="sidebar-queue-list" style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 250px; overflow-y: auto; padding-right: 0.25rem;">
-                </div>
-            </div>
-        `;
+        sidebar.innerHTML = buildPlayerSidebarHtml(video, currentRating, isSubscribed, topicBtnHtml);
 
         const btnAddPlaylist = sidebar.querySelector(".sidebar-btn-playlist");
         if (btnAddPlaylist) {
@@ -3787,7 +3540,7 @@ function playVideo(video) {
     // Trigger background similar topic generation (deferred)
     if (video.title) {
         setTimeout(() => {
-            console.log(`[Smart Feed] Watching video, triggering background similar topics generation for: "${video.title}"`);
+            debug(`[Smart Feed] Watching video, triggering background similar topics generation for: "${video.title}"`);
             generateSimilarTopicsFromSearch(video.title);
         }, 3000);
     }
@@ -3795,9 +3548,166 @@ function playVideo(video) {
     renderQueueUI();
 }
 
+function ensureInlinePlayer() {
+    let inlinePlayer = document.getElementById("inline-player");
+    if (inlinePlayer) return inlinePlayer;
+    // Dynamically create the inline player and insert before feed-section
+    inlinePlayer = document.createElement("div");
+    inlinePlayer.id = "inline-player";
+    inlinePlayer.className = "inline-player";
+    inlinePlayer.innerHTML = [
+        '<div class="inline-player-inner">',
+        '  <div class="inline-player-main">',
+        '    <div class="inline-player-video">',
+        '      <div class="player-wrapper-box"></div>',
+        '    </div>',
+        '    <div class="inline-player-bar">',
+        '      <div class="inline-player-meta">',
+        '        <h2 class="player-title"></h2>',
+        '        <p class="player-channel"></p>',
+        '        <p class="player-stats" style="font-size: 0.85rem; color: #aaa; margin-top: 4px;"></p>',
+        '      </div>',
+        '      <div class="player-bar-actions" style="display: flex; gap: 0.75rem; align-items: center;">',
+        '        <button class="btn btn-primary btn-sm btn-open-youtube" title="Open Video on YouTube (New Tab)">📺 Watch on YouTube</button>',
+        '        <button class="inline-player-close" title="Close Player">✕ Close</button>',
+        '      </div>',
+        '    </div>',
+        '  </div>',
+        '  <div class="inline-player-sidebar">',
+        '  </div>',
+        '</div>'
+    ].join("");
+    // Create resizer bar
+    const resizer = document.createElement("div");
+    resizer.id = "watch-resizer";
+    resizer.className = "watch-resizer";
+
+    // Insert before .feed-section inside .main-content
+    const feedSection = document.querySelector(".feed-section");
+    if (feedSection && feedSection.parentNode) {
+        feedSection.parentNode.insertBefore(inlinePlayer, feedSection);
+        feedSection.parentNode.insertBefore(resizer, feedSection);
+    } else {
+        const mainContent = document.querySelector(".main-content");
+        if (mainContent) {
+            mainContent.appendChild(inlinePlayer);
+            mainContent.appendChild(resizer);
+        }
+    }
+
+    // Setup resizer dragging logic (pointer events)
+    let isDragging = false;
+    resizer.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        isDragging = true;
+        resizer.classList.add("dragging");
+        resizer.setPointerCapture(e.pointerId);
+    });
+
+    resizer.addEventListener("pointermove", (e) => {
+        if (!isDragging) return;
+        const mainContent = document.querySelector(".main-content");
+        if (!mainContent) return;
+
+        const rect = mainContent.getBoundingClientRect();
+        const minRight = 300; // minimum width of feed-section in px
+        const minLeft = 400;  // minimum width of inline-player in px
+
+        let rightWidth = rect.right - e.clientX;
+
+        if (rightWidth < minRight) rightWidth = minRight;
+        if (rect.width - rightWidth < minLeft) rightWidth = rect.width - minLeft;
+
+        mainContent.style.gridTemplateColumns = `1fr 6px ${rightWidth}px`;
+        localStorage.setItem("watch-sidebar-width", rightWidth);
+    });
+
+    const stopDragging = (e) => {
+        if (isDragging) {
+            isDragging = false;
+            resizer.classList.remove("dragging");
+            try {
+                resizer.releasePointerCapture(e.pointerId);
+            } catch (err) {}
+        }
+    };
+
+    resizer.addEventListener("pointerup", stopDragging);
+    resizer.addEventListener("pointercancel", stopDragging);
+
+    // Bind close button using querySelector on the element itself
+    inlinePlayer.querySelector(".inline-player-close").addEventListener("click", closePlayer);
+
+    // Bind open on YouTube button
+    const btnOpenYoutube = inlinePlayer.querySelector(".btn-open-youtube");
+    if (btnOpenYoutube) {
+        btnOpenYoutube.addEventListener("click", () => {
+            if (state.currentlyPlayingId) {
+                window.open(`https://www.youtube.com/watch?v=${state.currentlyPlayingId}`, "_blank");
+                if (window.logYouTubeLaunch) window.logYouTubeLaunch(state.currentlyPlayingId);
+            }
+        });
+    }
+    return inlinePlayer;
+}
+
+function buildPlayerSidebarHtml(video, currentRating, isSubscribed, topicBtnHtml) {
+    return `
+            <div class="sidebar-meta" style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem; border-bottom: 1px solid var(--card-border); padding-bottom: 0.5rem; display: none;">
+                <!-- Publish date removed -->
+            </div>
+            <div class="sidebar-description-box">
+                ${escapeHTML(video.description || "No description available.").replace(/\n/g, '<br>')}
+            </div>
+            <div class="sidebar-actions-grid" style="grid-template-columns: 1fr 1fr;">
+                <button type="button" class="btn sidebar-btn-like${currentRating === 5 ? ' active' : ''}">
+                    <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
+                    Like
+                </button>
+                <button type="button" class="btn sidebar-btn-dislike${currentRating === -5 ? ' active' : ''}">
+                    <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm12-3h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"></path></svg>
+                    Dislike
+                </button>
+                <button type="button" class="btn sidebar-btn-subscribe${isSubscribed ? ' active' : ''}">
+                    ${isSubscribed ? `
+                        <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="23" y1="11" x2="17" y2="11"></line></svg>
+                        Unsubscribe
+                    ` : `
+                        <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="20" y1="8" x2="20" y2="14"></line><line x1="23" y1="11" x2="17" y2="11"></line></svg>
+                        Subscribe
+                    `}
+                </button>
+                <button type="button" class="btn sidebar-btn-playlist">
+                    <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                    Save
+                </button>
+            </div>
+            ${topicBtnHtml}
+            <button type="button" class="btn sidebar-btn-block" style="margin-top: 0.75rem; width: 100%;">
+                <svg class="icon-svg" style="width: 14px; height: 14px; margin-right: 6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>
+                Block Channel
+            </button>
+            
+            <div class="sidebar-queue-section" style="margin-top: 1.25rem; border-top: 1px solid var(--card-border); padding-top: 1rem;">
+                <h4 style="font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
+                    <span style="display: inline-flex; align-items: center; gap: 6px;">
+                        <svg class="icon-svg" style="width: 14px; height: 14px; color: var(--accent);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                        Play Queue (<span class="queue-count">0</span>)
+                    </span>
+                    <div style="display: flex; gap: 0.4rem; align-items: center;">
+                        <button type="button" class="btn-save-queue btn-primary btn-sm" style="padding: 2px 6px; font-size: 0.7rem; border-radius: 4px; display: none;">Save</button>
+                        <button type="button" class="btn-clear-queue btn-danger btn-sm" style="padding: 2px 6px; font-size: 0.7rem; border-radius: 4px; display: none;">Clear</button>
+                    </div>
+                </h4>
+                <div class="sidebar-queue-list" style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 250px; overflow-y: auto; padding-right: 0.25rem;">
+                </div>
+            </div>
+    `;
+}
+
 // ── Stream Proxy Player (bypasses age restrictions) ─────────
 async function playViaStreamProxy(videoId, playerWrapper) {
-    console.log(`[Stream Proxy] Attempting direct stream for ${videoId}...`);
+    debug(`[Stream Proxy] Attempting direct stream for ${videoId}...`);
     
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s timeout
@@ -3819,7 +3729,7 @@ async function playViaStreamProxy(videoId, playerWrapper) {
             throw new Error("No stream URL in response");
         }
         
-        console.log(`[Stream Proxy] Got direct URL for ${videoId} (${data.width || "?"}x${data.height || "?"}, cached: ${data.cached})`);
+        debug(`[Stream Proxy] Got direct URL for ${videoId} (${data.width || "?"}x${data.height || "?"}, cached: ${data.cached})`);
         
         // Destroy any existing YT player
         if (window.ytPlayer) {
@@ -3849,7 +3759,7 @@ async function playViaStreamProxy(videoId, playerWrapper) {
             // Handle playback errors (likely CORS) -> fall back to YouTube embed
             videoEl.addEventListener("error", (e) => {
                 console.warn(`[Stream Proxy] Video playback error for ${videoId}:`, e);
-                console.log("[Stream Proxy] Falling back to YouTube embed due to playback error");
+                debug("[Stream Proxy] Falling back to YouTube embed due to playback error");
                 playViaYouTubeEmbed(videoId, playerWrapper);
             });
             
@@ -3871,7 +3781,7 @@ async function playViaStreamProxy(videoId, playerWrapper) {
 
 // ── YouTube IFrame API Embed (standard player) ──────────────
 function playViaYouTubeEmbed(videoId, playerWrapper) {
-    console.log(`[Player] Using YouTube IFrame embed for ${videoId}`);
+    debug(`[Player] Using YouTube IFrame embed for ${videoId}`);
     
     // Clean up any HTML5 video element
     const existingVideo = playerWrapper.querySelector("video");
@@ -4559,9 +4469,9 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
     const cacheKey = topicPhrase.toLowerCase();
     offset = offset || 0;
     const url = `/youtube/results?search_query=${encodeURIComponent(topicPhrase)}&sp=CAI%253D`;
-    if (DEBUG) console.log(`[Search Debug] fetchTopicSearchDiscovery initiated for: "${topicPhrase}" (cacheKey: "${cacheKey}", offset: ${offset})`);
+    if (DEBUG) debug(`[Search Debug] fetchTopicSearchDiscovery initiated for: "${topicPhrase}" (cacheKey: "${cacheKey}", offset: ${offset})`);
     if (topicSearchLoading[cacheKey]) {
-        if (DEBUG) console.log(`[Search Debug] fetchTopicSearchDiscovery already loading for "${cacheKey}". Aborting duplicate call.`);
+        if (DEBUG) debug(`[Search Debug] fetchTopicSearchDiscovery already loading for "${cacheKey}". Aborting duplicate call.`);
         return;
     }
     topicSearchLoading[cacheKey] = true;
@@ -4581,7 +4491,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
             }
             
             const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(topicPhrase)}&type=video&maxResults=${DISCOVER_BATCH_SIZE}&key=${GOOGLE_API_KEY}${pageTokenParam}`;
-            console.log(`[Google API] Fetching search for "${topicPhrase}"`);
+            debug(`[Google API] Fetching search for "${topicPhrase}"`);
             
             const searchResp = await fetch(searchUrl);
             if (searchResp.status === 403) {
@@ -4677,7 +4587,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
     
     if (!success && state.settings.useYtdlp) {
         try {
-            if (DEBUG) console.log(`[Search Debug] Fetching /scraper/collect stream for "${topicPhrase}" via POST (limit: ${DISCOVER_BATCH_SIZE}, offset: ${offset})...`);
+            if (DEBUG) debug(`[Search Debug] Fetching /scraper/collect stream for "${topicPhrase}" via POST (limit: ${DISCOVER_BATCH_SIZE}, offset: ${offset})...`);
             updateStatusText(`Searching via yt-dlp for "${topicPhrase}"...`);
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 15000);
@@ -4699,7 +4609,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
-            if (DEBUG) console.log(`[Search Debug] /scraper/collect response status: ${resp.status} (${resp.statusText})`);
+            if (DEBUG) debug(`[Search Debug] /scraper/collect response status: ${resp.status} (${resp.statusText})`);
             if (resp.ok) {
                 if (!sessionTopicSearchCache[cacheKey]) {
                     sessionTopicSearchCache[cacheKey] = [];
@@ -4710,26 +4620,26 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                 const reader = resp.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = "";
-                if (DEBUG) console.log("[Search Debug] Stream reader obtained. Starting read loop...");
+                if (DEBUG) debug("[Search Debug] Stream reader obtained. Starting read loop...");
 
                 while (true) {
-                    if (DEBUG) console.log("[Search Debug] Awaiting reader.read()...");
+                    if (DEBUG) debug("[Search Debug] Awaiting reader.read()...");
                     const { value, done } = await reader.read();
-                    if (DEBUG) console.log(`[Search Debug] Reader chunk received. done: ${done}, chunk size: ${value ? value.length : 0} bytes`);
+                    if (DEBUG) debug(`[Search Debug] Reader chunk received. done: ${done}, chunk size: ${value ? value.length : 0} bytes`);
                     if (done) {
-                        if (DEBUG) console.log("[Search Debug] Done flag is true. Exiting read loop.");
+                        if (DEBUG) debug("[Search Debug] Done flag is true. Exiting read loop.");
                         break;
                     }
 
                     buffer += decoder.decode(value, { stream: true });
                     const lines = buffer.split("\n");
                     buffer = lines.pop();
-                    if (DEBUG) console.log(`[Search Debug] Split buffer into ${lines.length} lines. Remaining buffer size: ${buffer.length} chars`);
+                    if (DEBUG) debug(`[Search Debug] Split buffer into ${lines.length} lines. Remaining buffer size: ${buffer.length} chars`);
 
                     for (const line of lines) {
                         if (line.trim()) {
                             try {
-                                if (DEBUG) console.log(`[Search Debug] Parsing NDJSON line: ${line.substring(0, 120)}...`);
+                                if (DEBUG) debug(`[Search Debug] Parsing NDJSON line: ${line.substring(0, 120)}...`);
                                 const item = JSON.parse(line);
                                 if (item.error) {
                                     console.warn("[Search Debug] Stream item contains error:", item.error);
@@ -4747,21 +4657,21 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                                 };
 
                                 if (!sessionTopicSearchCache[cacheKey]) {
-                                    if (DEBUG) console.log("[Search Debug] Re-initializing session cache (must have been cleared by sync).");
+                                    if (DEBUG) debug("[Search Debug] Re-initializing session cache (must have been cleared by sync).");
                                     sessionTopicSearchCache[cacheKey] = [];
                                 }
                                 // Deduplicate against existing cached results
                                 if (!existingIds.has(video.id)) {
                                     existingIds.add(video.id);
                                     sessionTopicSearchCache[cacheKey].push(video);
-                                    if (DEBUG) console.log(`[Search Debug] Cached video: "${video.title}" (ID: ${video.id})`);
+                                    if (DEBUG) debug(`[Search Debug] Cached video: "${video.title}" (ID: ${video.id})`);
 
                                     // Append directly if the user is still looking at this topic or search
                                     const currentActiveTopic = state.currentView.startsWith("topic_") ? state.currentView.substring(6).toLowerCase() : "";
                                     const currentActiveSearch = state.currentView.startsWith("search_") ? state.currentView.substring(7).toLowerCase() : "";
-                                    if (DEBUG) console.log(`[Search Debug] View check - ActiveTopic: "${currentActiveTopic}", ActiveSearch: "${currentActiveSearch}", cacheKey: "${cacheKey}"`);
+                                    if (DEBUG) debug(`[Search Debug] View check - ActiveTopic: "${currentActiveTopic}", ActiveSearch: "${currentActiveSearch}", cacheKey: "${cacheKey}"`);
                                     if (currentActiveTopic === cacheKey || currentActiveSearch === cacheKey) {
-                                        if (DEBUG) console.log(`[Search Debug] Match! Appending streamed video card directly.`);
+                                        if (DEBUG) debug(`[Search Debug] Match! Appending streamed video card directly.`);
                                         appendStreamedDiscoverVideo(video, topicPhrase);
                                     }
                                 }
@@ -4773,7 +4683,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                 }
 
                 // Stream ended, update status
-                if (DEBUG) console.log("[Search Debug] Stream ended successfully.");
+                if (DEBUG) debug("[Search Debug] Stream ended successfully.");
                 updateStatusText("Ready");
                 topicSearchLoading[cacheKey] = false;
                 
@@ -4794,7 +4704,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
     // Fallback to raw HTML scraping if yt-dlp is off or failed
     if (!success) {
         try {
-            if (DEBUG) console.log(`[Search Debug] Executing HTML scraper fallback for: "${topicPhrase}"...`);
+            if (DEBUG) debug(`[Search Debug] Executing HTML scraper fallback for: "${topicPhrase}"...`);
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 12000);
             const resp = await fetch(url, { signal: controller.signal });
@@ -5077,7 +4987,7 @@ function setupInfiniteScroll() {
     infiniteScrollObserver = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
             if (entry.isIntersecting) {
-                console.log("[Infinite Scroll] IO triggered");
+                debug("[Infinite Scroll] IO triggered");
                 handleTriggerIntersection();
             }
         });
@@ -5161,7 +5071,7 @@ function handleTriggerIntersection() {
     // Fetch next batch
     state.discoverBatchIndex++;
     const offset = state.discoverBatchIndex * DISCOVER_BATCH_SIZE;
-    console.log(`[Infinite Scroll] Fetching batch ${state.discoverBatchIndex + 1} (offset: ${offset}) for "${queryTerm}"`);
+    debug(`[Infinite Scroll] Fetching batch ${state.discoverBatchIndex + 1} (offset: ${offset}) for "${queryTerm}"`);
     fetchTopicSearchDiscovery(queryTerm, offset);
 }
 
@@ -5320,11 +5230,11 @@ async function generateBrainstormTopics(append, numRequests = 1) {
     state.brainstormLoading = true;
     state.lastBrainstormAttempt = Date.now();
     
-    console.log(`[Smart Feed] Background LLM brainstorming via lazy-tool-service...`);
+    debug(`[Smart Feed] Background LLM brainstorming via lazy-tool-service...`);
     
     const likedAll = state.topics.filter(t => t.weight > 0).sort((a, b) => b.weight - a.weight);
     if (likedAll.length === 0) {
-        console.log("[Smart Feed] No positive topics to brainstorm from. Skipping brainstorm.");
+        debug("[Smart Feed] No positive topics to brainstorm from. Skipping brainstorm.");
         state.brainstormLoading = false;
         return;
     }
@@ -5356,15 +5266,20 @@ async function generateBrainstormTopics(append, numRequests = 1) {
             : (data.topics || []).map(topic => ({ topic, weight: 5 }));
         let allAddedPhrases = [];
 
-        rated.forEach(({ topic: phrase, weight }) => {
+        rated.forEach(({ topic: rawPhrase, weight }) => {
+            // Store canonical (lowercase) so the existence check below actually
+            // matches an existing entry — a raw Title-Case phrase never equalled
+            // its lowercased twin, so every brainstorm duplicated the pool. Cards
+            // re-capitalize on render, so nothing is lost visually.
+            const phrase = normalizeTopic(rawPhrase);
             if (!phrase) return;
 
             if (isBurned(phrase)) {
-                console.log(`[Smart Feed] Skipping burned query "${phrase}" from LLM results.`);
+                debug(`[Smart Feed] Skipping burned query "${phrase}" from LLM results.`);
                 return;
             }
 
-            const existing = state.topics.find(t => t.phrase.toLowerCase() === phrase);
+            const existing = state.topics.find(t => normalizeTopic(t.phrase) === phrase);
             if (!existing) {
                 state.topics.push({ phrase, weight: weight || 5, addedAt: Date.now() });
             }
@@ -5381,7 +5296,7 @@ async function generateBrainstormTopics(append, numRequests = 1) {
         
         if (allAddedPhrases.length > 0) {
             saveTopics();
-            console.log("[Smart Feed] Successfully brainstormed and queued new topics:", allAddedPhrases);
+            debug("[Smart Feed] Successfully brainstormed and queued new topics:", allAddedPhrases);
             if (!append) {
                 renderFeed();
             }
@@ -5399,7 +5314,7 @@ async function generateBrainstormTopics(append, numRequests = 1) {
 
 async function generateSimilarTopicsFromSearch(searchQuery, isHighSignal = false) {
     if (!searchQuery) return;
-    console.log(`[Smart Feed] Background similar topics generation via lazy-tool-service for: "${searchQuery}" (highSignal: ${isHighSignal})`);
+    debug(`[Smart Feed] Background similar topics generation via lazy-tool-service for: "${searchQuery}" (highSignal: ${isHighSignal})`);
     
     // Auto-add search query with appropriate weight based on signal strength
     const searchNormalized = searchQuery.trim().toLowerCase();
@@ -5416,7 +5331,7 @@ async function generateSimilarTopicsFromSearch(searchQuery, isHighSignal = false
             state.smartFeedTopicsQueue.push(searchNormalized);
         }
         saveTopics();
-        console.log(`[Smart Feed] Auto-added query "${searchNormalized}" with weight ${targetWeight} as positive topic.`);
+        debug(`[Smart Feed] Auto-added query "${searchNormalized}" with weight ${targetWeight} as positive topic.`);
     }
 
     try {
@@ -5443,7 +5358,7 @@ async function generateSimilarTopicsFromSearch(searchQuery, isHighSignal = false
             if (!phrase) return;
             
             if (state.burnedQueries.includes(phrase)) {
-                console.log(`[Smart Feed] Skipping burned query "${phrase}" from similar topics results.`);
+                debug(`[Smart Feed] Skipping burned query "${phrase}" from similar topics results.`);
                 return;
             }
             
@@ -5462,7 +5377,7 @@ async function generateSimilarTopicsFromSearch(searchQuery, isHighSignal = false
         
         if (addedPhrases.length > 0) {
             saveTopics();
-            console.log(`[Smart Feed] Successfully queued ${addedPhrases.length} similar topics for "${searchQuery}":`, addedPhrases);
+            debug(`[Smart Feed] Successfully queued ${addedPhrases.length} similar topics for "${searchQuery}":`, addedPhrases);
             showToast(`💡 Queued ${addedPhrases.length} topics similar to "${searchQuery}"`, "success");
             fillSmartFeedPreloadBuffer();
         } else {
@@ -5505,7 +5420,7 @@ async function fetchVideosForTopic(topic) {
             const modernQuery = `${topic} after:2022`;
             const deepCutQuery = `${topic} ${deepCutEra}`;
             
-            console.log(`[Smart Feed Fetch] 3-way parallel for "${topic}" — vintage(before:2023) + modern(after:2022) + deep(${deepCutEra})`);
+            debug(`[Smart Feed Fetch] 3-way parallel for "${topic}" — vintage(before:2023) + modern(after:2022) + deep(${deepCutEra})`);
             
             const fetchOne = async (query, label) => {
                 const controller = new AbortController();
@@ -5528,7 +5443,7 @@ async function fetchVideosForTopic(topic) {
                     if (resp.ok) {
                         const data = await resp.json();
                         if (data && Array.isArray(data.items)) {
-                            console.log(`[Smart Feed Fetch] ${label} returned ${data.items.length} videos`);
+                            debug(`[Smart Feed Fetch] ${label} returned ${data.items.length} videos`);
                             return data.items;
                         }
                     }
@@ -5591,7 +5506,7 @@ async function fetchVideosForTopic(topic) {
                     modern: videos.filter(v => v._era === "modern").length,
                     deep: videos.filter(v => v._era === "deep").length
                 };
-                console.log(`[Smart Feed Fetch] Total unique videos for "${topic}": ${videos.length} (vintage:${eraBreakdown.vintage}, modern:${eraBreakdown.modern}, deep:${eraBreakdown.deep})`);
+                debug(`[Smart Feed Fetch] Total unique videos for "${topic}": ${videos.length} (vintage:${eraBreakdown.vintage}, modern:${eraBreakdown.modern}, deep:${eraBreakdown.deep})`);
             }
         } catch (err) {
             console.error(`[Smart Feed Fetch] Scraper fetch failed for "${topic}":`, err);
@@ -5774,14 +5689,14 @@ async function fillSmartFeedPreloadBuffer() {
     const isCooldownActive = state.lastBrainstormTime && (now - state.lastBrainstormTime < cooldownMs);
 
     if (totalUpcoming < 150 && !state.brainstormLoading && !isCooldownActive) {
-        console.log("[Smart Feed] Total upcoming topics low, triggering background LLM brainstorm...");
+        debug("[Smart Feed] Total upcoming topics low, triggering background LLM brainstorm...");
         generateBrainstormTopics(true, 1).then(() => {
             fillSmartFeedPreloadBuffer();
         });
     }
     
     if (state.smartFeedTopicsQueue.length === 0) {
-        console.log("[Smart Feed] Queue is empty! Repopulating from positive topics...");
+        debug("[Smart Feed] Queue is empty! Repopulating from positive topics...");
         const randomizedTopics = getWeightedRandomTopics(state.topics);
         state.smartFeedTopicsQueue = [...randomizedTopics];
     }
@@ -5804,9 +5719,9 @@ async function fillSmartFeedPreloadBuffer() {
     state.smartFeedUsedTopics.push(...topicsToFetch);
     
     if (isPoolEmpty) {
-        console.log(`[Smart Feed Preload] Cold start — parallel fetching ${topicsToFetch.length} topics: ${topicsToFetch.join(', ')}`);
+        debug(`[Smart Feed Preload] Cold start — parallel fetching ${topicsToFetch.length} topics: ${topicsToFetch.join(', ')}`);
     } else {
-        console.log(`[Smart Feed Preload] Pre-fetching discovery videos for ${topicsToFetch.length} topics: ${topicsToFetch.join(', ')}`);
+        debug(`[Smart Feed Preload] Pre-fetching discovery videos for ${topicsToFetch.length} topics: ${topicsToFetch.join(', ')}`);
     }
     
     currentPreloadPromise = (async () => {
@@ -5851,7 +5766,7 @@ async function fillSmartFeedPreloadBuffer() {
                 shuffleArray(state.smartFeedSuggestionPool);
                 saveSmartFeedSuggestionPool();
                 
-                console.log(`[Smart Feed Preload] Successfully preloaded ${totalAdded} videos from ${results.filter(r => r.videos.length > 0).length} topics. Pool size: ${state.smartFeedSuggestionPool.length}`);
+                debug(`[Smart Feed Preload] Successfully preloaded ${totalAdded} videos from ${results.filter(r => r.videos.length > 0).length} topics. Pool size: ${state.smartFeedSuggestionPool.length}`);
                 
                 if (state.currentView === "smart-feed" && state.smartFeedVideos.length === 0 && !state.smartFeedLoading) {
                     loadNextSmartFeedBatch();
@@ -5921,7 +5836,7 @@ async function loadNextSmartFeedBatch() {
         state.smartFeedLoading = false;
         updateStatusText("Ready");
         
-        console.log(`[Smart Feed Batch] Rendered ${deduplicated.length} cards (pool: ${state.smartFeedSuggestionPool.length}, total rendered: ${state.smartFeedVideos.length})`);
+        debug(`[Smart Feed Batch] Rendered ${deduplicated.length} cards (pool: ${state.smartFeedSuggestionPool.length}, total rendered: ${state.smartFeedVideos.length})`);
         
         // Trigger preloader asynchronously in background to replenish pool
         fillSmartFeedPreloadBuffer();
@@ -5934,7 +5849,7 @@ async function loadNextSmartFeedBatch() {
             if (feedSection && state.currentView === "smart-feed" && !state.smartFeedLoading) {
                 const distFromBottom = feedSection.scrollHeight - feedSection.scrollTop - feedSection.clientHeight;
                 if (distFromBottom < 1200) {
-                    console.log(`[Smart Feed Batch] Still near bottom (${distFromBottom}px), loading another batch...`);
+                    debug(`[Smart Feed Batch] Still near bottom (${distFromBottom}px), loading another batch...`);
                     loadNextSmartFeedBatch();
                 }
             }
@@ -5966,7 +5881,7 @@ async function loadNextSmartFeedBatch() {
     if (state.smartFeedTopicsQueue.length === 0) {
         const positiveTopics = state.topics.filter(t => t.weight > 0);
         if (positiveTopics.length > 0) {
-            console.log("[Smart Feed] Queue is empty! Generating more topics first...");
+            debug("[Smart Feed] Queue is empty! Generating more topics first...");
             const randomizedTopics = getWeightedRandomTopics(state.topics);
             state.smartFeedTopicsQueue = [...randomizedTopics];
             generateBrainstormTopics(true);
@@ -5981,7 +5896,7 @@ async function loadNextSmartFeedBatch() {
     }
     state.smartFeedUsedTopics.push(topic);
     
-    console.log(`[Smart Feed] Fetching discovery videos for topic: "${topic}" (on-demand fallback)...`);
+    debug(`[Smart Feed] Fetching discovery videos for topic: "${topic}" (on-demand fallback)...`);
     updateStatusText(`Smart Feed: Discovering "${capitalizePhrase(topic)}"...`);
     
     try {
@@ -6284,10 +6199,7 @@ async function editDiscoverTopic(topic) {
 // ============================================================
 //  DYNAMIC CHANNEL DISCOVERY SYSTEM
 // ============================================================
-
-function saveDiscovered() {
-    localStorage.setItem(getProfileKey("discovered_channels"), JSON.stringify(state.discoveredChannels));
-}
+// (saveDiscovered lives with the other persistence helpers near loadState.)
 
 function initDiscoverChannels() {
     const btnRefresh = document.getElementById("btn-refresh-discover");
@@ -7117,7 +7029,7 @@ function renderLikedVideosView() {
 
 // ── Session Tracking & Reconciliation (Phase 2) ─────────────
 window.logYouTubeLaunch = function(videoId) {
-    console.log(`[Session Tracking] Launched video ${videoId} to YouTube`);
+    debug(`[Session Tracking] Launched video ${videoId} to YouTube`);
     state.launchedVideoId = videoId;
     state.launchTimestamp = Date.now();
 };
@@ -7246,7 +7158,7 @@ window.addEventListener("message", (event) => {
     const payload = event.data.data;
     if (!payload || !payload.action || !payload.videoId) return;
 
-    console.log("[Wallgarden Sync] Received extension event:", payload);
+    debug("[Wallgarden Sync] Received extension event:", payload);
 
     if (payload.action === 'LIKE') {
         state.videoRatings[payload.videoId] = 5;
