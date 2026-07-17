@@ -20,6 +20,10 @@ package-lock.json
 app/app.min.js
 app/app.min.css
 
+# Python venv — the Playwright interpreter for `npm run test:smoke`. Was the
+# shared ../scraper-service/.venv, now a dedicated local venv (that repo is gone).
+.venv/
+
 # Gemini agent artifacts
 .gemini/
 
