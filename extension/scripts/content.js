@@ -46,6 +46,30 @@ let blocklist = {
 // State tracker to avoid re-evaluating the same elements
 const evaluatedVideos = new Set();
 
+// ── Dashboard integration config ──
+// The Wallgarden dashboard the "Save"/"Open" buttons target. Matches the hosts
+// the bridge content script is registered on (see manifest.json).
+const WG_DASHBOARD_URL = "http://10.0.0.16:8007";
+
+// Cache of the dashboard's state, mirrored back to us over the reverse channel
+// (page → bridge → background → chrome.storage.local.wg_app_state). Lets the
+// watch-page button offer a real playlist picker and lets us badge videos we've
+// already saved — without the dashboard tab needing to be open right now.
+let appState = {
+    playlists: [],        // [{ id, name, count }]
+    savedVideoIds: new Set(),
+    watchedIds: new Set()
+};
+
+function normalizeAppState(raw) {
+    if (!raw) return { playlists: [], savedVideoIds: new Set(), watchedIds: new Set() };
+    return {
+        playlists: Array.isArray(raw.playlists) ? raw.playlists : [],
+        savedVideoIds: new Set(raw.savedVideoIds || []),
+        watchedIds: new Set(raw.watchedIds || [])
+    };
+}
+
 // Load settings + blocklist initially
 chrome.storage.local.get(null, (data) => {
     // One-time migration: reset blockShorts to true if it was saved as false from v6 default change
@@ -55,20 +79,26 @@ chrome.storage.local.get(null, (data) => {
     }
     Object.assign(settings, data);
     if (data.blocklist) blocklist = data.blocklist;
+    if (data.wg_app_state) appState = normalizeAppState(data.wg_app_state);
     applyBlockingCSS();
     syncCollapseClasses();
     injectCollapseBars();
     startObserver();
     startMenuInterceptor();
     startCollapseWatcher();
+    startWatchButtonWatcher();
 });
 
 // Re-apply if settings change
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local') {
+        let appStateChanged = false;
         for (let [key, { newValue }] of Object.entries(changes)) {
             if (key === 'blocklist') {
                 blocklist = newValue;
+            } else if (key === 'wg_app_state') {
+                appState = normalizeAppState(newValue);
+                appStateChanged = true;
             } else {
                 settings[key] = newValue;
             }
@@ -76,6 +106,11 @@ chrome.storage.onChanged.addListener((changes, area) => {
         applyBlockingCSS();
         syncCollapseClasses();
         injectCollapseBars();
+        if (appStateChanged) {
+            // Refresh the picker + "already saved" affordances against new data
+            refreshWatchButtonState();
+            refreshFeedSaveBadges();
+        }
     }
 });
 
@@ -86,6 +121,12 @@ document.addEventListener('yt-navigate-finish', () => {
     syncCollapseClasses();
     injectCollapseBars();
     setTimeout(injectCollapseBars, 800);
+    // The watch metadata (owner + subscribe row) is rebuilt per navigation and
+    // mounts on its own schedule — retry a few times until it settles.
+    ensureWatchPageButton();
+    setTimeout(ensureWatchPageButton, 300);
+    setTimeout(ensureWatchPageButton, 900);
+    setTimeout(ensureWatchPageButton, 1800);
 });
 
 // ============================================================
@@ -1118,6 +1159,10 @@ function processVideos(videoElements) {
         if (settings.enableSmartBlock) {
             injectInlineBlockIcon(videoEl, channelText);
         }
+
+        // --- Inject inline Wallgarden quick-save icon ---
+        const saveMeta = scrapeCardMetadata(videoEl);
+        if (saveMeta) injectInlineSaveIcon(videoEl, saveMeta);
     });
 }
 
@@ -1225,11 +1270,31 @@ function getActionContext(preferWatchPage = false) {
     return watchPageContext();
 }
 
+// Drop duplicate sync events fired by YouTube's re-render churn (the same
+// like/save click can bubble through several times). Keyed by action + video +
+// playlist so a genuine second save to a different playlist still gets through.
+const _recentSync = new Map();
+const SYNC_DEDUP_MS = 1500;
+
 function sendSyncEvent(action, data = {}) {
     const videoId = data.videoId || getVideoIdFromUrl();
     if (!videoId) {
         console.warn("[Wallgarden Sync] sendSyncEvent failed: no videoId (not on a watch page and no card context)");
         return;
+    }
+    const dedupKey = `${action}:${videoId}:${data.playlistId || data.playlistName || ''}`;
+    const now = Date.now();
+    const last = _recentSync.get(dedupKey);
+    if (last && (now - last) < SYNC_DEDUP_MS) {
+        console.log(`[Wallgarden Sync] Skipping duplicate ${action} for ${videoId}`);
+        return;
+    }
+    _recentSync.set(dedupKey, now);
+    if (_recentSync.size > 100) {
+        // Prune stale entries so the map can't grow unbounded on long sessions
+        for (const [k, t] of _recentSync) {
+            if (now - t > SYNC_DEDUP_MS) _recentSync.delete(k);
+        }
     }
     console.log(`[Wallgarden Sync] sendSyncEvent: Sending ${action} for ${videoId}`);
     try {
@@ -1467,6 +1532,332 @@ function startSyncObservers() {
         }
     }, true); // capture phase — YouTube stopPropagation()s many button clicks,
               // so bubble-phase listeners on document never see them
+}
+
+// ============================================================
+//  WALLGARDEN: On-page Save button + playlist picker (Phase 1/2)
+// ============================================================
+
+/** Lightweight transient toast on the YouTube page itself. */
+function wgToast(message) {
+    let container = document.getElementById('wg-toast-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'wg-toast-container';
+        container.style.cssText = `
+            position: fixed; bottom: 24px; right: 24px; z-index: 999999;
+            display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+            pointer-events: none;
+        `;
+        document.body.appendChild(container);
+    }
+    const toast = document.createElement('div');
+    toast.textContent = message;
+    toast.style.cssText = `
+        background: #0f1a12; color: #d7f5df; padding: 10px 16px;
+        border: 1px solid #2e7d46; border-radius: 10px; font-size: 13px;
+        font-family: "Roboto", Arial, sans-serif; box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+        opacity: 0; transform: translateY(8px); transition: opacity .2s ease, transform .2s ease;
+    `;
+    container.appendChild(toast);
+    requestAnimationFrame(() => {
+        toast.style.opacity = '1';
+        toast.style.transform = 'translateY(0)';
+    });
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateY(8px)';
+        setTimeout(() => toast.remove(), 250);
+    }, 2600);
+}
+
+/**
+ * Fire a WALLGARDEN_SAVE sync event for the given context. `playlist` is
+ * optional { id, name }; when omitted the dashboard files it into the
+ * watchlist/queue. Optimistically marks the video saved locally so the
+ * button reflects it immediately, even before the dashboard tab confirms.
+ */
+function sendSaveEvent(ctx, playlist) {
+    if (!ctx || !ctx.videoId) {
+        wgToast('🌿 Could not read this video');
+        return;
+    }
+    const payload = { ...ctx };
+    if (playlist) {
+        payload.playlistId = playlist.id;
+        payload.playlistName = playlist.name;
+    }
+    sendSyncEvent('WALLGARDEN_SAVE', payload);
+    appState.savedVideoIds.add(ctx.videoId);
+    refreshWatchButtonState();
+    refreshFeedSaveBadges();
+    wgToast(playlist
+        ? `🌿 Saved to "${playlist.name}"`
+        : '🌿 Saved to Wallgarden watchlist');
+}
+
+let wgSaveMenuEl = null;
+
+function closeSaveMenu() {
+    if (wgSaveMenuEl) {
+        wgSaveMenuEl.remove();
+        wgSaveMenuEl = null;
+        document.removeEventListener('click', onSaveMenuOutsideClick, true);
+    }
+}
+
+function onSaveMenuOutsideClick(e) {
+    if (wgSaveMenuEl && !wgSaveMenuEl.contains(e.target) && !e.target.closest('.wg-save-wrap')) {
+        closeSaveMenu();
+    }
+}
+
+/** Build & show the destination picker anchored under the caret button. */
+function openSaveMenu(anchorBtn) {
+    closeSaveMenu();
+    const ctx = getActionContext(true);
+    const rect = anchorBtn.getBoundingClientRect();
+
+    const menu = document.createElement('div');
+    menu.className = 'wg-save-menu';
+    menu.style.cssText = `
+        position: fixed; z-index: 999999;
+        top: ${Math.round(rect.bottom + 6)}px; left: ${Math.round(rect.right - 260)}px;
+        width: 260px; max-height: 360px; overflow-y: auto;
+        background: #212121; color: #f1f1f1; border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 12px; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        font-family: "Roboto", Arial, sans-serif; font-size: 14px;
+    `;
+
+    const makeRow = (html, onClick, opts = {}) => {
+        const row = document.createElement('div');
+        row.setAttribute('role', 'menuitem');
+        row.style.cssText = `
+            display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+            border-radius: 8px; cursor: pointer; white-space: nowrap;
+            ${opts.color ? `color: ${opts.color};` : ''}
+        `;
+        row.innerHTML = html;
+        row.addEventListener('mouseenter', () => row.style.background = 'rgba(255,255,255,0.1)');
+        row.addEventListener('mouseleave', () => row.style.background = '');
+        row.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onClick();
+            closeSaveMenu();
+        });
+        return row;
+    };
+
+    // Quick save to watchlist
+    menu.appendChild(makeRow(
+        `<span style="font-size:16px;">⏳</span><span>Save to Watchlist</span>`,
+        () => sendSaveEvent(ctx)
+    ));
+
+    // Real playlists mirrored from the dashboard
+    if (appState.playlists.length) {
+        const hdr = document.createElement('div');
+        hdr.textContent = 'Playlists';
+        hdr.style.cssText = 'padding: 8px 12px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; opacity: .6;';
+        menu.appendChild(hdr);
+        appState.playlists.forEach(pl => {
+            menu.appendChild(makeRow(
+                `<span style="font-size:16px;">🎵</span>
+                 <span style="flex:1; overflow:hidden; text-overflow:ellipsis;">${escapeAttr(pl.name)}</span>
+                 <span style="opacity:.5; font-size:12px;">${pl.count || 0}</span>`,
+                () => sendSaveEvent(ctx, pl)
+            ));
+        });
+    } else {
+        const note = document.createElement('div');
+        note.textContent = 'Open the dashboard to create playlists';
+        note.style.cssText = 'padding: 8px 12px; font-size: 12px; opacity: .5;';
+        menu.appendChild(note);
+    }
+
+    // Separator + open dashboard
+    const sep = document.createElement('div');
+    sep.style.cssText = 'height:1px; background:rgba(255,255,255,0.1); margin:6px 4px;';
+    menu.appendChild(sep);
+    menu.appendChild(makeRow(
+        `<span style="font-size:16px;">🌿</span><span>Open Wallgarden dashboard ↗</span>`,
+        () => window.open(WG_DASHBOARD_URL, '_blank'),
+        { color: '#8bd5a0' }
+    ));
+
+    document.body.appendChild(menu);
+    wgSaveMenuEl = menu;
+    setTimeout(() => document.addEventListener('click', onSaveMenuOutsideClick, true), 0);
+}
+
+/** Basic attribute-safe escaping for interpolated dashboard strings. */
+function escapeAttr(str) {
+    return String(str == null ? '' : str)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/** Update the watch-page button's label/state to reflect saved status. */
+function refreshWatchButtonState() {
+    const wrap = document.querySelector('.wg-save-wrap');
+    if (!wrap) return;
+    const main = wrap.querySelector('.wg-save-main');
+    if (!main) return;
+    const videoId = getVideoIdFromUrl();
+    const saved = videoId && appState.savedVideoIds.has(videoId);
+    main.querySelector('.wg-save-label').textContent = saved ? 'Saved' : 'Save';
+    main.style.background = saved ? 'rgba(46,125,70,0.35)' : 'rgba(255,255,255,0.1)';
+    wrap.querySelector('.wg-save-icon').textContent = saved ? '✓' : '🌿';
+}
+
+/** Inject the split "Save to Wallgarden" pill next to the Subscribe button. */
+function ensureWatchPageButton() {
+    if (getVideoIdFromUrl() == null || !location.pathname.startsWith('/watch')) {
+        // Not on a standard watch page — nothing to anchor to
+        return;
+    }
+    if (document.querySelector('.wg-save-wrap')) {
+        refreshWatchButtonState();
+        return;
+    }
+    const owner = document.querySelector('ytd-watch-metadata #owner');
+    if (!owner) return;
+    const subscribe = owner.querySelector('#subscribe-button, ytd-subscribe-button-renderer');
+
+    const wrap = document.createElement('div');
+    wrap.className = 'wg-save-wrap';
+    wrap.style.cssText = `
+        display: inline-flex; align-items: stretch; margin-left: 8px;
+        border-radius: 18px; overflow: hidden; vertical-align: middle;
+        font-family: "Roboto", Arial, sans-serif;
+    `;
+
+    const main = document.createElement('button');
+    main.className = 'wg-save-main';
+    main.title = 'Save this video to Wallgarden watchlist';
+    main.style.cssText = `
+        display: inline-flex; align-items: center; gap: 8px;
+        background: rgba(255,255,255,0.1); color: var(--yt-spec-text-primary, #f1f1f1);
+        border: none; cursor: pointer; height: 36px; padding: 0 14px 0 14px;
+        font-size: 14px; font-weight: 500; line-height: 36px;
+    `;
+    main.innerHTML = `<span class="wg-save-icon" style="font-size:15px;">🌿</span><span class="wg-save-label">Save</span>`;
+
+    const caret = document.createElement('button');
+    caret.className = 'wg-save-caret';
+    caret.title = 'Choose a playlist / open dashboard';
+    caret.style.cssText = `
+        background: rgba(255,255,255,0.1); color: var(--yt-spec-text-primary, #f1f1f1);
+        border: none; border-left: 1px solid rgba(0,0,0,0.25); cursor: pointer;
+        height: 36px; padding: 0 10px; font-size: 11px;
+    `;
+    caret.textContent = '▾';
+
+    [main, caret].forEach(b => {
+        b.addEventListener('mouseenter', () => b.style.filter = 'brightness(1.25)');
+        b.addEventListener('mouseleave', () => b.style.filter = '');
+    });
+
+    main.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        sendSaveEvent(getActionContext(true));
+    });
+    caret.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (wgSaveMenuEl) closeSaveMenu();
+        else openSaveMenu(caret);
+    });
+
+    wrap.appendChild(main);
+    wrap.appendChild(caret);
+
+    if (subscribe && subscribe.parentElement) {
+        subscribe.insertAdjacentElement('afterend', wrap);
+    } else {
+        owner.appendChild(wrap);
+    }
+    refreshWatchButtonState();
+    console.log('[Wallgarden] Injected Save button on watch page');
+}
+
+/**
+ * Watch-page metadata is torn down/rebuilt on navigation and mounts late.
+ * A debounced observer re-inserts the button whenever it goes missing.
+ */
+function startWatchButtonWatcher() {
+    let pending = null;
+    const observer = new MutationObserver(() => {
+        if (pending) return;
+        pending = setTimeout(() => {
+            pending = null;
+            ensureWatchPageButton();
+        }, 400);
+    });
+    const root = document.getElementById('page-manager') || document.body;
+    observer.observe(root, { childList: true, subtree: true });
+    ensureWatchPageButton();
+}
+
+// ── Feed card quick-save + "already saved" badges (Phase 3) ──
+
+/** Small ＋ quick-save icon on feed/search/sidebar cards, shown on hover. */
+function injectInlineSaveIcon(videoEl, meta) {
+    if (videoEl.querySelector('.wg-inline-save')) return;
+    if (!meta || !meta.videoId) return;
+
+    const menuRenderer = videoEl.querySelector(
+        'ytd-menu-renderer, #menu, button[aria-label="More actions"]'
+    )?.closest('ytd-menu-renderer, #menu') || videoEl.querySelector('button[aria-label="More actions"]')?.parentElement;
+    if (!menuRenderer) return;
+
+    const btn = document.createElement('button');
+    btn.className = 'wg-inline-save';
+    btn.textContent = appState.savedVideoIds.has(meta.videoId) ? '🌿' : '＋';
+    btn.title = 'Save to Wallgarden';
+    btn.style.cssText = `
+        background: none; border: none; cursor: pointer;
+        font-size: 15px; padding: 4px 6px; margin-right: 2px;
+        opacity: 0; transform: scale(0.7);
+        transition: opacity 0.25s ease, transform 0.25s ease;
+        border-radius: 50%; line-height: 1; pointer-events: none;
+    `;
+
+    btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        sendSaveEvent(meta);
+        btn.textContent = '🌿';
+    });
+
+    videoEl.addEventListener('mouseenter', () => {
+        btn.style.opacity = '1';
+        btn.style.transform = 'scale(1)';
+        btn.style.pointerEvents = 'auto';
+    });
+    videoEl.addEventListener('mouseleave', () => {
+        btn.style.opacity = '0';
+        btn.style.transform = 'scale(0.7)';
+        btn.style.pointerEvents = 'none';
+    });
+
+    menuRenderer.style.display = 'flex';
+    menuRenderer.style.alignItems = 'center';
+    menuRenderer.insertBefore(btn, menuRenderer.firstChild);
+}
+
+/** Re-mark already-saved feed cards after appState changes. */
+function refreshFeedSaveBadges() {
+    document.querySelectorAll('.wg-inline-save').forEach(btn => {
+        const card = btn.closest('ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model');
+        if (!card) return;
+        const meta = scrapeCardMetadata(card);
+        if (meta && appState.savedVideoIds.has(meta.videoId)) {
+            btn.textContent = '🌿';
+        }
+    });
 }
 
 // Start sync observers

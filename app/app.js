@@ -177,7 +177,11 @@ document.addEventListener("DOMContentLoaded", () => {
     
     // Render cached feed immediately so the UI is active and loads discovery videos
     renderFeed();
-    
+
+    // Mirror our current state to the extension so the YouTube-side Save button
+    // has playlists + saved-video badges from the moment the dashboard loads.
+    setTimeout(broadcastAppState, 1200);
+
     // Unconditionally auto-sync feeds when the page is loaded/refreshed
     syncFeeds();
 
@@ -840,7 +844,7 @@ function saveDislikedTopics() { persistField("disliked_topics", state.dislikedTo
 function saveCache()          { persistField("cache", state.cache); }
 function saveVideoRatings()   { persistField("video_ratings", state.videoRatings); }
 function saveNewsRatings()    { persistField("news_ratings", state.newsSourceRatings); }
-function saveLikedVideos()    { persistField("liked_videos", state.likedVideos); }
+function saveLikedVideos()    { persistField("liked_videos", state.likedVideos); scheduleAppStateBroadcast(); }
 function saveSearchHistory()  { persistField("search_history", state.searchHistory); }
 
 // The pool and ontology graph are saved from hot paths (scroll batches, watch
@@ -867,12 +871,56 @@ function savePlaylists() {
         });
     }
     persistField("playlists", state.playlists);
+    scheduleAppStateBroadcast();
 }
 
 // Save discovered channels helper (profile-aware)
 function saveDiscovered() { persistField("discovered_channels", state.discoveredChannels); }
 
-function saveQueue() { persistField("queue", state.queue); }
+function saveQueue() {
+    persistField("queue", state.queue);
+    scheduleAppStateBroadcast();
+}
+
+// ── Reverse channel: mirror our state to the browser extension ──
+// The Wallgarden extension caches this so the YouTube watch-page "Save" button
+// can offer a real playlist picker and badge videos we've already saved. The
+// extension's bridge content script (running on this same page) picks the
+// message up and relays it to the extension's background worker.
+let _appStateBroadcastTimer = null;
+function scheduleAppStateBroadcast() {
+    clearTimeout(_appStateBroadcastTimer);
+    _appStateBroadcastTimer = setTimeout(broadcastAppState, 400);
+}
+
+function broadcastAppState() {
+    clearTimeout(_appStateBroadcastTimer);
+    _appStateBroadcastTimer = null;
+    try {
+        const playlists = Object.values(state.playlists || {}).map(pl => ({
+            id: pl.id,
+            name: pl.name,
+            count: (pl.videos || []).length
+        }));
+        const savedIds = new Set();
+        (state.queue || []).forEach(v => v && v.id && savedIds.add(v.id));
+        Object.values(state.playlists || {}).forEach(pl => {
+            (pl.videos || []).forEach(v => v && v.id && savedIds.add(v.id));
+        });
+        (state.likedVideos || []).forEach(v => v && v.id && savedIds.add(v.id));
+
+        window.postMessage({
+            type: 'WG_APP_STATE',
+            data: {
+                playlists,
+                savedVideoIds: [...savedIds],
+                watchedIds: Object.keys(state.watchedHistory || {})
+            }
+        }, "*");
+    } catch (e) {
+        debug("[Wallgarden Sync] broadcastAppState failed:", e && e.message);
+    }
+}
 
 let _graphSaveTimer = null;
 function saveOntologyGraph() {
@@ -7327,6 +7375,58 @@ window.addEventListener("message", (event) => {
             saveQueue();
             renderQueueUI();
             showToast("Removed from Watchlist (synced from YouTube)", "info");
+        }
+    } else if (payload.action === 'WALLGARDEN_SAVE') {
+        // Explicit save from the extension's on-page "Save to Wallgarden"
+        // button. Routes into a specific playlist when one was chosen from the
+        // picker, otherwise into the watchlist/queue.
+        let video = findVideoById(payload.videoId);
+        if (!video) {
+            video = {
+                id: payload.videoId,
+                title: payload.title || "Saved Video (Synced)",
+                channelName: payload.channelName || "YouTube Curation",
+                channelId: payload.channelId || "",
+                published: Math.floor(Date.now() / 1000),
+                thumbnailUrl: `https://i.ytimg.com/vi/${payload.videoId}/hqdefault.jpg`,
+                description: payload.playlistName
+                    ? `Saved from YouTube to "${payload.playlistName}".`
+                    : "Saved from YouTube via Wallgarden button.",
+                duration: payload.duration || 0,
+                viewCount: payload.viewCount || 0
+            };
+        }
+
+        const targetPlaylist = payload.playlistId ? state.playlists[payload.playlistId] : null;
+        if (targetPlaylist) {
+            if (!targetPlaylist.videos) targetPlaylist.videos = [];
+            const already = targetPlaylist.videos.some(v => v && v.id === video.id);
+            if (!already) {
+                targetPlaylist.videos.push(video);
+                savePlaylists();
+                if (state.currentView === "playlists") renderPlaylistsView();
+            }
+            showToast(already
+                ? `Already in "${targetPlaylist.name}"`
+                : `🌿 Saved to "${targetPlaylist.name}" from YouTube`, already ? "info" : "success");
+        } else {
+            const already = state.queue.some(v => v.id === video.id);
+            if (!already) {
+                state.queue.push(video);
+                saveQueue();
+                renderQueueUI();
+            }
+            showToast(already
+                ? "Already in Watchlist"
+                : "🌿 Saved to Watchlist from YouTube", already ? "info" : "success");
+        }
+
+        if (state.ontologyGraph) {
+            graphProcessRating(state.ontologyGraph, {
+                ...video,
+                matchedTopics: video.matchedTopics || []
+            }, 1);
+            saveOntologyGraph();
         }
     }
 });

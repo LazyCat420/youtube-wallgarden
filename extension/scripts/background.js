@@ -9,20 +9,33 @@ const WG_APP_URL_PREFIXES = [
 ];
 
 const PENDING_KEY = "wg_pending_sync";
+const APP_STATE_KEY = "wg_app_state";
 const MAX_PENDING = 200;
 
 function isWallgardenTab(tab) {
     return !!(tab.url && WG_APP_URL_PREFIXES.some(p => tab.url.startsWith(p)));
 }
 
+/** Reflect the offline-queue depth on the toolbar icon so waiting saves are visible. */
+function updateBadge() {
+    chrome.storage.local.get([PENDING_KEY], (data) => {
+        const count = (data[PENDING_KEY] || []).length;
+        chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
+        chrome.action.setBadgeBackgroundColor({ color: '#2e7d46' });
+    });
+}
+
 function queuePendingEvent(event) {
     chrome.storage.local.get([PENDING_KEY], (data) => {
         const pending = data[PENDING_KEY] || [];
         pending.push(event);
-        chrome.storage.local.set({ [PENDING_KEY]: pending.slice(-MAX_PENDING) });
+        chrome.storage.local.set({ [PENDING_KEY]: pending.slice(-MAX_PENDING) }, updateBadge);
         console.log("[Background] No Wallgarden tab reachable — queued sync event for later:", event);
     });
 }
+
+// Keep the badge fresh on startup
+updateBadge();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'WALLGARDEN_SYNC') {
@@ -64,10 +77,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const pending = data[PENDING_KEY] || [];
             if (pending.length > 0) {
                 console.log(`[Background] Flushing ${pending.length} queued sync events to Wallgarden app`);
-                chrome.storage.local.set({ [PENDING_KEY]: [] });
+                chrome.storage.local.set({ [PENDING_KEY]: [] }, updateBadge);
             }
             sendResponse({ pending });
         });
         return true; // keep sendResponse alive for the async storage read
+    } else if (message.type === 'WG_APP_STATE') {
+        // Reverse channel: the dashboard mirrored its playlists / saved video IDs
+        // back to us. Cache them so the YouTube content script can offer a real
+        // playlist picker and badge already-saved videos.
+        chrome.storage.local.set({ [APP_STATE_KEY]: message.data || {} });
+        console.log("[Background] Cached dashboard app state:", message.data);
+        sendResponse({ success: true });
     }
 });

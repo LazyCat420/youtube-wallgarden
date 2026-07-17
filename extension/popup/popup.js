@@ -18,6 +18,8 @@ const SETTING_KEYS = [
 
 const TEXT_KEYS = [];
 
+const WG_DASHBOARD_URL = "http://10.0.0.16:8007";
+
 document.addEventListener('DOMContentLoaded', () => {
     const saveBtn = document.getElementById('saveBtn');
     const saveStatus = document.getElementById('saveStatus');
@@ -25,6 +27,31 @@ document.addEventListener('DOMContentLoaded', () => {
     const clearBtn = document.getElementById('clearBtn');
     const addChannelBtn = document.getElementById('addChannelBtn');
     const addChannelInput = document.getElementById('addChannelInput');
+    const openDashboardBtn = document.getElementById('openDashboardBtn');
+
+    // Dashboard sync panel
+    openDashboardBtn.addEventListener('click', () => {
+        chrome.tabs.create({ url: WG_DASHBOARD_URL });
+    });
+
+    function renderSyncStatus(data) {
+        const appStateData = data.wg_app_state || {};
+        const pending = data.wg_pending_sync || [];
+        const playlists = appStateData.playlists || [];
+        const savedCount = (appStateData.savedVideoIds || []).length;
+
+        const statQueue = document.getElementById('statQueue');
+        const statPlaylists = document.getElementById('statPlaylists');
+        const statPending = document.getElementById('statPending');
+
+        statQueue.textContent = `${savedCount} saved video${savedCount === 1 ? '' : 's'}`;
+        statPlaylists.textContent = `${playlists.length} playlist${playlists.length === 1 ? '' : 's'}`;
+        statPending.textContent = pending.length > 0
+            ? `⏳ ${pending.length} event${pending.length === 1 ? '' : 's'} waiting for dashboard`
+            : '✓ All synced';
+    }
+
+    chrome.storage.local.get(['wg_app_state', 'wg_pending_sync'], renderSyncStatus);
 
     // Manual add channel
     function addChannelFromInput() {
