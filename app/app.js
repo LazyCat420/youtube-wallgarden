@@ -53,8 +53,12 @@ let state = {
     brainstormLoading: false,
     lastBrainstormTime: 0,
     lastBrainstormAttempt: 0,
-    videoRatings: {}, // explicit ratings set by user
+    videoRatings: {}, // explicit ratings set by user (videoId -> 5 | -5)
     likedVideos: [], // array of video objects liked by the user
+    // Timestamped canonical rating log for cross-browser sync. videoId ->
+    // { r: 5|-5|0, t: <ms>, v: <minimal video meta> }. r=0 is a tombstone
+    // (unliked/undisliked) so removals propagate; newest `t` wins on merge.
+    ratingStates: {},
     settings: {
         useGoogleApiSearch: false,
         useYtdlp: true,
@@ -688,6 +692,8 @@ function loadState() {
     state.searchHistory = rawSearchHistory ? JSON.parse(rawSearchHistory) : [];
     state.brainstormTopics = rawBrainstorm ? JSON.parse(rawBrainstorm) : [];
     state.videoRatings = rawVideoRatings ? JSON.parse(rawVideoRatings) : {};
+    const rawRatingStates = getStoredItem("rating_states");
+    state.ratingStates = rawRatingStates ? JSON.parse(rawRatingStates) : {};
     state.discoveredChannels = rawDiscovered ? JSON.parse(rawDiscovered) : [];
     state.smartFeedSuggestionPool = rawPool ? JSON.parse(rawPool) : [];
     state.burnedQueries = rawBurned ? JSON.parse(rawBurned) : [];
@@ -928,33 +934,72 @@ function broadcastAppState() {
     }
 }
 
-// ── Cross-browser sync (wallgarden-sync service, keyed by profile) ──
-// localStorage is per-browser, so likes made in one browser never reach
-// another. This layer mirrors the syncable fields to a small server-side store
-// (nginx /sync/<profile>) that SMART-MERGES: a like anywhere is additive and
-// never clobbers a like made elsewhere. Removals are not propagated (adds win).
-// If the service is unreachable, every call fails soft and the app stays local.
+// ── Cross-browser sync (wallgarden-sync service — one global monolithic store) ──
+// localStorage is per-browser, so a like/unlike/dislike in one browser never
+// reaches another. This layer mirrors state to a small server-side store that is
+// the single source of truth for ALL browsers (no per-profile partitioning).
+//
+// Ratings are synced as timestamped decisions, not a set: each video carries
+// { r: 5|-5|0, t } and the newest `t` wins on merge — so unlike (r→0) and
+// dislike (r→-5) PROPAGATE across browsers, which the recommendation algorithm
+// depends on. Queue/playlists/watched stay additive. Fails soft if unreachable.
 const WG_SYNC_ENABLED = true;
+const WG_SYNC_KEY = "global";   // monolith: everyone shares one document
 let _syncApplying = false;      // true while applying a remote merge → suppress push echo
 let _wgPushTimer = null;
 
-function _wgSyncProfile() {
-    return encodeURIComponent(state.currentProfile || "default");
+// Minimal video metadata carried with a rating so any browser can render the
+// liked list even if it never saw the video in its own feed.
+function _wgVideoMeta(videoId) {
+    const v = (typeof findVideoById === "function" && findVideoById(videoId)) ||
+        (state.likedVideos || []).find(x => x && x.id === videoId);
+    if (!v) return { id: videoId };
+    return {
+        id: v.id,
+        title: v.title,
+        channelName: v.channelName,
+        channelId: v.channelId,
+        published: v.published,
+        thumbnailUrl: v.thumbnailUrl || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
+        duration: v.duration || 0,
+        viewCount: v.viewCount || 0
+    };
 }
 
-function _wgUnionById(base, incoming) {
-    const byId = new Map();
-    (base || []).forEach(v => { if (v && v.id) byId.set(v.id, v); });
-    // Only ADD videos we don't already have — keep local (often richer) copies.
-    (incoming || []).forEach(v => { if (v && v.id && !byId.has(v.id)) byId.set(v.id, v); });
-    return [...byId.values()];
+// Reconcile the timestamped ratingStates log against the plain videoRatings map
+// the rest of the app mutates, stamping `t` on anything that changed. Captures
+// every like/unlike/dislike regardless of which code path made it, without
+// touching each call site. Skipped while applying a remote merge (that path
+// writes ratingStates directly with the authoritative remote timestamps).
+function stampRatingStates() {
+    if (_syncApplying) return;
+    if (!state.ratingStates) state.ratingStates = {};
+    const now = Date.now();
+    // Added or changed ratings
+    Object.entries(state.videoRatings || {}).forEach(([id, r]) => {
+        const cur = state.ratingStates[id];
+        if (!cur || cur.r !== r) {
+            state.ratingStates[id] = { r, t: now, v: _wgVideoMeta(id) };
+        }
+    });
+    // Cleared ratings (unlike / undislike): present as active in the log but no
+    // longer in videoRatings → write a tombstone (r=0) so the removal syncs.
+    Object.entries(state.ratingStates).forEach(([id, st]) => {
+        if (st.r !== 0 && !(id in (state.videoRatings || {}))) {
+            state.ratingStates[id] = { r: 0, t: now, v: st.v };
+        }
+    });
+    persistField("rating_states", state.ratingStates);
 }
 
 function _wgMergePlaylists(base, incoming) {
     const out = { ...(base || {}) };
     Object.entries(incoming || {}).forEach(([pid, pl]) => {
         if (out[pid]) {
-            out[pid] = { ...out[pid], videos: _wgUnionById(out[pid].videos, (pl || {}).videos) };
+            const byId = new Map();
+            (out[pid].videos || []).forEach(v => { if (v && v.id) byId.set(v.id, v); });
+            ((pl || {}).videos || []).forEach(v => { if (v && v.id && !byId.has(v.id)) byId.set(v.id, v); });
+            out[pid] = { ...out[pid], videos: [...byId.values()] };
         } else {
             out[pid] = pl;
         }
@@ -962,30 +1007,76 @@ function _wgMergePlaylists(base, incoming) {
     return out;
 }
 
+function _wgUnionById(base, incoming) {
+    const byId = new Map();
+    (base || []).forEach(v => { if (v && v.id) byId.set(v.id, v); });
+    (incoming || []).forEach(v => { if (v && v.id && !byId.has(v.id)) byId.set(v.id, v); });
+    return [...byId.values()];
+}
+
 function _wgSyncSnapshot() {
+    stampRatingStates();
     return {
-        video_ratings: state.videoRatings || {},
-        liked_videos: state.likedVideos || [],
+        ratings: state.ratingStates || {},
         queue: state.queue || [],
         playlists: state.playlists || {},
         watched: state.watchedHistory || {}
     };
 }
 
-// Apply a remote field bundle into local state (additive merge) + re-render.
+// Rebuild the derived videoRatings map + likedVideos list from ratingStates,
+// and nudge the ontology graph for anything that flipped.
+function _wgRebuildFromRatingStates(changedIds) {
+    const newRatings = {};
+    const liked = [];
+    Object.entries(state.ratingStates).forEach(([id, st]) => {
+        if (st.r === 5) {
+            newRatings[id] = 5;
+            const existing = (state.likedVideos || []).find(v => v && v.id === id);
+            liked.push(existing || st.v || { id });
+        } else if (st.r === -5) {
+            newRatings[id] = -5;
+        }
+    });
+    state.videoRatings = newRatings;
+    state.likedVideos = liked;
+    saveVideoRatings();
+    saveLikedVideos();
+
+    // Reflect flips into the ontology graph (mirrors the manual like/dislike paths)
+    if (state.ontologyGraph && changedIds && changedIds.size) {
+        changedIds.forEach(id => {
+            const st = state.ratingStates[id];
+            if (!st) return;
+            const delta = st.r === 5 ? 1 : (st.r === -5 ? -1 : 0);
+            if (delta !== 0) {
+                const v = st.v || { id };
+                graphProcessRating(state.ontologyGraph, { ...v, matchedTopics: v.matchedTopics || [] }, delta);
+            }
+        });
+        saveOntologyGraph();
+    }
+}
+
+// Apply a remote field bundle into local state (LWW ratings + additive rest).
 function _wgApplyRemoteFields(fields) {
     if (!fields) return;
     _syncApplying = true;
     try {
-        if (fields.video_ratings) {
-            // Local wins on conflict so a just-made like is never downgraded;
-            // remote-only ratings are added.
-            state.videoRatings = { ...fields.video_ratings, ...state.videoRatings };
-            saveVideoRatings();
-        }
-        if (Array.isArray(fields.liked_videos)) {
-            state.likedVideos = _wgUnionById(state.likedVideos, fields.liked_videos);
-            saveLikedVideos();
+        if (fields.ratings) {
+            if (!state.ratingStates) state.ratingStates = {};
+            const changed = new Set();
+            Object.entries(fields.ratings).forEach(([id, rec]) => {
+                if (!rec || typeof rec.t !== "number") return;
+                const cur = state.ratingStates[id];
+                if (!cur || rec.t > (cur.t || 0)) {
+                    // Newer decision from elsewhere wins (incl. unlike r=0, dislike r=-5)
+                    if (!cur || cur.r !== rec.r) changed.add(id);
+                    state.ratingStates[id] = rec;
+                }
+            });
+            persistField("rating_states", state.ratingStates);
+            _wgRebuildFromRatingStates(changed);
         }
         if (Array.isArray(fields.queue)) {
             state.queue = _wgUnionById(state.queue, fields.queue);
@@ -1005,7 +1096,7 @@ function _wgApplyRemoteFields(fields) {
     } finally {
         _syncApplying = false;
     }
-    // Refresh whatever's on screen so merged-in videos appear without a reload
+    // Refresh whatever's on screen so merged changes appear without a reload
     try { renderFeed(); } catch (e) { /* view may not be ready */ }
     try { if (typeof renderQueueUI === "function") renderQueueUI(); } catch (e) {}
     try { if (state.currentView === "liked-videos" && typeof renderLikedVideosView === "function") renderLikedVideosView(); } catch (e) {}
@@ -1021,14 +1112,14 @@ function schedulePushRemoteState() {
 async function pushRemoteState() {
     if (!WG_SYNC_ENABLED) return;
     try {
-        const res = await fetch(`/sync/${_wgSyncProfile()}`, {
+        const res = await fetch(`/sync/${WG_SYNC_KEY}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ fields: _wgSyncSnapshot() })
         });
         if (res.ok) {
             const data = await res.json();
-            _wgApplyRemoteFields(data.fields);  // pick up other browsers' merged adds
+            _wgApplyRemoteFields(data.fields);  // pick up other browsers' merged changes
         }
     } catch (e) {
         debug("[Sync] push failed:", e && e.message);
@@ -1038,11 +1129,11 @@ async function pushRemoteState() {
 async function pullRemoteState() {
     if (!WG_SYNC_ENABLED) return;
     try {
-        const res = await fetch(`/sync/${_wgSyncProfile()}`);
+        const res = await fetch(`/sync/${WG_SYNC_KEY}`);
         if (res.ok) {
             const data = await res.json();
             _wgApplyRemoteFields(data.fields);
-            // Upload our local-only adds so the server has the full union too
+            // Upload our local-only decisions so the server has the full picture
             schedulePushRemoteState();
         }
     } catch (e) {
@@ -1052,8 +1143,10 @@ async function pullRemoteState() {
 
 function startCrossBrowserSync() {
     if (!WG_SYNC_ENABLED) return;
+    // Seed ratingStates from any pre-existing local ratings on first run
+    stampRatingStates();
     pullRemoteState();
-    // Poll so likes made in another browser show up here without a manual reload
+    // Poll so decisions made in another browser show up without a manual reload
     setInterval(pullRemoteState, 45000);
     // Flush any pending push before the tab goes away
     window.addEventListener("pagehide", () => {
@@ -1061,7 +1154,7 @@ function startCrossBrowserSync() {
             clearTimeout(_wgPushTimer);
             try {
                 navigator.sendBeacon(
-                    `/sync/${_wgSyncProfile()}`,
+                    `/sync/${WG_SYNC_KEY}`,
                     new Blob([JSON.stringify({ fields: _wgSyncSnapshot() })], { type: "application/json" })
                 );
             } catch (e) { /* best effort */ }

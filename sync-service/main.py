@@ -2,23 +2,26 @@
 Wallgarden Sync Service
 =======================
 
-A tiny per-profile state store so the YouTube Wallgarden dashboard's curation
-(likes/ratings, liked videos, watchlist queue, playlists, watch history) is
-shared across browsers instead of being trapped in each browser's localStorage.
+A tiny shared state store so the YouTube Wallgarden dashboard's curation is the
+same in every browser instead of being trapped in each browser's localStorage.
 
-The dashboard is otherwise a static site: all user data lives in localStorage,
-which is per-browser even on the same URL. This service gives every *profile* a
-single server-side home keyed by profile name, so liking a video in Chrome shows
-up in Vivaldi (and vice-versa) as long as both use the same profile.
+The dashboard is otherwise a static site: user data lives in localStorage, which
+is per-browser even on the same URL. This service is the single source of truth,
+so a like/unlike/dislike made anywhere shows up everywhere.
 
-Storage: MongoDB, database `wallgarden` (isolated from all other ecosystem data),
-collection `profiles`, one document per profile (`_id` = profile name).
+MONOLITH: one global document (no per-profile partitioning — profiles were a
+per-browser footgun, since sharing silently depended on both browsers picking the
+same profile name). Storage: MongoDB, database `wallgarden`, collection `state`,
+document `_id = "global"`.
 
-Merge model: SMART MERGE (additive union). A PUT merges the incoming fields into
-what's already stored rather than overwriting — so concurrent activity in two
-browsers is combined and a like made in one never clobbers a like made in the
-other. NOTE: because merges are additive, explicit *removals* (un-like, delete
-from queue) do not propagate across browsers in this version — adds always win.
+Merge model — signals are EVENTS, not a set:
+
+* `ratings`: a map { videoId: { r, t, v } } where `r` is the rating (5 = like,
+  -5 = dislike, 0 = cleared) and `t` is when it changed (ms). Merge is per-video
+  LAST-WRITE-WINS on `t`. This makes unlike (r→0) and dislike (r→-5) first-class
+  and *propagating* — the newest decision wins, so removals are no longer lost.
+  `v` carries minimal video metadata so any browser can render the liked list.
+* `queue`, `playlists`, `watched`: additive union / max-timestamp (adds win).
 """
 
 import os
@@ -30,15 +33,16 @@ from pymongo import MongoClient
 
 MONGO_URI = os.environ.get("MONGO_URI")
 DB_NAME = os.environ.get("WALLGARDEN_MONGO_DB", "wallgarden")
+DOC_ID = "global"  # single monolithic document
 
 if not MONGO_URI:
     raise RuntimeError("MONGO_URI is required (set it in the deploy env)")
 
 _client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
 _db = _client[DB_NAME]
-_profiles = _db["profiles"]
+_state = _db["state"]
 
-app = FastAPI(title="Wallgarden Sync", version="1.0.0")
+app = FastAPI(title="Wallgarden Sync", version="2.0.0")
 
 # The dashboard calls us same-origin through its own nginx (/sync/*), but keep
 # CORS permissive so it also works if hit directly on the LAN.
@@ -51,13 +55,19 @@ app.add_middleware(
 
 # Fields we sync. Anything not listed here stays browser-local by design
 # (e.g. the ontology graph, which each browser rebuilds from merged ratings).
-SYNC_FIELDS = ["video_ratings", "liked_videos", "queue", "playlists", "watched"]
+SYNC_FIELDS = ["ratings", "queue", "playlists", "watched"]
 
 
-def _merge_object(base, incoming):
-    """Shallow key union; incoming value wins on a key conflict."""
+def _merge_ratings(base, incoming):
+    """Per-video last-write-wins on `t`. Newest decision wins — so an unlike
+    (r=0) or dislike (r=-5) with a newer timestamp overrides an older like."""
     out = dict(base or {})
-    out.update(incoming or {})
+    for vid, rec in (incoming or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        cur = out.get(vid)
+        if not cur or (rec.get("t", 0) or 0) >= (cur.get("t", 0) or 0):
+            out[vid] = rec
     return out
 
 
@@ -98,8 +108,7 @@ def _merge_playlists(base, incoming):
 
 
 _MERGERS = {
-    "video_ratings": _merge_object,
-    "liked_videos": _merge_list_by_id,
+    "ratings": _merge_ratings,
     "queue": _merge_list_by_id,
     "playlists": _merge_playlists,
     "watched": _merge_watched,
@@ -120,22 +129,21 @@ def health():
         return {"ok": False, "error": str(exc)}
 
 
+# The {profile} segment is accepted for URL/nginx compatibility but ignored:
+# there is one global document. Old per-profile clients therefore all converge
+# onto the same shared state.
 @app.get("/sync/{profile}")
-def get_profile(profile: str):
-    doc = _profiles.find_one({"_id": profile}) or {}
-    return {
-        "profile": profile,
-        "fields": _project(doc),
-        "updatedAt": doc.get("updatedAt"),
-    }
+def get_state(profile: str = "global"):
+    doc = _state.find_one({"_id": DOC_ID}) or {}
+    return {"fields": _project(doc), "updatedAt": doc.get("updatedAt")}
 
 
 # PUT is the normal path; POST is accepted too so the dashboard's unload-flush
 # via navigator.sendBeacon() (which can only POST) lands as well.
 @app.api_route("/sync/{profile}", methods=["PUT", "POST"])
-def put_profile(profile: str, body: dict = Body(default={})):
+def put_state(profile: str = "global", body: dict = Body(default={})):
     incoming = (body or {}).get("fields", {}) or {}
-    existing = _profiles.find_one({"_id": profile}) or {}
+    existing = _state.find_one({"_id": DOC_ID}) or {}
 
     merged = {}
     for field in SYNC_FIELDS:
@@ -145,10 +153,6 @@ def put_profile(profile: str, body: dict = Body(default={})):
             merged[field] = existing[field]
 
     merged["updatedAt"] = datetime.now(timezone.utc).isoformat()
-    _profiles.update_one({"_id": profile}, {"$set": merged}, upsert=True)
+    _state.update_one({"_id": DOC_ID}, {"$set": merged}, upsert=True)
 
-    return {
-        "profile": profile,
-        "fields": _project(merged),
-        "updatedAt": merged["updatedAt"],
-    }
+    return {"fields": _project(merged), "updatedAt": merged["updatedAt"]}

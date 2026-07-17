@@ -431,7 +431,7 @@
                 <div class="settings-tabs">
                     <button class="settings-tab-button active" data-tab-identifier="tab-channels">Channels</button>
                     <button class="settings-tab-button" data-tab-identifier="tab-topics">Topics & Filters</button>
-                    <button class="settings-tab-button" data-tab-identifier="tab-profiles">Profiles</button>
+                    <button class="settings-tab-button" data-tab-identifier="tab-profiles" style="display:none;">Profiles</button>
                     <button class="settings-tab-button" data-tab-identifier="tab-export">Backup & Restore</button>
                     <button class="settings-tab-button" data-tab-identifier="tab-ontology">🕸️ Knowledge Graph</button>
                 </div>
@@ -665,7 +665,10 @@
                 </div>
 
                 <!-- Profiles Tab Content -->
-                <div id="tab-profiles" class="settings-tab-content">
+                <!-- Profiles deprecated: the dashboard is now a single monolithic
+                     store shared across all browsers via the sync service. Hidden
+                     (not deleted) so any existing per-profile data stays reachable. -->
+                <div id="tab-profiles" class="settings-tab-content" style="display:none;">
                     <h3>Manage Profiles</h3>
                     <p class="tab-desc">Switch between profiles or create a new one. Each profile has its own topics, subscriptions, search history, and curation data.</p>
                     
