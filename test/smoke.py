@@ -27,7 +27,7 @@ APP_DIR = (pathlib.Path(__file__).resolve().parent.parent / "app").resolve()
 # Backend + third-party hosts the boot path pokes; all stubbed to empty 200s so
 # nothing hangs and the app takes its normal fetch-failure branches.
 STUB_MARKERS = ("/api/", "/prism/", "/vault/", "/scraper/", "/youtube",
-                "/reddit/", "open-meteo", "ipapi.co", "googleapis.com",
+                "/reddit/", "/sync/", "open-meteo", "ipapi.co", "googleapis.com",
                 "allorigins")
 
 # Seed enough state that buildSuggestionGroups() produces pills. Keys mirror
@@ -67,6 +67,9 @@ def main():
             return '{"results":[{"latitude":0,"longitude":0,"name":"Testville"}]}'
         if "api.open-meteo" in url:
             return '{"current_weather":{"temperature":20,"weathercode":0,"windspeed":5}}'
+        if "/sync/" in url:
+            # Shape the cross-browser sync service returns: a profile with fields
+            return '{"profile":"default","fields":{},"updatedAt":null}'
         return "{}"
 
     def route(r):
