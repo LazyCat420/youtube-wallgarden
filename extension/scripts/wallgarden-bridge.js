@@ -13,6 +13,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 });
 
+// Reverse channel: the dashboard page broadcasts its state (playlists, saved
+// video IDs) via window.postMessage. Relay it up to the background worker so it
+// can be cached for the YouTube content script.
+window.addEventListener('message', (event) => {
+    if (event.source !== window || !event.data || event.data.type !== 'WG_APP_STATE') return;
+    try {
+        chrome.runtime.sendMessage({ type: 'WG_APP_STATE', data: event.data.data }, () => {
+            if (chrome.runtime.lastError) {
+                // Background worker may be asleep — harmless, next broadcast retries
+            }
+        });
+    } catch (e) {
+        console.warn("[Wallgarden Bridge] Failed to relay app state:", e.message);
+    }
+});
+
 // On app load, pull any sync events that were queued while the app was closed.
 // Wait past window load so the app's message listener (deferred script) exists.
 function flushPendingSyncEvents() {
