@@ -9,8 +9,8 @@ the unminified source so errors map to real lines, stubs every backend/external
 call, seeds a little state, and asserts the app boots, renders suggestion pills,
 and switches views — with ZERO uncaught exceptions or console errors.
 
-Run:  scraper-service/.venv/bin/python youtube-wallgarden/test/smoke.py
-      (from the `sun` root; or adjust APP_DIR below)
+Run:  npm run test:smoke              (from the youtube-wallgarden dir)
+      or: .venv/bin/python test/smoke.py
 Exit code 0 = pass, 1 = fail.
 """
 import http.server
