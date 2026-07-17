@@ -4474,7 +4474,20 @@ function parseRelativeTime(str) {
     return Date.now() - msDiff;
 }
 
+// Canonical publish timestamps are milliseconds (Date.parse of the feed's
+// <published>). Some sync paths historically wrote seconds (Date.now()/1000),
+// which renders as "56y ago" (≈1970). Heal those on read: a value in the
+// ~1e9–1e12 window is unambiguously seconds — a real millisecond timestamp
+// for any actual video is > 1e12 (year 2001+). Scales already-stored bad data
+// too, not just newly synced videos.
+function normalizeTimestamp(timestamp) {
+    if (!timestamp || typeof timestamp !== "number") return timestamp;
+    if (timestamp > 1e9 && timestamp < 1e12) return timestamp * 1000;
+    return timestamp;
+}
+
 function getRelativeTime(timestamp) {
+    timestamp = normalizeTimestamp(timestamp);
     if (!timestamp) return "";
     const diffMs = Date.now() - timestamp;
     if (diffMs < 0) return "Just now";
@@ -4503,6 +4516,7 @@ function getRelativeTime(timestamp) {
 }
 
 function getVideoAge(timestamp) {
+    timestamp = normalizeTimestamp(timestamp);
     if (!timestamp) return 0;
     return Date.now() - timestamp;
 }
@@ -7226,7 +7240,7 @@ window.addEventListener("message", (event) => {
                 title: payload.title || "Liked Video (Synced)",
                 channelName: payload.channelName || "YouTube Curation",
                 channelId: payload.channelId || "",
-                published: Math.floor(Date.now() / 1000),
+                published: Date.now(),
                 thumbnailUrl: `https://i.ytimg.com/vi/${payload.videoId}/hqdefault.jpg`,
                 description: payload.description || "Synced from YouTube Likes.",
                 duration: payload.duration || 0,
@@ -7339,7 +7353,7 @@ window.addEventListener("message", (event) => {
                 title: payload.title || "Saved Video (Synced)",
                 channelName: payload.channelName || "YouTube Curation",
                 channelId: payload.channelId || "",
-                published: Math.floor(Date.now() / 1000),
+                published: Date.now(),
                 thumbnailUrl: `https://i.ytimg.com/vi/${payload.videoId}/hqdefault.jpg`,
                 description: payload.playlistName
                     ? `Synced from YouTube playlist "${payload.playlistName}".`
@@ -7387,7 +7401,7 @@ window.addEventListener("message", (event) => {
                 title: payload.title || "Saved Video (Synced)",
                 channelName: payload.channelName || "YouTube Curation",
                 channelId: payload.channelId || "",
-                published: Math.floor(Date.now() / 1000),
+                published: Date.now(),
                 thumbnailUrl: `https://i.ytimg.com/vi/${payload.videoId}/hqdefault.jpg`,
                 description: payload.playlistName
                     ? `Saved from YouTube to "${payload.playlistName}".`
