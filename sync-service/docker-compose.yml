@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  wallgarden-sync:
+    image: wallgarden-sync:latest
+    container_name: wallgarden-sync
+    restart: unless-stopped
+    ports:
+      - "8017:8017"
+    environment:
+      # Values come from the deploy-staged .env (deploy-kit/.env.deploy).
+      # A dedicated `wallgarden` database keeps this isolated from all other data.
+      - MONGO_URI=${MONGO_URI}
+      - WALLGARDEN_MONGO_DB=${WALLGARDEN_MONGO_DB:-wallgarden}

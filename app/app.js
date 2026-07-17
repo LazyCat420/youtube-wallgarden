@@ -182,6 +182,10 @@ document.addEventListener("DOMContentLoaded", () => {
     // has playlists + saved-video badges from the moment the dashboard loads.
     setTimeout(broadcastAppState, 1200);
 
+    // Pull shared state from the sync service and keep it in step with other
+    // browsers (likes/saves made anywhere land here, keyed by profile).
+    startCrossBrowserSync();
+
     // Unconditionally auto-sync feeds when the page is loaded/refreshed
     syncFeeds();
 
@@ -842,9 +846,9 @@ function saveTopics()         { persistField("topics", state.topics); }
 function saveLikedTopics()    { persistField("liked_topics", state.likedTopics); }
 function saveDislikedTopics() { persistField("disliked_topics", state.dislikedTopics); }
 function saveCache()          { persistField("cache", state.cache); }
-function saveVideoRatings()   { persistField("video_ratings", state.videoRatings); }
+function saveVideoRatings()   { persistField("video_ratings", state.videoRatings); schedulePushRemoteState(); }
 function saveNewsRatings()    { persistField("news_ratings", state.newsSourceRatings); }
-function saveLikedVideos()    { persistField("liked_videos", state.likedVideos); scheduleAppStateBroadcast(); }
+function saveLikedVideos()    { persistField("liked_videos", state.likedVideos); scheduleAppStateBroadcast(); schedulePushRemoteState(); }
 function saveSearchHistory()  { persistField("search_history", state.searchHistory); }
 
 // The pool and ontology graph are saved from hot paths (scroll batches, watch
@@ -872,6 +876,7 @@ function savePlaylists() {
     }
     persistField("playlists", state.playlists);
     scheduleAppStateBroadcast();
+    schedulePushRemoteState();
 }
 
 // Save discovered channels helper (profile-aware)
@@ -880,6 +885,7 @@ function saveDiscovered() { persistField("discovered_channels", state.discovered
 function saveQueue() {
     persistField("queue", state.queue);
     scheduleAppStateBroadcast();
+    schedulePushRemoteState();
 }
 
 // ── Reverse channel: mirror our state to the browser extension ──
@@ -920,6 +926,147 @@ function broadcastAppState() {
     } catch (e) {
         debug("[Wallgarden Sync] broadcastAppState failed:", e && e.message);
     }
+}
+
+// ── Cross-browser sync (wallgarden-sync service, keyed by profile) ──
+// localStorage is per-browser, so likes made in one browser never reach
+// another. This layer mirrors the syncable fields to a small server-side store
+// (nginx /sync/<profile>) that SMART-MERGES: a like anywhere is additive and
+// never clobbers a like made elsewhere. Removals are not propagated (adds win).
+// If the service is unreachable, every call fails soft and the app stays local.
+const WG_SYNC_ENABLED = true;
+let _syncApplying = false;      // true while applying a remote merge → suppress push echo
+let _wgPushTimer = null;
+
+function _wgSyncProfile() {
+    return encodeURIComponent(state.currentProfile || "default");
+}
+
+function _wgUnionById(base, incoming) {
+    const byId = new Map();
+    (base || []).forEach(v => { if (v && v.id) byId.set(v.id, v); });
+    // Only ADD videos we don't already have — keep local (often richer) copies.
+    (incoming || []).forEach(v => { if (v && v.id && !byId.has(v.id)) byId.set(v.id, v); });
+    return [...byId.values()];
+}
+
+function _wgMergePlaylists(base, incoming) {
+    const out = { ...(base || {}) };
+    Object.entries(incoming || {}).forEach(([pid, pl]) => {
+        if (out[pid]) {
+            out[pid] = { ...out[pid], videos: _wgUnionById(out[pid].videos, (pl || {}).videos) };
+        } else {
+            out[pid] = pl;
+        }
+    });
+    return out;
+}
+
+function _wgSyncSnapshot() {
+    return {
+        video_ratings: state.videoRatings || {},
+        liked_videos: state.likedVideos || [],
+        queue: state.queue || [],
+        playlists: state.playlists || {},
+        watched: state.watchedHistory || {}
+    };
+}
+
+// Apply a remote field bundle into local state (additive merge) + re-render.
+function _wgApplyRemoteFields(fields) {
+    if (!fields) return;
+    _syncApplying = true;
+    try {
+        if (fields.video_ratings) {
+            // Local wins on conflict so a just-made like is never downgraded;
+            // remote-only ratings are added.
+            state.videoRatings = { ...fields.video_ratings, ...state.videoRatings };
+            saveVideoRatings();
+        }
+        if (Array.isArray(fields.liked_videos)) {
+            state.likedVideos = _wgUnionById(state.likedVideos, fields.liked_videos);
+            saveLikedVideos();
+        }
+        if (Array.isArray(fields.queue)) {
+            state.queue = _wgUnionById(state.queue, fields.queue);
+            saveQueue();
+        }
+        if (fields.playlists) {
+            state.playlists = _wgMergePlaylists(state.playlists, fields.playlists);
+            savePlaylists();
+        }
+        if (fields.watched) {
+            if (!state.watchedHistory) state.watchedHistory = {};
+            Object.entries(fields.watched).forEach(([vid, ts]) => {
+                state.watchedHistory[vid] = Math.max(state.watchedHistory[vid] || 0, ts || 0);
+            });
+            localStorage.setItem("wallgarden_watched", JSON.stringify(state.watchedHistory));
+        }
+    } finally {
+        _syncApplying = false;
+    }
+    // Refresh whatever's on screen so merged-in videos appear without a reload
+    try { renderFeed(); } catch (e) { /* view may not be ready */ }
+    try { if (typeof renderQueueUI === "function") renderQueueUI(); } catch (e) {}
+    try { if (state.currentView === "liked-videos" && typeof renderLikedVideosView === "function") renderLikedVideosView(); } catch (e) {}
+    try { if (state.currentView === "playlists" && typeof renderPlaylistsView === "function") renderPlaylistsView(); } catch (e) {}
+}
+
+function schedulePushRemoteState() {
+    if (_syncApplying || !WG_SYNC_ENABLED) return;
+    clearTimeout(_wgPushTimer);
+    _wgPushTimer = setTimeout(pushRemoteState, 1500);
+}
+
+async function pushRemoteState() {
+    if (!WG_SYNC_ENABLED) return;
+    try {
+        const res = await fetch(`/sync/${_wgSyncProfile()}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ fields: _wgSyncSnapshot() })
+        });
+        if (res.ok) {
+            const data = await res.json();
+            _wgApplyRemoteFields(data.fields);  // pick up other browsers' merged adds
+        }
+    } catch (e) {
+        debug("[Sync] push failed:", e && e.message);
+    }
+}
+
+async function pullRemoteState() {
+    if (!WG_SYNC_ENABLED) return;
+    try {
+        const res = await fetch(`/sync/${_wgSyncProfile()}`);
+        if (res.ok) {
+            const data = await res.json();
+            _wgApplyRemoteFields(data.fields);
+            // Upload our local-only adds so the server has the full union too
+            schedulePushRemoteState();
+        }
+    } catch (e) {
+        debug("[Sync] pull failed:", e && e.message);
+    }
+}
+
+function startCrossBrowserSync() {
+    if (!WG_SYNC_ENABLED) return;
+    pullRemoteState();
+    // Poll so likes made in another browser show up here without a manual reload
+    setInterval(pullRemoteState, 45000);
+    // Flush any pending push before the tab goes away
+    window.addEventListener("pagehide", () => {
+        if (_wgPushTimer) {
+            clearTimeout(_wgPushTimer);
+            try {
+                navigator.sendBeacon(
+                    `/sync/${_wgSyncProfile()}`,
+                    new Blob([JSON.stringify({ fields: _wgSyncSnapshot() })], { type: "application/json" })
+                );
+            } catch (e) { /* best effort */ }
+        }
+    });
 }
 
 let _graphSaveTimer = null;
@@ -1648,6 +1795,11 @@ function switchProfile(profileName) {
     if (state.topics.filter(t => t.weight > 0).length > 0) {
         initSmartFeed();
     }
+
+    // Re-sync against the new profile's shared state (cancel any push still
+    // queued from the outgoing profile's flush first).
+    clearTimeout(_wgPushTimer);
+    pullRemoteState();
 }
 
 // Create new profile
