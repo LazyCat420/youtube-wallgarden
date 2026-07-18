@@ -59,6 +59,11 @@ let state = {
     // { r: 5|-5|0, t: <ms>, v: <minimal video meta> }. r=0 is a tombstone
     // (unliked/undisliked) so removals propagate; newest `t` wins on merge.
     ratingStates: {},
+    // Same timestamped-log pattern for the watchlist queue and playlists so
+    // REMOVALS propagate too. queueStates: videoId -> { p:1|0, t, v }.
+    // playlistStates: plId -> { name, createdAt, deleted, t, videos:{vId:{p,t,v}} }.
+    queueStates: {},
+    playlistStates: {},
     settings: {
         useGoogleApiSearch: false,
         useYtdlp: true,
@@ -694,6 +699,10 @@ function loadState() {
     state.videoRatings = rawVideoRatings ? JSON.parse(rawVideoRatings) : {};
     const rawRatingStates = getStoredItem("rating_states");
     state.ratingStates = rawRatingStates ? JSON.parse(rawRatingStates) : {};
+    const rawQueueStates = getStoredItem("queue_states");
+    state.queueStates = rawQueueStates ? JSON.parse(rawQueueStates) : {};
+    const rawPlaylistStates = getStoredItem("playlist_states");
+    state.playlistStates = rawPlaylistStates ? JSON.parse(rawPlaylistStates) : {};
     state.discoveredChannels = rawDiscovered ? JSON.parse(rawDiscovered) : [];
     state.smartFeedSuggestionPool = rawPool ? JSON.parse(rawPool) : [];
     state.burnedQueries = rawBurned ? JSON.parse(rawBurned) : [];
@@ -992,34 +1001,137 @@ function stampRatingStates() {
     persistField("rating_states", state.ratingStates);
 }
 
-function _wgMergePlaylists(base, incoming) {
-    const out = { ...(base || {}) };
-    Object.entries(incoming || {}).forEach(([pid, pl]) => {
-        if (out[pid]) {
-            const byId = new Map();
-            (out[pid].videos || []).forEach(v => { if (v && v.id) byId.set(v.id, v); });
-            ((pl || {}).videos || []).forEach(v => { if (v && v.id && !byId.has(v.id)) byId.set(v.id, v); });
-            out[pid] = { ...out[pid], videos: [...byId.values()] };
-        } else {
-            out[pid] = pl;
-        }
-    });
-    return out;
+function _wgSlim(v) {
+    if (!v || !v.id) return v;
+    return {
+        id: v.id,
+        title: v.title,
+        channelName: v.channelName,
+        channelId: v.channelId,
+        published: v.published,
+        thumbnailUrl: v.thumbnailUrl || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
+        duration: v.duration || 0,
+        viewCount: v.viewCount || 0
+    };
 }
 
-function _wgUnionById(base, incoming) {
-    const byId = new Map();
-    (base || []).forEach(v => { if (v && v.id) byId.set(v.id, v); });
-    (incoming || []).forEach(v => { if (v && v.id && !byId.has(v.id)) byId.set(v.id, v); });
-    return [...byId.values()];
+// Reconcile the timestamped queue log against state.queue, stamping presence
+// tombstones (p=0) for anything removed. Mirrors stampRatingStates.
+function stampQueueStates() {
+    if (_syncApplying) return;
+    if (!state.queueStates) state.queueStates = {};
+    const now = Date.now();
+    const present = new Set();
+    (state.queue || []).forEach(v => {
+        if (!v || !v.id) return;
+        present.add(v.id);
+        const st = state.queueStates[v.id];
+        if (!st || st.p !== 1) state.queueStates[v.id] = { p: 1, t: now, v: _wgSlim(v) };
+    });
+    Object.entries(state.queueStates).forEach(([id, st]) => {
+        if (st.p === 1 && !present.has(id)) state.queueStates[id] = { p: 0, t: now, v: st.v };
+    });
+    persistField("queue_states", state.queueStates);
+}
+
+// Reconcile the timestamped playlist log against state.playlists, stamping
+// video-removal (p=0) and whole-playlist deletion (deleted) tombstones.
+function stampPlaylistStates() {
+    if (_syncApplying) return;
+    if (!state.playlistStates) state.playlistStates = {};
+    const now = Date.now();
+    const ps = state.playlistStates;
+    Object.values(state.playlists || {}).forEach(pl => {
+        if (!pl || !pl.id) return;
+        let entry = ps[pl.id];
+        if (!entry) entry = ps[pl.id] = { name: pl.name, createdAt: pl.createdAt, deleted: false, t: now, videos: {} };
+        if (entry.name !== pl.name || entry.deleted) { entry.name = pl.name; entry.deleted = false; entry.t = now; }
+        if (!entry.videos) entry.videos = {};
+        const present = new Set();
+        (pl.videos || []).forEach(v => {
+            if (!v || !v.id) return;
+            present.add(v.id);
+            const vs = entry.videos[v.id];
+            if (!vs || vs.p !== 1) entry.videos[v.id] = { p: 1, t: now, v: _wgSlim(v) };
+        });
+        Object.entries(entry.videos).forEach(([vid, vs]) => {
+            if (vs.p === 1 && !present.has(vid)) entry.videos[vid] = { p: 0, t: now, v: vs.v };
+        });
+    });
+    // Whole-playlist deletions: in the log, not yet deleted, but gone from state
+    Object.entries(ps).forEach(([plid, entry]) => {
+        if (!entry.deleted && !(plid in (state.playlists || {}))) { entry.deleted = true; entry.t = now; }
+    });
+    persistField("playlist_states", ps);
+}
+
+// Rebuild state.queue from queueStates (present items, ordered by add time).
+function _wgRebuildQueue() {
+    const items = Object.values(state.queueStates || {})
+        .filter(st => st.p === 1 && st.v)
+        .sort((a, b) => (a.t || 0) - (b.t || 0))
+        .map(st => st.v);
+    state.queue = items;
+    saveQueue();
+}
+
+// Rebuild state.playlists from playlistStates (non-deleted playlists, present videos).
+function _wgRebuildPlaylists() {
+    const out = {};
+    Object.entries(state.playlistStates || {}).forEach(([plid, entry]) => {
+        if (entry.deleted) return;
+        const videos = Object.values(entry.videos || {})
+            .filter(vs => vs.p === 1 && vs.v)
+            .sort((a, b) => (a.t || 0) - (b.t || 0))
+            .map(vs => vs.v);
+        out[plid] = { id: plid, name: entry.name, createdAt: entry.createdAt, videos };
+    });
+    state.playlists = out;
+    savePlaylists();
+}
+
+// Merge an incoming flat LWW map ({key: {t,...}}) into a target in place,
+// newest `t` wins. Returns whether anything changed. Used for queue + a
+// playlist's nested videos map.
+function _wgMergeLwwInto(target, incoming) {
+    let changed = false;
+    Object.entries(incoming || {}).forEach(([key, rec]) => {
+        if (!rec || typeof rec.t !== "number") return;
+        const cur = target[key];
+        if (!cur || rec.t > (cur.t || 0)) { target[key] = rec; changed = true; }
+    });
+    return changed;
+}
+
+function _wgMergeIncomingPlaylists(incoming) {
+    if (!state.playlistStates) state.playlistStates = {};
+    let changed = false;
+    Object.entries(incoming || {}).forEach(([plid, pl]) => {
+        if (!pl) return;
+        let entry = state.playlistStates[plid];
+        if (!entry) { state.playlistStates[plid] = pl; changed = true; return; }
+        // Playlist meta (name/deleted) is LWW on the playlist t
+        if ((pl.t || 0) > (entry.t || 0)) {
+            entry.name = pl.name;
+            entry.deleted = !!pl.deleted;
+            entry.createdAt = pl.createdAt != null ? pl.createdAt : entry.createdAt;
+            entry.t = pl.t;
+            changed = true;
+        }
+        if (!entry.videos) entry.videos = {};
+        if (_wgMergeLwwInto(entry.videos, pl.videos)) changed = true;
+    });
+    return changed;
 }
 
 function _wgSyncSnapshot() {
     stampRatingStates();
+    stampQueueStates();
+    stampPlaylistStates();
     return {
         ratings: state.ratingStates || {},
-        queue: state.queue || [],
-        playlists: state.playlists || {},
+        queue: state.queueStates || {},
+        playlists: state.playlistStates || {},
         watched: state.watchedHistory || {}
     };
 }
@@ -1078,13 +1190,18 @@ function _wgApplyRemoteFields(fields) {
             persistField("rating_states", state.ratingStates);
             _wgRebuildFromRatingStates(changed);
         }
-        if (Array.isArray(fields.queue)) {
-            state.queue = _wgUnionById(state.queue, fields.queue);
-            saveQueue();
+        if (fields.queue) {
+            if (!state.queueStates) state.queueStates = {};
+            if (_wgMergeLwwInto(state.queueStates, fields.queue)) {
+                persistField("queue_states", state.queueStates);
+                _wgRebuildQueue();
+            }
         }
         if (fields.playlists) {
-            state.playlists = _wgMergePlaylists(state.playlists, fields.playlists);
-            savePlaylists();
+            if (_wgMergeIncomingPlaylists(fields.playlists)) {
+                persistField("playlist_states", state.playlistStates);
+                _wgRebuildPlaylists();
+            }
         }
         if (fields.watched) {
             if (!state.watchedHistory) state.watchedHistory = {};
