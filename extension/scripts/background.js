@@ -1,6 +1,18 @@
 // ============================================================
-//  WALLGARDEN: Background Router (Message Relay + Offline Queue)
+//  WALLGARDEN: Background Router
 // ============================================================
+// Three jobs, in priority order:
+//   1. POST every sync event straight to the Wallgarden sync API, so YouTube
+//      activity is recorded even when the dashboard is CLOSED. This is the
+//      durable path — the dashboard picks it up on its next pull.
+//   2. Relay the event to any open dashboard tab, so an open dashboard updates
+//      instantly instead of waiting for its next poll. (Cosmetic, best-effort.)
+//   3. If the server is unreachable, queue the event and retry on a timer, so
+//      nothing is lost when the NAS is down.
+//
+// Both 1 and 2 can run for the same event; that's safe because the server
+// merge is per-video last-write-wins — applying the same decision twice is a
+// no-op.
 
 const WG_APP_URL_PREFIXES = [
     "http://10.0.0.16",
@@ -8,86 +20,162 @@ const WG_APP_URL_PREFIXES = [
     "http://127.0.0.1"
 ];
 
+const DEFAULT_API_BASE = "http://10.0.0.16:8007";
+
 const PENDING_KEY = "wg_pending_sync";
 const APP_STATE_KEY = "wg_app_state";
+const API_BASE_KEY = "wg_api_base";
 const MAX_PENDING = 200;
+const RETRY_ALARM = "wg-retry-pending";
 
 function isWallgardenTab(tab) {
     return !!(tab.url && WG_APP_URL_PREFIXES.some(p => tab.url.startsWith(p)));
 }
 
+async function getApiBase() {
+    const data = await chrome.storage.local.get([API_BASE_KEY]);
+    return String(data[API_BASE_KEY] || DEFAULT_API_BASE).replace(/\/+$/, "");
+}
+
 /** Reflect the offline-queue depth on the toolbar icon so waiting saves are visible. */
-function updateBadge() {
-    chrome.storage.local.get([PENDING_KEY], (data) => {
-        const count = (data[PENDING_KEY] || []).length;
-        chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
-        chrome.action.setBadgeBackgroundColor({ color: '#2e7d46' });
+async function updateBadge() {
+    const data = await chrome.storage.local.get([PENDING_KEY]);
+    const count = (data[PENDING_KEY] || []).length;
+    chrome.action.setBadgeText({ text: count > 0 ? String(count) : "" });
+    chrome.action.setBadgeBackgroundColor({ color: "#2e7d46" });
+}
+
+async function queuePendingEvent(event) {
+    const data = await chrome.storage.local.get([PENDING_KEY]);
+    const pending = data[PENDING_KEY] || [];
+    pending.push(event);
+    await chrome.storage.local.set({ [PENDING_KEY]: pending.slice(-MAX_PENDING) });
+    updateBadge();
+    console.warn("[Background] Sync server unreachable — queued for retry:", event);
+}
+
+/** Minimal video metadata so the dashboard can render a synced item it has never seen. */
+function slimVideo(ev) {
+    if (!ev || !ev.videoId) return undefined;
+    const v = { id: ev.videoId, thumbnailUrl: `https://i.ytimg.com/vi/${ev.videoId}/hqdefault.jpg` };
+    if (ev.title) v.title = ev.title;
+    if (ev.channelName) v.channelName = ev.channelName;
+    if (ev.channelId) v.channelId = ev.channelId;
+    if (ev.duration) v.duration = ev.duration;
+    if (ev.viewCount) v.viewCount = ev.viewCount;
+    return v;
+}
+
+/**
+ * Translate a YouTube action into the server's timestamped sync shape.
+ * Ratings: r = 5 like / -5 dislike / 0 cleared. Queue: p = 1 present / 0 removed.
+ * Returns null for actions with no server-side field (e.g. SUBSCRIBE).
+ */
+function buildSyncFields(ev) {
+    if (!ev || !ev.videoId) return null;
+    const t = ev.syncedAt || Date.now();
+    const v = slimVideo(ev);
+    const id = ev.videoId;
+
+    switch (ev.action) {
+        case "LIKE":
+            return { ratings: { [id]: { r: 5, t, v } } };
+        case "DISLIKE":
+            return { ratings: { [id]: { r: -5, t, v } } };
+        case "UNLIKE":
+        case "UNDISLIKE":
+            return { ratings: { [id]: { r: 0, t, v } } };
+        case "WATCHED":
+            return { watched: { [id]: t } };
+        case "WATCHLIST_ADD":
+        case "PLAYLIST_SAVE":
+        case "WALLGARDEN_SAVE":
+            return { queue: { [id]: { p: 1, t, v } } };
+        case "WATCHLIST_REMOVE":
+            return { queue: { [id]: { p: 0, t, v } } };
+        default:
+            return null;
+    }
+}
+
+/** Durable path: write the event to the sync API. Throws if it doesn't land. */
+async function postEventToServer(ev) {
+    const fields = buildSyncFields(ev);
+    if (!fields) return; // nothing to persist for this action
+
+    const base = await getApiBase();
+    const res = await fetch(`${base}/sync/global`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields })
+    });
+    if (!res.ok) throw new Error(`sync API responded ${res.status}`);
+    console.log(`[Background] ${ev.action} ${ev.videoId} → synced to server`);
+}
+
+/** Best-effort: nudge any open dashboard tab so its UI updates immediately. */
+function relayToOpenTabs(event) {
+    chrome.tabs.query({}, (tabs) => {
+        tabs.filter(isWallgardenTab).forEach(tab => {
+            chrome.tabs.sendMessage(tab.id, { type: "WG_EXT_SYNC", data: event })
+                .catch(() => { /* tab open but bridge not active — server path still covers it */ });
+        });
     });
 }
 
-function queuePendingEvent(event) {
-    chrome.storage.local.get([PENDING_KEY], (data) => {
-        const pending = data[PENDING_KEY] || [];
-        pending.push(event);
-        chrome.storage.local.set({ [PENDING_KEY]: pending.slice(-MAX_PENDING) }, updateBadge);
-        console.log("[Background] No Wallgarden tab reachable — queued sync event for later:", event);
-    });
+/** Retry anything that was queued while the server was unreachable. */
+async function flushPendingToServer() {
+    const data = await chrome.storage.local.get([PENDING_KEY]);
+    const pending = data[PENDING_KEY] || [];
+    if (pending.length === 0) return;
+
+    const remaining = [];
+    for (const ev of pending) {
+        try {
+            await postEventToServer(ev);
+        } catch (e) {
+            remaining.push(ev);
+        }
+    }
+    await chrome.storage.local.set({ [PENDING_KEY]: remaining });
+    updateBadge();
+    if (remaining.length < pending.length) {
+        console.log(`[Background] Flushed ${pending.length - remaining.length} queued events to server`);
+    }
 }
 
-// Keep the badge fresh on startup
+// Retry queued events periodically (a service worker can be suspended, so this
+// must be an alarm rather than setInterval) and whenever the worker wakes.
+chrome.alarms.create(RETRY_ALARM, { periodInMinutes: 5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === RETRY_ALARM) flushPendingToServer();
+});
 updateBadge();
+flushPendingToServer();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'WALLGARDEN_SYNC') {
         const event = { ...message.data, syncedAt: Date.now() };
-        console.log("[Background] Routing sync event to Wallgarden tabs:", event);
+        console.log("[Background] Sync event:", event);
 
-        chrome.tabs.query({}, (tabs) => {
-            const targets = tabs.filter(isWallgardenTab);
-
-            if (targets.length === 0) {
-                // App not open — persist so it syncs on next app load
-                queuePendingEvent(event);
-                return;
-            }
-
-            let attempts = 0;
-            let delivered = 0;
-            targets.forEach(tab => {
-                chrome.tabs.sendMessage(tab.id, {
-                    type: 'WG_EXT_SYNC',
-                    data: event
-                }).then(() => {
-                    delivered++;
-                }).catch(() => {
-                    // Tab exists but bridge content script isn't active
-                }).finally(() => {
-                    attempts++;
-                    if (attempts === targets.length && delivered === 0) {
-                        queuePendingEvent(event);
-                    }
-                });
-            });
-        });
+        // 1. Durable: straight to the server (works with the dashboard closed).
+        postEventToServer(event).catch(() => queuePendingEvent(event));
+        // 2. Cosmetic: instant update for an already-open dashboard.
+        relayToOpenTabs(event);
 
         sendResponse({ success: true });
     } else if (message.type === 'WALLGARDEN_APP_READY') {
-        // Wallgarden app tab loaded — hand over any queued events
-        chrome.storage.local.get([PENDING_KEY], (data) => {
-            const pending = data[PENDING_KEY] || [];
-            if (pending.length > 0) {
-                console.log(`[Background] Flushing ${pending.length} queued sync events to Wallgarden app`);
-                chrome.storage.local.set({ [PENDING_KEY]: [] }, updateBadge);
-            }
-            sendResponse({ pending });
-        });
-        return true; // keep sendResponse alive for the async storage read
+        // The dashboard now pulls state from the server itself, so there is
+        // normally nothing to hand over. Kept so events queued while the server
+        // was down still reach an open dashboard, and retried to the server.
+        flushPendingToServer();
+        sendResponse({ pending: [] });
+        return true;
     } else if (message.type === 'WG_APP_STATE') {
         // Reverse channel: the dashboard mirrored its playlists / saved video IDs
         // back to us. Cache them so the YouTube content script can offer a real
         // playlist picker and badge already-saved videos.
         chrome.storage.local.set({ [APP_STATE_KEY]: message.data || {} });
-        console.log("[Background] Cached dashboard app state:", message.data);
         sendResponse({ success: true });
     }
 });
