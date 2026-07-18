@@ -8,12 +8,7 @@ services:
     ports:
       - "8007:8007"
     environment:
-      # The in-container sync API stores everything in a self-contained SQLite
-      # file on the volume below — no external database.
-      - WALLGARDEN_DB_PATH=/data/wallgarden.db
-    volumes:
-      # Persists the sync DB across redeploys (compose down/up keeps named volumes).
-      - wallgarden-data:/data
-
-volumes:
-  wallgarden-data:
+      # Consumed by the in-container sync API (values from the deploy-staged .env).
+      # A dedicated `wallgarden` DB keeps this isolated from all other data.
+      - MONGO_URI=${MONGO_URI}
+      - WALLGARDEN_MONGO_DB=${WALLGARDEN_MONGO_DB:-wallgarden}

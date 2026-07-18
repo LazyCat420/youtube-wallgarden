@@ -21,12 +21,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /etc/nginx/sites-enabled/default
 
-# Sync API (self-contained: stores data in SQLite on the /data volume)
+# Sync API (talks to the shared MongoDB via MONGO_URI at runtime)
 WORKDIR /app/sync
 COPY sync-service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY sync-service/main.py .
-RUN mkdir -p /data
 
 # nginx site config (its /sync/ location proxies to 127.0.0.1:8017)
 COPY nginx.conf /etc/nginx/conf.d/default.conf
