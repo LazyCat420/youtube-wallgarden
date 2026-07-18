@@ -21,7 +21,12 @@ Merge model — signals are EVENTS, not a set:
   LAST-WRITE-WINS on `t`. This makes unlike (r→0) and dislike (r→-5) first-class
   and *propagating* — the newest decision wins, so removals are no longer lost.
   `v` carries minimal video metadata so any browser can render the liked list.
-* `queue`, `playlists`, `watched`: additive union / max-timestamp (adds win).
+* `queue`: a map { videoId: { p, t, v } } — `p` is presence (1 in / 0 removed),
+  per-item LWW on `t`. Removing from the watchlist propagates.
+* `playlists`: { plId: { name, createdAt, deleted, t, videos: { vId: {p,t,v} } } }.
+  Playlist meta (name / delete) is LWW on the playlist `t`; each video is per-item
+  LWW. Deleting a playlist and removing a video from one both propagate.
+* `watched`: additive map, max-timestamp.
 """
 
 import os
@@ -58,16 +63,17 @@ app.add_middleware(
 SYNC_FIELDS = ["ratings", "queue", "playlists", "watched"]
 
 
-def _merge_ratings(base, incoming):
-    """Per-video last-write-wins on `t`. Newest decision wins — so an unlike
-    (r=0) or dislike (r=-5) with a newer timestamp overrides an older like."""
-    out = dict(base or {})
-    for vid, rec in (incoming or {}).items():
+def _merge_lww_map(base, incoming):
+    """Per-key last-write-wins on `t`. Newest decision wins — so a tombstone
+    (rating r=0, or queue p=0) with a newer timestamp overrides an older add.
+    Used for both `ratings` and `queue`."""
+    out = dict(base) if isinstance(base, dict) else {}  # tolerate legacy/garbage shapes
+    for key, rec in (incoming or {}).items():
         if not isinstance(rec, dict):
             continue
-        cur = out.get(vid)
+        cur = out.get(key)
         if not cur or (rec.get("t", 0) or 0) >= (cur.get("t", 0) or 0):
-            out[vid] = rec
+            out[key] = rec
     return out
 
 
@@ -82,34 +88,34 @@ def _merge_watched(base, incoming):
     return out
 
 
-def _merge_list_by_id(base, incoming):
-    """Union of a list of video objects by their `id`; incoming refreshes existing."""
-    by_id = {}
-    order = []
-    for item in list(base or []) + list(incoming or []):
-        if isinstance(item, dict) and item.get("id"):
-            vid = item["id"]
-            if vid not in by_id:
-                order.append(vid)
-            by_id[vid] = item
-    return [by_id[v] for v in order]
-
-
 def _merge_playlists(base, incoming):
-    """Merge {playlistId: {name, videos[]}} by id; union each playlist's videos."""
-    out = {pid: dict(pl) for pid, pl in (base or {}).items()}
+    """Merge { plId: { name, createdAt, deleted, t, videos: {vId:{p,t,v}} } }.
+    Playlist meta (name/deleted/createdAt) is LWW on the playlist `t`; the
+    nested videos map is per-item LWW — so a video removal (p=0) or a whole
+    playlist deletion (deleted=true) with a newer timestamp propagates."""
+    base = base if isinstance(base, dict) else {}  # tolerate legacy/garbage shapes
+    out = {pid: dict(pl) for pid, pl in base.items() if isinstance(pl, dict)}
     for pid, pl in (incoming or {}).items():
-        if pid in out:
-            merged_videos = _merge_list_by_id(out[pid].get("videos"), (pl or {}).get("videos"))
-            out[pid] = {**out[pid], **(pl or {}), "videos": merged_videos}
-        else:
+        if not isinstance(pl, dict):
+            continue
+        cur = out.get(pid)
+        if not cur:
             out[pid] = pl
+            continue
+        merged = dict(cur)
+        if (pl.get("t", 0) or 0) >= (cur.get("t", 0) or 0):
+            merged["name"] = pl.get("name", cur.get("name"))
+            merged["deleted"] = pl.get("deleted", cur.get("deleted", False))
+            merged["createdAt"] = pl.get("createdAt", cur.get("createdAt"))
+            merged["t"] = pl.get("t", cur.get("t"))
+        merged["videos"] = _merge_lww_map(cur.get("videos"), pl.get("videos"))
+        out[pid] = merged
     return out
 
 
 _MERGERS = {
-    "ratings": _merge_ratings,
-    "queue": _merge_list_by_id,
+    "ratings": _merge_lww_map,
+    "queue": _merge_lww_map,
     "playlists": _merge_playlists,
     "watched": _merge_watched,
 }
