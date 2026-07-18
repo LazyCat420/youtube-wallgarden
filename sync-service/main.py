@@ -11,12 +11,8 @@ so a like/unlike/dislike made anywhere shows up everywhere.
 
 MONOLITH: one global document (no per-profile partitioning — profiles were a
 per-browser footgun, since sharing silently depended on both browsers picking the
-same profile name).
-
-Storage: a self-contained SQLite file on a Docker volume (no external database).
-Everything runs inside the youtube-wallgarden container — nginx + this app — with
-the DB persisted on the `wallgarden-data` volume across redeploys. The whole
-global document is one JSON blob in a single row.
+same profile name). Storage: MongoDB, database `wallgarden`, collection `state`,
+document `_id = "global"`.
 
 Merge model — signals are EVENTS, not a set:
 
@@ -33,51 +29,25 @@ Merge model — signals are EVENTS, not a set:
 * `watched`: additive map, max-timestamp.
 """
 
-import json
 import os
-import sqlite3
-import threading
 from datetime import datetime, timezone
 
 from fastapi import Body, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pymongo import MongoClient
 
-DB_PATH = os.environ.get("WALLGARDEN_DB_PATH", "/data/wallgarden.db")
+MONGO_URI = os.environ.get("MONGO_URI")
+DB_NAME = os.environ.get("WALLGARDEN_MONGO_DB", "wallgarden")
 DOC_ID = "global"  # single monolithic document
 
-# Serializes the read-modify-write in PUT so concurrent syncs can't lose updates.
-_write_lock = threading.Lock()
+if not MONGO_URI:
+    raise RuntimeError("MONGO_URI is required (set it in the deploy env)")
 
+_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+_db = _client[DB_NAME]
+_state = _db["state"]
 
-def _connect():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute("CREATE TABLE IF NOT EXISTS state (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
-    return conn
-
-
-def _load_doc():
-    with _connect() as conn:
-        row = conn.execute("SELECT data FROM state WHERE id = ?", (DOC_ID,)).fetchone()
-    return json.loads(row[0]) if row else {}
-
-
-def _save_doc(doc):
-    payload = json.dumps(doc)
-    with _connect() as conn:
-        conn.execute(
-            "INSERT INTO state (id, data) VALUES (?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET data = excluded.data",
-            (DOC_ID, payload),
-        )
-        conn.commit()
-
-
-# Make sure the DB directory exists (the volume mounts /data, but be defensive
-# for local runs) and the table is created before the first request.
-os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
-_connect().close()
-
-app = FastAPI(title="Wallgarden Sync", version="3.0.0")
+app = FastAPI(title="Wallgarden Sync", version="2.0.0")
 
 # The dashboard calls us same-origin through its own nginx (/sync/*), but keep
 # CORS permissive so it also works if hit directly on the LAN.
@@ -159,8 +129,8 @@ def _project(doc):
 @app.get("/health")
 def health():
     try:
-        _load_doc()
-        return {"ok": True, "db": DB_PATH}
+        _client.admin.command("ping")
+        return {"ok": True, "db": DB_NAME}
     except Exception as exc:  # noqa: BLE001 — report, don't crash the probe
         return {"ok": False, "error": str(exc)}
 
@@ -170,7 +140,7 @@ def health():
 # onto the same shared state.
 @app.get("/sync/{profile}")
 def get_state(profile: str = "global"):
-    doc = _load_doc()
+    doc = _state.find_one({"_id": DOC_ID}) or {}
     return {"fields": _project(doc), "updatedAt": doc.get("updatedAt")}
 
 
@@ -179,16 +149,16 @@ def get_state(profile: str = "global"):
 @app.api_route("/sync/{profile}", methods=["PUT", "POST"])
 def put_state(profile: str = "global", body: dict = Body(default={})):
     incoming = (body or {}).get("fields", {}) or {}
+    existing = _state.find_one({"_id": DOC_ID}) or {}
 
-    with _write_lock:  # atomic read-modify-write
-        existing = _load_doc()
-        merged = {}
-        for field in SYNC_FIELDS:
-            if field in incoming:
-                merged[field] = _MERGERS[field](existing.get(field), incoming[field])
-            elif field in existing:
-                merged[field] = existing[field]
-        merged["updatedAt"] = datetime.now(timezone.utc).isoformat()
-        _save_doc(merged)
+    merged = {}
+    for field in SYNC_FIELDS:
+        if field in incoming:
+            merged[field] = _MERGERS[field](existing.get(field), incoming[field])
+        elif field in existing:
+            merged[field] = existing[field]
+
+    merged["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    _state.update_one({"_id": DOC_ID}, {"$set": merged}, upsert=True)
 
     return {"fields": _project(merged), "updatedAt": merged["updatedAt"]}

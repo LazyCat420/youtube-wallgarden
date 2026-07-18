@@ -9,11 +9,10 @@ Runs with plain asserts so no pytest install is needed:
 """
 
 import os
-import tempfile
 
-# Importing main initializes its SQLite store, so point it at a throwaway temp
-# file (not the real /data volume path) before importing the pure mergers.
-os.environ.setdefault("WALLGARDEN_DB_PATH", os.path.join(tempfile.gettempdir(), "wg_test_merge.db"))
+# main.py requires MONGO_URI at import and constructs a MongoClient (lazy — it
+# does not connect here), so hand it a dummy so we can import the pure mergers.
+os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017/?serverSelectionTimeoutMS=1")
 
 from main import _merge_lww_map, _merge_playlists, _merge_watched  # noqa: E402
 
