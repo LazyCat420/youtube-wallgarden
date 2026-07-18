@@ -956,6 +956,14 @@ const WG_SYNC_ENABLED = true;
 const WG_SYNC_KEY = "global";   // monolith: everyone shares one document
 let _syncApplying = false;      // true while applying a remote merge → suppress push echo
 let _wgPushTimer = null;
+// Shadows of what the LAST stamp actually observed locally. A removal is only
+// real if an item was in one of these and then disappeared; without them, an
+// item merged in from the server looks identical to a local deletion and gets
+// wrongly tombstoned. Null until the first stamp (we can't infer removals that
+// happened while this tab was closed — those were tombstoned in that session).
+let _lastStampedRatings = null;   // { videoId: rating }
+let _lastStampedQueue = null;     // Set(videoId)
+let _lastStampedPlaylists = null; // { playlistId: Set(videoId) }
 
 // Minimal video metadata carried with a rating so any browser can render the
 // liked list even if it never saw the video in its own feed.
@@ -984,20 +992,31 @@ function stampRatingStates() {
     if (_syncApplying) return;
     if (!state.ratingStates) state.ratingStates = {};
     const now = Date.now();
+    const vr = state.videoRatings || {};
     // Added or changed ratings
-    Object.entries(state.videoRatings || {}).forEach(([id, r]) => {
+    Object.entries(vr).forEach(([id, r]) => {
         const cur = state.ratingStates[id];
         if (!cur || cur.r !== r) {
             state.ratingStates[id] = { r, t: now, v: _wgVideoMeta(id) };
         }
     });
-    // Cleared ratings (unlike / undislike): present as active in the log but no
-    // longer in videoRatings → write a tombstone (r=0) so the removal syncs.
-    Object.entries(state.ratingStates).forEach(([id, st]) => {
-        if (st.r !== 0 && !(id in (state.videoRatings || {}))) {
-            state.ratingStates[id] = { r: 0, t: now, v: st.v };
-        }
-    });
+    // Cleared ratings (unlike / undislike) → tombstone (r=0) so the removal syncs.
+    //
+    // Only tombstone ids we OBSERVED locally on a previous pass and that have
+    // since disappeared — that is a real local unlike. Deriving removal from
+    // "in ratingStates but not in videoRatings" is wrong: a rating merged in
+    // from the server lands in ratingStates before/without ever being in this
+    // browser's videoRatings, and was being misread as a removal — which
+    // silently converted another browser's (or the extension's) fresh like
+    // into an unlike and pushed that back to the server.
+    if (_lastStampedRatings) {
+        Object.keys(_lastStampedRatings).forEach(id => {
+            if (id in vr) return;
+            const st = state.ratingStates[id];
+            if (st && st.r !== 0) state.ratingStates[id] = { r: 0, t: now, v: st.v };
+        });
+    }
+    _lastStampedRatings = { ...vr };
     persistField("rating_states", state.ratingStates);
 }
 
@@ -1028,9 +1047,17 @@ function stampQueueStates() {
         const st = state.queueStates[v.id];
         if (!st || st.p !== 1) state.queueStates[v.id] = { p: 1, t: now, v: _wgSlim(v) };
     });
-    Object.entries(state.queueStates).forEach(([id, st]) => {
-        if (st.p === 1 && !present.has(id)) state.queueStates[id] = { p: 0, t: now, v: st.v };
-    });
+    // Tombstone only ids we saw in the queue on a previous pass (a real local
+    // removal) — never one that just arrived from the server. See the note in
+    // stampRatingStates().
+    if (_lastStampedQueue) {
+        _lastStampedQueue.forEach(id => {
+            if (present.has(id)) return;
+            const st = state.queueStates[id];
+            if (st && st.p === 1) state.queueStates[id] = { p: 0, t: now, v: st.v };
+        });
+    }
+    _lastStampedQueue = present;
     persistField("queue_states", state.queueStates);
 }
 
@@ -1041,6 +1068,7 @@ function stampPlaylistStates() {
     if (!state.playlistStates) state.playlistStates = {};
     const now = Date.now();
     const ps = state.playlistStates;
+    const seen = {}; // plId -> Set(videoId) observed this pass
     Object.values(state.playlists || {}).forEach(pl => {
         if (!pl || !pl.id) return;
         let entry = ps[pl.id];
@@ -1054,14 +1082,26 @@ function stampPlaylistStates() {
             const vs = entry.videos[v.id];
             if (!vs || vs.p !== 1) entry.videos[v.id] = { p: 1, t: now, v: _wgSlim(v) };
         });
-        Object.entries(entry.videos).forEach(([vid, vs]) => {
-            if (vs.p === 1 && !present.has(vid)) entry.videos[vid] = { p: 0, t: now, v: vs.v };
+        seen[pl.id] = present;
+        // Only tombstone videos we saw in this playlist on a previous pass.
+        const before = _lastStampedPlaylists && _lastStampedPlaylists[pl.id];
+        if (before) {
+            before.forEach(vid => {
+                if (present.has(vid)) return;
+                const vs = entry.videos[vid];
+                if (vs && vs.p === 1) entry.videos[vid] = { p: 0, t: now, v: vs.v };
+            });
+        }
+    });
+    // Whole-playlist deletions — again only for playlists we previously observed.
+    if (_lastStampedPlaylists) {
+        Object.keys(_lastStampedPlaylists).forEach(plid => {
+            if (plid in (state.playlists || {})) return;
+            const entry = ps[plid];
+            if (entry && !entry.deleted) { entry.deleted = true; entry.t = now; }
         });
-    });
-    // Whole-playlist deletions: in the log, not yet deleted, but gone from state
-    Object.entries(ps).forEach(([plid, entry]) => {
-        if (!entry.deleted && !(plid in (state.playlists || {}))) { entry.deleted = true; entry.t = now; }
-    });
+    }
+    _lastStampedPlaylists = seen;
     persistField("playlist_states", ps);
 }
 
