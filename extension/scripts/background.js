@@ -45,13 +45,22 @@ async function updateBadge() {
     chrome.action.setBadgeBackgroundColor({ color: "#2e7d46" });
 }
 
+/**
+ * Park an event in storage BEFORE we try to send it.
+ *
+ * This is the durability guarantee. An MV3 service worker can be terminated at
+ * any moment — including in the middle of our fetch — and if the event only
+ * existed in memory it would vanish with no trace (the .catch() would never run
+ * either). Storage survives worker death, so the retry alarm can always finish
+ * the job. Superseding entries for the same video+action keeps the queue tight.
+ */
 async function queuePendingEvent(event) {
     const data = await chrome.storage.local.get([PENDING_KEY]);
-    const pending = data[PENDING_KEY] || [];
+    const pending = (data[PENDING_KEY] || []).filter(
+        e => !(e.videoId === event.videoId && e.action === event.action)
+    );
     pending.push(event);
     await chrome.storage.local.set({ [PENDING_KEY]: pending.slice(-MAX_PENDING) });
-    updateBadge();
-    console.warn("[Background] Sync server unreachable — queued for retry:", event);
 }
 
 /** Minimal video metadata so the dashboard can render a synced item it has never seen. */
@@ -123,33 +132,65 @@ function relayToOpenTabs(event) {
     });
 }
 
-/** Retry anything that was queued while the server was unreachable. */
-async function flushPendingToServer() {
-    const data = await chrome.storage.local.get([PENDING_KEY]);
-    const pending = data[PENDING_KEY] || [];
-    if (pending.length === 0) return;
+let _flushing = false;
+let _flushAgain = false;
 
-    const remaining = [];
-    for (const ev of pending) {
-        try {
-            await postEventToServer(ev);
-        } catch (e) {
-            remaining.push(ev);
-        }
+/** Send everything queued, dropping each event only once the server has it. */
+async function flushPendingToServer() {
+    // Only one pass at a time (so two passes can't double-send), but a request
+    // that arrives mid-pass must not be discarded — an event queued just after
+    // we read the list would otherwise wait for the next alarm tick. Loop again.
+    if (_flushing) { _flushAgain = true; return; }
+    _flushing = true;
+    try {
+        do {
+            _flushAgain = false;
+            const data = await chrome.storage.local.get([PENDING_KEY]);
+            const pending = data[PENDING_KEY] || [];
+            if (pending.length === 0) continue;
+
+            const remaining = [];
+            for (const ev of pending) {
+                try {
+                    await postEventToServer(ev);
+                } catch (e) {
+                    remaining.push(ev);  // stays queued for the retry alarm
+                }
+            }
+            await chrome.storage.local.set({ [PENDING_KEY]: remaining });
+            updateBadge();
+            if (remaining.length < pending.length) {
+                console.log(`[Background] Synced ${pending.length - remaining.length} event(s) to server`);
+            }
+            if (remaining.length) {
+                console.warn(`[Background] ${remaining.length} event(s) still queued — will retry`);
+                break;  // server is down; wait for the alarm rather than spinning
+            }
+        } while (_flushAgain);
+    } finally {
+        _flushing = false;
     }
-    await chrome.storage.local.set({ [PENDING_KEY]: remaining });
-    updateBadge();
-    if (remaining.length < pending.length) {
-        console.log(`[Background] Flushed ${pending.length - remaining.length} queued events to server`);
-    }
+}
+
+/**
+ * Durable handling of one YouTube action: write it down first, then try to
+ * deliver. Never do the network call alone — see queuePendingEvent().
+ */
+async function handleSyncEvent(event) {
+    await queuePendingEvent(event);
+    await flushPendingToServer();
 }
 
 // Retry queued events periodically (a service worker can be suspended, so this
 // must be an alarm rather than setInterval) and whenever the worker wakes.
-chrome.alarms.create(RETRY_ALARM, { periodInMinutes: 5 });
+chrome.alarms.create(RETRY_ALARM, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === RETRY_ALARM) flushPendingToServer();
 });
+// Flush on every worker wake-up as well as browser start / extension reload, so
+// a queued like isn't sitting around waiting for the next alarm tick.
+chrome.runtime.onStartup.addListener(() => flushPendingToServer());
+chrome.runtime.onInstalled.addListener(() => flushPendingToServer());
 updateBadge();
 flushPendingToServer();
 
@@ -158,12 +199,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const event = { ...message.data, syncedAt: Date.now() };
         console.log("[Background] Sync event:", event);
 
-        // 1. Durable: straight to the server (works with the dashboard closed).
-        postEventToServer(event).catch(() => queuePendingEvent(event));
-        // 2. Cosmetic: instant update for an already-open dashboard.
+        // Cosmetic: instant update for an already-open dashboard.
         relayToOpenTabs(event);
 
-        sendResponse({ success: true });
+        // Durable: persist + send. `return true` below is load-bearing — it keeps
+        // the message channel (and therefore this service worker) alive until the
+        // POST settles. Without it Chrome may terminate the worker mid-request,
+        // killing the fetch AND its catch handler, so the like disappears
+        // entirely — which is exactly what happened when the dashboard was
+        // closed and nothing else kept the worker awake.
+        handleSyncEvent(event)
+            .catch(e => console.error("[Background] sync failed:", e))
+            .finally(() => sendResponse({ success: true }));
+        return true;
     } else if (message.type === 'WALLGARDEN_APP_READY') {
         // The dashboard now pulls state from the server itself, so there is
         // normally nothing to hand over. Kept so events queued while the server
