@@ -1,43 +1,30 @@
-# Wallgarden Sync Service
+# Wallgarden Sync (embedded)
 
-Tiny per-profile state store that lets the YouTube Wallgarden dashboard share
-its curation across browsers. The dashboard is otherwise a static site whose
-data lives in `localStorage` — which is **per-browser**, so a like made in
-Chrome never reaches Vivaldi. This service gives every *profile* one
-server-side home so the same profile sees the same data everywhere.
+The little state-sync API that lets the dashboard's curation (likes/ratings,
+watchlist queue, playlists, watch history) be the same in every browser instead
+of being trapped in each browser's `localStorage`.
 
-- **Port:** `8017`
-- **Storage:** MongoDB, database `wallgarden` (isolated), collection `profiles`
-  (one doc per profile, `_id` = profile name).
-- **Synced fields:** `video_ratings`, `liked_videos`, `queue`, `playlists`,
-  `watched`. The ontology graph stays browser-local (each browser rebuilds it
-  from merged ratings).
+**This is NOT a separate service/container.** `main.py` runs *inside* the
+`youtube-wallgarden` container, next to nginx, started by `supervisord` (see the
+repo `Dockerfile` + `supervisord.conf`). nginx proxies `/sync/` to it on
+`127.0.0.1:8017`. There is one image, one compose service, one `deploy.sh`.
 
-## API
+- **Storage:** the shared MongoDB on the NAS (`MONGO_URI` from the deploy env),
+  database `wallgarden` (isolated), collection `state`, one global document.
+- **Model:** ratings/queue/playlist entries are timestamped decisions; merge is
+  per-item last-write-wins, so likes, unlikes, dislikes, and removals all
+  propagate. See `main.py` for the details.
 
-- `GET /health` — Mongo ping.
-- `GET /sync/{profile}` — `{ profile, fields, updatedAt }`.
-- `PUT /sync/{profile}` — body `{ fields: {...} }`; **smart-merges** (additive
-  union) into the stored doc and returns the merged result.
+## API (served under `/sync/` by the dashboard's nginx)
 
-Merges are additive: concurrent likes from two browsers combine and never
-clobber each other. The trade-off is that explicit *removals* (un-like, delete
-from queue) don't propagate across browsers in this version — adds win.
+- `GET /health`
+- `GET /sync/{profile}` — `{ fields, updatedAt }` (the `{profile}` segment is
+  ignored; there is one global monolithic document).
+- `PUT|POST /sync/{profile}` — body `{ fields: {...} }`, merged in.
 
-## Run locally
+## Tests
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env   # fill in MONGO_URI
-MONGO_URI=... uvicorn main:app --port 8017
+python test_merge.py       # standalone, no pytest needed
+# or: pytest test_merge.py
 ```
-
-## Deploy
-
-```bash
-bash deploy.sh
-```
-
-Builds the image and ships it to the NAS via `../../deploy-kit/lib.sh`
-(`MONGO_URI` / `WALLGARDEN_MONGO_DB` come from the deploy-staged `.env`). The
-dashboard's nginx proxies `/sync/` here.

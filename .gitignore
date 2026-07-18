@@ -29,3 +29,8 @@ app/app.min.css
 
 # LLM debug dumps
 raw_*.txt
+
+# Python
+__pycache__/
+*.pyc
+sync-service/.env
