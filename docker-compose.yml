@@ -7,3 +7,8 @@ services:
     restart: unless-stopped
     ports:
       - "8007:8007"
+    environment:
+      # Consumed by the in-container sync API (values from the deploy-staged .env).
+      # A dedicated `wallgarden` DB keeps this isolated from all other data.
+      - MONGO_URI=${MONGO_URI}
+      - WALLGARDEN_MONGO_DB=${WALLGARDEN_MONGO_DB:-wallgarden}
