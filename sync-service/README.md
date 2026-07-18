@@ -9,8 +9,9 @@ of being trapped in each browser's `localStorage`.
 repo `Dockerfile` + `supervisord.conf`). nginx proxies `/sync/` to it on
 `127.0.0.1:8017`. There is one image, one compose service, one `deploy.sh`.
 
-- **Storage:** the shared MongoDB on the NAS (`MONGO_URI` from the deploy env),
-  database `wallgarden` (isolated), collection `state`, one global document.
+- **Storage:** a self-contained **SQLite** file (`WALLGARDEN_DB_PATH`, default
+  `/data/wallgarden.db`) on the `wallgarden-data` Docker volume — **no external
+  database**. One global document stored as a JSON blob in a single row.
 - **Model:** ratings/queue/playlist entries are timestamped decisions; merge is
   per-item last-write-wins, so likes, unlikes, dislikes, and removals all
   propagate. See `main.py` for the details.
