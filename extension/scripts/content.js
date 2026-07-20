@@ -33,7 +33,8 @@ let settings = {
     // a title bar you can click to bring it back. Default off, so nothing moves
     // until you ask it to.
     collapseChat: false,
-    collapseRelated: false
+    collapseRelated: false,
+    collapseComments: false
 };
 
 // Persistent blocklist data
@@ -854,6 +855,15 @@ const COLLAPSIBLE_PANELS = [
         cls: 'wg-collapsed-related',
         label: 'Suggested videos',
         hostSelector: '#related, ytd-watch-next-secondary-results-renderer',
+    },
+    {
+        key: 'collapseComments',
+        cls: 'wg-collapsed-comments',
+        label: 'Comments',
+        // ytd-comments#comments is the watch-page section. Qualify by tag: a bare
+        // #comments also matches the comments box inside the Shorts player, where
+        // our bar has nowhere sensible to sit.
+        hostSelector: 'ytd-comments#comments',
     },
 ];
 
