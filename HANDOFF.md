@@ -1,4 +1,36 @@
-# Handoff — comment filter (2026-07-20)
+# Handoff — popup layout + comment filter (2026-07-20)
+
+## Popup layout fix (`bda0138`)
+The popup was unscrollable: the bottom sections and the Save button could not be
+reached at all. Cause was `max-height: 520px` on `<body>` alone — **the popup
+window sizes itself to `<html>`**, so body never became a scroll container; the
+page just grew past the window. Anything added to the end of `popup.html` was
+effectively invisible, which is how the comment filter shipped undiscoverable.
+
+Now: fixed header / scrolling middle / pinned footer.
+- `html { height: 580px }` — a definite height up the whole chain, under
+  Chrome's ~600px popup ceiling.
+- `.scroll-area { flex: 1 1 auto; min-height: 0; overflow-y: auto }` — the only
+  scroll container. `min-height: 0` is load-bearing: without it a flex item
+  refuses to shrink below its content height and no scrollbar ever appears.
+- `.topbar` / `.bottombar` are `flex: 0 0 auto`, so Save is always on screen.
+
+Every section is a `<details class="section" data-sec="...">` collapsed by
+default, so all eight headings fit on one screen. Open state persists under
+`popupOpenSections`. Each collapsed header carries an `n/total` badge of its
+enabled toggles (`refreshSectionCounts()`), so a shut section still reports its
+state. Adding a section = one `<details>` block with a `data-sec`; the JS is
+generic over them.
+
+`npm run test:popup` (`test/popup_layout_e2e.py`, 14 checks) pins this: the
+document must fit the popup window, every heading must be visible unscrolled,
+Save must stay pinned across scrolling, and opening all sections must not grow
+the document. If you add settings, that test is what stops the popup silently
+becoming unreachable again.
+
+---
+
+# Comment filter (`e6eaa64`)
 
 ## What shipped
 The comments section can now be *filtered* rather than only collapsed: comments
