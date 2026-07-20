@@ -112,6 +112,24 @@
             <p class="section-desc">To collapse chat rather than lose it, turn off &ldquo;Block live chat replay&rdquo; below &mdash; blocking removes the panel entirely.</p>
         </div>
 
+        <!-- COMMENT FILTER -->
+        <div class="section">
+            <h3>💬 Comment filter</h3>
+            <p class="section-desc">Hides no-substance comments &mdash; emoji-only, scam bait, self-promo, &ldquo;who&rsquo;s watching in 2026&rdquo;. Anything with likes, replies, a pin or a creator heart is never touched.</p>
+            <label class="toggle-container">
+                <input type="checkbox" id="filterComments">
+                <span class="toggle-slider"></span>
+                Filter low-substance comments
+            </label>
+            <label class="toggle-container">
+                <input type="checkbox" id="commentAuditMode" checked>
+                <span class="toggle-slider"></span>
+                Audit mode &mdash; show what was filtered
+            </label>
+            <p class="section-desc">Audit mode leaves filtered comments visible and dimmed, tagged with the rule that caught them, each with a <strong>Not spam</strong> button that restores it and remembers. Nothing is ever deleted &mdash; turning the filter off brings everything back.</p>
+            <button id="clearCommentAllowlist" class="btn-small">Forget my &ldquo;not spam&rdquo; decisions</button>
+        </div>
+
         <!-- WATCH PAGE CLEANUP -->
         <div class="section">
             <h3>🎬 Watch Page Cleanup</h3>

@@ -13,7 +13,9 @@ const SETTING_KEYS = [
     // Heuristics
     'blockAllCaps', 'blockPunctuation',
     // Collapsible panels (fold away, don't delete)
-    'collapseChat', 'collapseRelated', 'collapseComments'
+    'collapseChat', 'collapseRelated', 'collapseComments',
+    // Comment filter (hide in place, always reversible)
+    'filterComments', 'commentAuditMode'
 ];
 
 const TEXT_KEYS = [];
@@ -135,6 +137,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 setTimeout(() => { saveStatus.textContent = ''; }, 2000);
             });
         }
+    });
+
+    // Forget the comments the user hand-cleared in audit mode. Safe to do at
+    // any time: they simply get re-classified on the next page load.
+    document.getElementById('clearCommentAllowlist')?.addEventListener('click', () => {
+        chrome.storage.local.set({ commentAllowlist: [] }, () => {
+            saveStatus.textContent = '✓ Cleared "not spam" decisions';
+            setTimeout(() => { saveStatus.textContent = ''; }, 2000);
+        });
     });
 });
 

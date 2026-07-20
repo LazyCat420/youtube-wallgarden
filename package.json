@@ -3,8 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test": "node test/learn.test.mjs",
+    "test": "node test/learn.test.mjs && node test/comment-filter.test.mjs",
     "test:smoke": ".venv/bin/python test/smoke.py",
+    "test:comments": ".venv/bin/python test/comment_filter_e2e.py",
     "build": "npx --yes terser@5.27.0 app/app.js -o app/app.min.js --compress --mangle && npx --yes clean-css-cli@5.6.3 app/app.css -o app/app.min.css",
     "deploy": "bash deploy.sh"
   }
