@@ -13,7 +13,7 @@ const SETTING_KEYS = [
     // Heuristics
     'blockAllCaps', 'blockPunctuation',
     // Collapsible panels (fold away, don't delete)
-    'collapseChat', 'collapseRelated'
+    'collapseChat', 'collapseRelated', 'collapseComments'
 ];
 
 const TEXT_KEYS = [];
