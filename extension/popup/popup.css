@@ -1,35 +1,69 @@
+/* The popup window sizes itself to <html>. Give the whole chain a definite
+   height so the flex child below can actually own the overflow — a max-height
+   on <body> alone just grows the popup and puts the footer out of reach.
+   580px keeps us under Chrome's ~600px popup ceiling. */
+html {
+    height: 580px;
+}
+
 body {
     font-family: 'Inter', 'Segoe UI', sans-serif;
     margin: 0;
-    padding: 16px;
+    padding: 0;
     background-color: #0d0d0d;
     color: #e0e0e0;
     width: 340px;
-    max-height: 520px;
-    overflow-y: auto;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
 
-body::-webkit-scrollbar {
+.topbar {
+    flex: 0 0 auto;
+    padding: 14px 16px 10px;
+    border-bottom: 1px solid #1e1e1e;
+    background: #0d0d0d;
+}
+
+/* The only scroll container in the popup. min-height:0 is load-bearing:
+   without it a flex item refuses to shrink below its content height and the
+   scrollbar never appears. */
+.scroll-area {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 12px 16px;
+}
+
+.bottombar {
+    flex: 0 0 auto;
+    padding: 10px 16px 12px;
+    border-top: 1px solid #1e1e1e;
+    background: #0d0d0d;
+}
+
+.scroll-area::-webkit-scrollbar {
     width: 6px;
 }
-body::-webkit-scrollbar-track {
+.scroll-area::-webkit-scrollbar-track {
     background: #1a1a1a;
 }
-body::-webkit-scrollbar-thumb {
+.scroll-area::-webkit-scrollbar-thumb {
     background: #4CAF50;
     border-radius: 3px;
 }
 
 h1 {
-    font-size: 22px;
-    margin: 0 0 4px 0;
+    font-size: 20px;
+    margin: 0 0 2px 0;
     color: #4CAF50;
 }
 
 .subtitle {
-    font-size: 12px;
+    font-size: 11px;
     color: #666;
-    margin: 0 0 14px 0;
+    margin: 0;
     letter-spacing: 1px;
     text-transform: uppercase;
 }
@@ -37,10 +71,10 @@ h1 {
 .section {
     background: #161616;
     border-radius: 10px;
-    padding: 12px 14px;
-    margin-bottom: 10px;
+    margin-bottom: 8px;
     border: 1px solid #2a2a2a;
     transition: border-color 0.2s;
+    overflow: hidden;
 }
 
 .section:hover {
@@ -52,20 +86,81 @@ h1 {
     background: #131f13;
 }
 
+/* Collapsed section header. Replaces the old <h3> — the disclosure triangle is
+   suppressed in favour of a chevron that rotates on open. */
+.section > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 11px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #ccc;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+    transition: color 0.15s, background 0.15s;
+}
+.section > summary::-webkit-details-marker,
+.section > summary::marker {
+    display: none;
+    content: '';
+}
+.section > summary:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.03);
+}
+.section > summary::after {
+    content: '▾';
+    font-size: 11px;
+    color: #666;
+    transition: transform 0.18s ease;
+}
+.section[open] > summary::after {
+    transform: rotate(180deg);
+}
+.section[open] > summary {
+    border-bottom: 1px solid #2a2a2a;
+    color: #fff;
+}
+
+.section-body {
+    padding: 12px 14px;
+}
+
+/* Count of enabled toggles, so a collapsed section still tells you its state. */
+/* margin-left:auto lives here rather than on the chevron so the badge and the
+   chevron both sit right, in that order. */
+.section .count {
+    margin-left: auto;
+    font-size: 10px;
+    font-weight: 600;
+    color: #4CAF50;
+    background: #1a2e1a;
+    border-radius: 999px;
+    padding: 2px 7px;
+}
+.section .count.none {
+    color: #666;
+    background: #1e1e1e;
+}
+
+.pill {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: #0d0d0d;
+    background: #4CAF50;
+    border-radius: 999px;
+    padding: 2px 6px;
+}
+
 .section-desc {
     font-size: 11px;
     color: #888;
     margin: 0 0 10px 0;
     line-height: 1.4;
-}
-
-h3 {
-    margin: 0 0 10px 0;
-    font-size: 13px;
-    color: #ccc;
-    border-bottom: 1px solid #2a2a2a;
-    padding-bottom: 6px;
-    font-weight: 600;
 }
 
 /* Custom toggle switch */
@@ -330,8 +425,8 @@ button#saveBtn:active {
 #saveStatus {
     display: block;
     text-align: center;
-    margin-top: 8px;
-    font-size: 12px;
+    margin-top: 6px;
+    font-size: 11px;
     color: #66bb6a;
-    min-height: 14px;
+    min-height: 13px;
 }

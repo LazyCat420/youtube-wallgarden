@@ -6,203 +6,232 @@
     <title>Wallgarden Settings</title>
     <link rel="stylesheet" href="popup.css">
 </head>
+<!--
+  Layout: fixed header / scrolling middle / pinned footer. The popup window
+  sizes itself to <html>, so the scroll container must be an element INSIDE a
+  body with a definite height — a max-height on <body> alone just makes the
+  whole popup taller and the bottom unreachable, which is what it used to do.
+
+  Every section is a <details> collapsed by default, so all of them fit on one
+  screen and nothing is hidden below the fold. Open state persists.
+-->
 <body>
-    <div class="container">
+    <header class="topbar">
         <h1>🌿 Wallgarden</h1>
         <p class="subtitle">Anti-Brainrot Filter</p>
+    </header>
 
+    <main class="scroll-area">
         <!-- DASHBOARD SYNC -->
-        <div class="section section-highlight">
-            <h3>🔗 Dashboard Sync</h3>
-            <div class="stats-row">
-                <span class="stat" id="statQueue">— in watchlist</span>
-                <span class="stat" id="statPlaylists">— playlists</span>
+        <details class="section section-highlight" data-sec="dashboard">
+            <summary>🔗 Dashboard Sync</summary>
+            <div class="section-body">
+                <div class="stats-row">
+                    <span class="stat" id="statQueue">— in watchlist</span>
+                    <span class="stat" id="statPlaylists">— playlists</span>
+                </div>
+                <div class="stats-row">
+                    <span class="stat" id="statPending">Nothing waiting to sync</span>
+                </div>
+                <button id="openDashboardBtn" class="btn-add" style="width:100%; margin-top:8px;">Open Wallgarden Dashboard ↗</button>
             </div>
-            <div class="stats-row">
-                <span class="stat" id="statPending">Nothing waiting to sync</span>
-            </div>
-            <button id="openDashboardBtn" class="btn-add" style="width:100%; margin-top:8px;">Open Wallgarden Dashboard ↗</button>
-        </div>
+        </details>
 
         <!-- SMART BLOCKLIST -->
-        <div class="section section-highlight">
-            <h3>🧠 Smart Blocklist</h3>
-            <p class="section-desc">Learns from your "Not Interested" &amp; "Don't Recommend" clicks. Permanently blocks channels &amp; keywords YouTube keeps pushing back.</p>
-            <label class="toggle-container">
-                <input type="checkbox" id="enableSmartBlock" checked>
-                <span class="toggle-slider"></span>
-                Enable Smart Blocking
-            </label>
-            <div class="stats-row">
-                <span class="stat" id="statChannels">0 channels blocked</span>
-                <span class="stat" id="statKeywords">0 keywords tracked</span>
+        <details class="section section-highlight" data-sec="smartblock">
+            <summary>🧠 Smart Blocklist</summary>
+            <div class="section-body">
+                <p class="section-desc">Learns from your "Not Interested" &amp; "Don't Recommend" clicks. Permanently blocks channels &amp; keywords YouTube keeps pushing back.</p>
+                <label class="toggle-container">
+                    <input type="checkbox" id="enableSmartBlock" checked>
+                    <span class="toggle-slider"></span>
+                    Enable Smart Blocking
+                </label>
+                <div class="stats-row">
+                    <span class="stat" id="statChannels">0 channels blocked</span>
+                    <span class="stat" id="statKeywords">0 keywords tracked</span>
+                </div>
+                <div class="add-channel-row">
+                    <input type="text" id="addChannelInput" placeholder="Type channel name to block...">
+                    <button id="addChannelBtn" class="btn-add">+ Add</button>
+                </div>
+                <div id="blockedChannelsList" class="blocked-list">
+                    <!-- Populated by JS -->
+                </div>
+                <div class="btn-row">
+                    <button id="exportBtn" class="btn-small">Export</button>
+                    <button id="clearBtn" class="btn-small btn-danger">Clear All</button>
+                </div>
             </div>
-            <div class="add-channel-row">
-                <input type="text" id="addChannelInput" placeholder="Type channel name to block...">
-                <button id="addChannelBtn" class="btn-add">+ Add</button>
-            </div>
-            <div id="blockedChannelsList" class="blocked-list">
-                <!-- Populated by JS -->
-            </div>
-            <div class="btn-row">
-                <button id="exportBtn" class="btn-small">Export</button>
-                <button id="clearBtn" class="btn-small btn-danger">Clear All</button>
-            </div>
-        </div>
-
-        <!-- HOMEPAGE CLEANUP -->
-        <div class="section">
-            <h3>🏠 Homepage Cleanup</h3>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockShorts" checked>
-                <span class="toggle-slider"></span>
-                Block YouTube Shorts
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockBreakingNews" checked>
-                <span class="toggle-slider"></span>
-                Block "Breaking News" shelf
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockTrending" checked>
-                <span class="toggle-slider"></span>
-                Block "Trending" shelf
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockCommunityPosts" checked>
-                <span class="toggle-slider"></span>
-                Block Community Posts in feed
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockPeopleAlsoWatched" checked>
-                <span class="toggle-slider"></span>
-                Block "People also watched"
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockAds" checked>
-                <span class="toggle-slider"></span>
-                Block ad banners &amp; promoted cards
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockMoviesShows" checked>
-                <span class="toggle-slider"></span>
-                Block "Movies &amp; Shows" shelf
-            </label>
-        </div>
-
-        <!-- COLLAPSIBLE PANELS -->
-        <div class="section">
-            <h3>📁 Collapse (not block)</h3>
-            <p class="section-desc">Folds the panel into a title bar. One click brings it back — nothing is deleted.</p>
-            <label class="toggle-container">
-                <input type="checkbox" id="collapseRelated">
-                <span class="toggle-slider"></span>
-                Collapse suggested videos sidebar
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="collapseComments">
-                <span class="toggle-slider"></span>
-                Collapse comments
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="collapseChat">
-                <span class="toggle-slider"></span>
-                Collapse live chat
-            </label>
-            <p class="section-desc">To collapse chat rather than lose it, turn off &ldquo;Block live chat replay&rdquo; below &mdash; blocking removes the panel entirely.</p>
-        </div>
+        </details>
 
         <!-- COMMENT FILTER -->
-        <div class="section">
-            <h3>💬 Comment filter</h3>
-            <p class="section-desc">Hides no-substance comments &mdash; emoji-only, scam bait, self-promo, &ldquo;who&rsquo;s watching in 2026&rdquo;. Anything with likes, replies, a pin or a creator heart is never touched.</p>
-            <label class="toggle-container">
-                <input type="checkbox" id="filterComments">
-                <span class="toggle-slider"></span>
-                Filter low-substance comments
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="commentAuditMode" checked>
-                <span class="toggle-slider"></span>
-                Audit mode &mdash; show what was filtered
-            </label>
-            <p class="section-desc">Audit mode leaves filtered comments visible and dimmed, tagged with the rule that caught them, each with a <strong>Not spam</strong> button that restores it and remembers. Nothing is ever deleted &mdash; turning the filter off brings everything back.</p>
-            <button id="clearCommentAllowlist" class="btn-small">Forget my &ldquo;not spam&rdquo; decisions</button>
-        </div>
+        <details class="section" data-sec="comments">
+            <summary>💬 Comment Filter <span class="pill">New</span></summary>
+            <div class="section-body">
+                <p class="section-desc">Hides no-substance comments &mdash; emoji-only, scam bait, self-promo, &ldquo;who&rsquo;s watching in 2026&rdquo;. Anything with likes, replies, a pin or a creator heart is never touched.</p>
+                <label class="toggle-container">
+                    <input type="checkbox" id="filterComments">
+                    <span class="toggle-slider"></span>
+                    Filter low-substance comments
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="commentAuditMode" checked>
+                    <span class="toggle-slider"></span>
+                    Audit mode &mdash; show what was filtered
+                </label>
+                <p class="section-desc">Audit mode leaves filtered comments visible and dimmed, tagged with the rule that caught them, each with a <strong>Not spam</strong> button that restores it and remembers. Nothing is ever deleted &mdash; turning the filter off brings everything back.</p>
+                <button id="clearCommentAllowlist" class="btn-small" style="width:100%;">Forget my &ldquo;not spam&rdquo; decisions</button>
+            </div>
+        </details>
+
+        <!-- COLLAPSIBLE PANELS -->
+        <details class="section" data-sec="collapse">
+            <summary>📁 Collapse (not block)</summary>
+            <div class="section-body">
+                <p class="section-desc">Folds the panel into a title bar. One click brings it back — nothing is deleted.</p>
+                <label class="toggle-container">
+                    <input type="checkbox" id="collapseRelated">
+                    <span class="toggle-slider"></span>
+                    Collapse suggested videos sidebar
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="collapseComments">
+                    <span class="toggle-slider"></span>
+                    Collapse comments
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="collapseChat">
+                    <span class="toggle-slider"></span>
+                    Collapse live chat
+                </label>
+                <p class="section-desc">To collapse chat rather than lose it, turn off &ldquo;Block live chat replay&rdquo; in Watch Page Cleanup &mdash; blocking removes the panel entirely.</p>
+            </div>
+        </details>
+
+        <!-- HOMEPAGE CLEANUP -->
+        <details class="section" data-sec="homepage">
+            <summary>🏠 Homepage Cleanup</summary>
+            <div class="section-body">
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockShorts" checked>
+                    <span class="toggle-slider"></span>
+                    Block YouTube Shorts
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockBreakingNews" checked>
+                    <span class="toggle-slider"></span>
+                    Block "Breaking News" shelf
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockTrending" checked>
+                    <span class="toggle-slider"></span>
+                    Block "Trending" shelf
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockCommunityPosts" checked>
+                    <span class="toggle-slider"></span>
+                    Block Community Posts in feed
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockPeopleAlsoWatched" checked>
+                    <span class="toggle-slider"></span>
+                    Block "People also watched"
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockAds" checked>
+                    <span class="toggle-slider"></span>
+                    Block ad banners &amp; promoted cards
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockMoviesShows" checked>
+                    <span class="toggle-slider"></span>
+                    Block "Movies &amp; Shows" shelf
+                </label>
+            </div>
+        </details>
 
         <!-- WATCH PAGE CLEANUP -->
-        <div class="section">
-            <h3>🎬 Watch Page Cleanup</h3>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockMerch" checked>
-                <span class="toggle-slider"></span>
-                Block merchandise shelf
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockDonations" checked>
-                <span class="toggle-slider"></span>
-                Block Super Thanks / donation prompts
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockShortsRemix" checked>
-                <span class="toggle-slider"></span>
-                Block "Shorts remixing this video"
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockChatReplay" checked>
-                <span class="toggle-slider"></span>
-                Block live chat replay
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockInfoCards" checked>
-                <span class="toggle-slider"></span>
-                Block info cards &amp; end screen overlays
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockClipThanks">
-                <span class="toggle-slider"></span>
-                Hide "Clip" &amp; "Thanks" buttons
-            </label>
-        </div>
+        <details class="section" data-sec="watch">
+            <summary>🎬 Watch Page Cleanup</summary>
+            <div class="section-body">
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockMerch" checked>
+                    <span class="toggle-slider"></span>
+                    Block merchandise shelf
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockDonations" checked>
+                    <span class="toggle-slider"></span>
+                    Block Super Thanks / donation prompts
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockShortsRemix" checked>
+                    <span class="toggle-slider"></span>
+                    Block "Shorts remixing this video"
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockChatReplay" checked>
+                    <span class="toggle-slider"></span>
+                    Block live chat replay
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockInfoCards" checked>
+                    <span class="toggle-slider"></span>
+                    Block info cards &amp; end screen overlays
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockClipThanks">
+                    <span class="toggle-slider"></span>
+                    Hide "Clip" &amp; "Thanks" buttons
+                </label>
+            </div>
+        </details>
 
         <!-- GLOBAL ANNOYANCES -->
-        <div class="section">
-            <h3>🚫 Global Annoyances</h3>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockPremiumUpsell" checked>
-                <span class="toggle-slider"></span>
-                Block "Try YouTube Premium" banners
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockNotifPopup" checked>
-                <span class="toggle-slider"></span>
-                Block notification bell popup
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockMusicUpsell" checked>
-                <span class="toggle-slider"></span>
-                Block YouTube Music upsells
-            </label>
-        </div>
+        <details class="section" data-sec="global">
+            <summary>🚫 Global Annoyances</summary>
+            <div class="section-body">
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockPremiumUpsell" checked>
+                    <span class="toggle-slider"></span>
+                    Block "Try YouTube Premium" banners
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockNotifPopup" checked>
+                    <span class="toggle-slider"></span>
+                    Block notification bell popup
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockMusicUpsell" checked>
+                    <span class="toggle-slider"></span>
+                    Block YouTube Music upsells
+                </label>
+            </div>
+        </details>
 
         <!-- HEURISTICS -->
-        <div class="section">
-            <h3>📐 Heuristics</h3>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockAllCaps" checked>
-                <span class="toggle-slider"></span>
-                Block ALL CAPS Titles
-            </label>
-            <label class="toggle-container">
-                <input type="checkbox" id="blockPunctuation" checked>
-                <span class="toggle-slider"></span>
-                Block excessive punctuation (??/!!)
-            </label>
-        </div>
+        <details class="section" data-sec="heuristics">
+            <summary>📐 Heuristics</summary>
+            <div class="section-body">
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockAllCaps" checked>
+                    <span class="toggle-slider"></span>
+                    Block ALL CAPS Titles
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="blockPunctuation" checked>
+                    <span class="toggle-slider"></span>
+                    Block excessive punctuation (??/!!)
+                </label>
+            </div>
+        </details>
+    </main>
 
+    <footer class="bottombar">
         <button id="saveBtn">Save Settings</button>
         <span id="saveStatus"></span>
-    </div>
+    </footer>
     <script src="popup.js"></script>
 </body>
 </html>

@@ -94,7 +94,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Render blocklist
         renderBlocklist(data.blocklist);
+        // Counts read the checkboxes, so they must run after the values land.
+        refreshSectionCounts();
     });
+
+    initCollapsibleSections();
 
     // Save settings
     saveBtn.addEventListener('click', () => {
@@ -112,6 +116,11 @@ document.addEventListener('DOMContentLoaded', () => {
             saveStatus.textContent = '✓ Settings saved!';
             setTimeout(() => { saveStatus.textContent = ''; }, 2000);
         });
+    });
+
+    // Keep the collapsed-header counts honest as toggles are flipped.
+    document.querySelector('.scroll-area')?.addEventListener('change', e => {
+        if (e.target.matches('input[type="checkbox"]')) refreshSectionCounts();
     });
 
     // Export blocklist as JSON
@@ -148,6 +157,49 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 });
+
+// Sections are collapsed by default so every heading fits on one screen — the
+// old flat layout ran past the bottom of the popup and the last sections were
+// unreachable. Open state is remembered per section.
+const OPEN_SECTIONS_KEY = 'popupOpenSections';
+
+function initCollapsibleSections() {
+    const sections = [...document.querySelectorAll('.section[data-sec]')];
+    chrome.storage.local.get([OPEN_SECTIONS_KEY], (data) => {
+        const open = new Set(data[OPEN_SECTIONS_KEY] || []);
+        sections.forEach(s => { s.open = open.has(s.dataset.sec); });
+    });
+    sections.forEach(s => {
+        s.addEventListener('toggle', () => {
+            const open = sections.filter(x => x.open).map(x => x.dataset.sec);
+            chrome.storage.local.set({ [OPEN_SECTIONS_KEY]: open });
+        });
+    });
+}
+
+/**
+ * Badge each collapsed header with how many of its toggles are on, so a shut
+ * section still reports its state without being opened.
+ */
+function refreshSectionCounts() {
+    document.querySelectorAll('.section[data-sec]').forEach(section => {
+        const boxes = [...section.querySelectorAll('input[type="checkbox"]')];
+        const summary = section.querySelector(':scope > summary');
+        if (!summary) return;
+
+        let badge = summary.querySelector('.count');
+        if (!boxes.length) { badge?.remove(); return; }
+        if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'count';
+            // Ahead of the chevron, which is a ::after on the summary itself.
+            summary.appendChild(badge);
+        }
+        const on = boxes.filter(b => b.checked).length;
+        badge.textContent = `${on}/${boxes.length}`;
+        badge.classList.toggle('none', on === 0);
+    });
+}
 
 /**
  * Render the blocked channels list and stats in the popup
