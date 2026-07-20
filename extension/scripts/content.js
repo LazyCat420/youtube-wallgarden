@@ -34,7 +34,12 @@ let settings = {
     // until you ask it to.
     collapseChat: false,
     collapseRelated: false,
-    collapseComments: false
+    collapseComments: false,
+    // Comment filter — hides no-substance comments in place. Off by default;
+    // audit mode defaults ON so the first thing you see when you enable it is
+    // what it is actually catching, not a silently shorter comment section.
+    filterComments: false,
+    commentAuditMode: true
 };
 
 // Persistent blocklist data
@@ -81,13 +86,18 @@ chrome.storage.local.get(null, (data) => {
     Object.assign(settings, data);
     if (data.blocklist) blocklist = data.blocklist;
     if (data.wg_app_state) appState = normalizeAppState(data.wg_app_state);
+    if (Array.isArray(data.commentAllowlist)) commentAllowlist = new Set(data.commentAllowlist);
     applyBlockingCSS();
     syncCollapseClasses();
     injectCollapseBars();
+    applyCommentFilterCSS();
+    syncCommentFilterClasses();
     startObserver();
     startMenuInterceptor();
     startCollapseWatcher();
+    startCommentFilterWatcher();
     startWatchButtonWatcher();
+    filterComments();
 });
 
 // Re-apply if settings change
@@ -97,6 +107,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
         for (let [key, { newValue }] of Object.entries(changes)) {
             if (key === 'blocklist') {
                 blocklist = newValue;
+            } else if (key === 'commentAllowlist') {
+                commentAllowlist = new Set(newValue || []);
             } else if (key === 'wg_app_state') {
                 appState = normalizeAppState(newValue);
                 appStateChanged = true;
@@ -107,6 +119,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
         applyBlockingCSS();
         syncCollapseClasses();
         injectCollapseBars();
+        syncCommentFilterClasses();
+        // Turning the filter on mid-page must classify what is already rendered;
+        // turning it off is handled by the CSS alone, so nothing to undo here.
+        if (settings.filterComments) filterComments();
         if (appStateChanged) {
             // Refresh the picker + "already saved" affordances against new data
             refreshWatchButtonState();
@@ -122,6 +138,11 @@ document.addEventListener('yt-navigate-finish', () => {
     syncCollapseClasses();
     injectCollapseBars();
     setTimeout(injectCollapseBars, 800);
+    // New video, new comment section: clear the per-page tallies before the
+    // next batch of threads mounts, or the bar reports the previous video's.
+    resetCommentFilterState();
+    syncCommentFilterClasses();
+    setTimeout(filterComments, 900);
     // The watch metadata (owner + subscribe row) is rebuilt per navigation and
     // mounts on its own schedule — retry a few times until it settles.
     ensureWatchPageButton();
@@ -999,6 +1020,429 @@ function startCollapseWatcher() {
     // elsewhere in <body>. Falls back to body before #page-manager mounts.
     const root = document.getElementById('page-manager') || document.body;
     observer.observe(root, { childList: true, subtree: true });
+}
+
+// ============================================================
+//  Comment Filter — heuristic, reversible, auditable
+// ============================================================
+// Sits underneath the comments collapse bar: instead of folding the whole
+// section away, drop the comments that carry no information and leave the rest.
+//
+// Three rules govern everything below, in priority order:
+//
+//   1. Nothing is deleted. A filtered comment stays in the DOM with a class on
+//      it; the hiding is CSS. Audit mode flips that CSS off and shows every
+//      filtered comment with the rule that caught it, so a false positive is
+//      always visible rather than silently gone.
+//   2. Protections beat rules. Engagement signals (likes, replies, a pin, a
+//      creator heart) mean a human already vouched for the comment, so no rule
+//      gets to touch it — see COMMENT_PROTECTIONS.
+//   3. Rules match FORM, not opinion. "This is bad" with a reason survives;
+//      "trash" on its own does not. We are filtering for substance, not
+//      sentiment — the sharpest criticism under a video is often the most
+//      useful comment on it, and a sentiment filter eats exactly that.
+//
+// Deliberately NOT a rule: timestamp lists. They pattern-match as low-effort
+// (few words, repeated digits) and are frequently the single most useful
+// comment on a long video. Cheap to detect, expensive to be wrong about.
+
+/** Likes at or above this mean someone vouched for it — never filter. */
+const WG_COMMENT_LIKE_FLOOR = 5;
+
+// Extended_Pictographic plus the joiners/modifiers that decorate it. NOT
+// \p{Emoji_Component}, which includes the ASCII digits 0-9 — using it made
+// "the treaty was 1919 not 1918" read as eight emoji and get binned as spam.
+const WG_EMOJI_RE = /[\p{Extended_Pictographic}\p{Regional_Indicator}\u{FE0F}\u{200D}\u{1F3FB}-\u{1F3FF}]/gu;
+
+/** "1.2K" / "3M" / "412" → number. Empty or unparseable → 0. */
+function parseCommentCount(raw) {
+    if (!raw) return 0;
+    const m = String(raw).replace(/,/g, '').match(/([\d.]+)\s*([KMB])?/i);
+    if (!m) return 0;
+    const n = parseFloat(m[1]);
+    if (!isFinite(n)) return 0;
+    const mult = { k: 1e3, m: 1e6, b: 1e9 }[(m[2] || '').toLowerCase()] || 1;
+    return Math.round(n * mult);
+}
+
+/**
+ * Stable-enough identity for a comment, for the user's "not spam" allowlist.
+ * YouTube exposes a real comment id (`lc=` on the timestamp permalink) but only
+ * on some surfaces, so fall back to a hash of author + text. djb2.
+ */
+function commentKey(info) {
+    if (info.id) return info.id;
+    const src = `${info.author} ${info.text.slice(0, 120)}`;
+    let h = 5381;
+    for (let i = 0; i < src.length; i++) h = ((h << 5) + h + src.charCodeAt(i)) | 0;
+    return `h${(h >>> 0).toString(36)}`;
+}
+
+/**
+ * Pull the fields the rules need out of a rendered comment thread.
+ * Every selector has fallbacks: YouTube ships comment DOM changes regularly,
+ * and a missing field must degrade to "can't tell" (which protects the
+ * comment), never to a confident wrong answer.
+ */
+function scrapeComment(threadEl) {
+    const q = sel => threadEl.querySelector(sel);
+
+    const textEl = q('#content-text, yt-attributed-string#content-text, #comment-content #content-text');
+    const text = (textEl?.textContent || '').trim();
+
+    const authorEl = q('#author-text, #header-author #author-text, a#author-text');
+    const author = (authorEl?.textContent || '').trim();
+
+    // Likes: the visible count sits in #vote-count-middle. When YouTube renders
+    // no count at all the comment has 0 likes, which is the honest reading.
+    const likes = parseCommentCount(q('#vote-count-middle, #vote-count-left')?.textContent);
+
+    // Replies: presence of the expander is enough — we only care whether anyone
+    // engaged, not how many did.
+    const repliesEl = q('#more-replies, ytd-comment-replies-renderer #expander-contents, #replies ytd-button-renderer');
+    const replies = repliesEl ? Math.max(1, parseCommentCount(repliesEl.textContent)) : 0;
+
+    const pinned = !!q('#pinned-comment-badge, ytd-pinned-comment-badge-renderer, [aria-label*="Pinned" i]');
+    const hearted = !!q('ytd-creator-heart-renderer, #creator-heart-button, #creator-heart');
+    // The channel owner's own comments carry an author badge chip.
+    const byOwner = !!q('ytd-author-comment-badge-renderer, #author-comment-badge');
+
+    const permalink = q('a[href*="lc="]')?.getAttribute('href') || '';
+    const id = permalink.match(/lc=([\w.\-]+)/)?.[1] || '';
+
+    const info = { text, author, likes, replies, pinned, hearted, byOwner, id };
+    info.key = commentKey(info);
+    return info;
+}
+
+/**
+ * Reasons a comment is off-limits regardless of what the rules think.
+ * Each returns a truthy label when it applies.
+ */
+const COMMENT_PROTECTIONS = [
+    i => !i.text && 'no text scraped',
+    i => i.likes >= WG_COMMENT_LIKE_FLOOR && `${i.likes} likes`,
+    i => i.replies > 0 && 'has replies',
+    i => i.pinned && 'pinned',
+    i => i.hearted && 'hearted by creator',
+    i => i.byOwner && 'by the channel owner',
+];
+
+/** Words that mark a complaint. On their own they prove nothing — see below. */
+const WG_COMPLAINT_WORDS = /\b(trash|garbage|mid|cringe|dogshit|dogwater|unwatchable|worst|awful|terrible|sucks?|boring|clickbait|ratio|L\b|flop|overrated)\b/i;
+/**
+ * Markers that a comment is making an ARGUMENT rather than just booing.
+ * Conjunctions only — punctuation and digits were tried here and are far too
+ * weak a signal: a comma let "mid video, worst channel" pass as reasoned.
+ */
+const WG_SUBSTANCE_MARKERS = /\b(because|since|although|however|but|though|imo|actually|instead|whereas|the (?:problem|issue|point)|due to|which is why)\b/i;
+
+const WG_COMMENT_RULES = [
+    {
+        id: 'emojiOnly',
+        label: 'Emoji only',
+        test: i => !i.text.replace(WG_EMOJI_RE, '').replace(/[\s\p{P}\p{S}]/gu, ''),
+    },
+    {
+        id: 'scam',
+        label: 'Scam / contact bait',
+        // The dominant scam genres under finance and tutorial videos: an offer
+        // plus an off-platform contact handle.
+        test: i => /\b(telegram|whats\s?app|whatsapp|t\.me\/|wa\.me\/)\b/i.test(i.text)
+            || /\b(dm|message|contact|reach out to|write)\s+(me|him|her|them|us)\b.{0,40}\b(on|via|at|@)/i.test(i.text)
+            || /\b(recovery (?:expert|agent|specialist)|hack(?:er|ing) (?:service|expert)|binary options|forex (?:expert|trader)|crypto (?:expert|mentor)|investment (?:mentor|manager))\b/i.test(i.text)
+            || /\b(earn|make|profit)(?:ed|ing)?\s+\$?\d[\d,.]*\s*(k|usd|dollars)?\b.{0,60}\b(week|day|month|trading|invest)/i.test(i.text),
+    },
+    {
+        id: 'selfPromo',
+        label: 'Self-promotion',
+        test: i => /\b(check out|visit|watch) my (?:channel|videos?|page|profile)\b/i.test(i.text)
+            || /\b(sub(?:scribe)? (?:to|back)? ?(?:my|me)|subbed, sub back|sub4sub)\b/i.test(i.text),
+    },
+    {
+        id: 'engagementBait',
+        label: 'Engagement bait',
+        test: i => /\bwho'?s? (?:still )?(?:watching|here|listening)\b/i.test(i.text)
+            || /\b(?:still|anyone) (?:watching|here|listening)\s+in\s+(?:20\d\d|\w+\s+20\d\d)\b/i.test(i.text)
+            || /\b(?:like|comment) if you\b/i.test(i.text)
+            || /\b\d+% of (?:people|you|viewers) (?:will|won'?t)\b/i.test(i.text)
+            || /\b(?:first|early|second)!*$/i.test(i.text.trim()) && i.text.length < 20,
+    },
+    {
+        id: 'characterMash',
+        label: 'Character mashing',
+        // Ordered ahead of lowEffort: both would catch "great 😂😂😂😂😂😂😂😂",
+        // but the audit bar names the FIRST matching rule, and it should report
+        // the specific reason rather than the generic one.
+        test: i => /(.)\1{7,}/.test(i.text)
+            || (i.text.match(WG_EMOJI_RE) || []).length >= 6,
+    },
+    {
+        id: 'lowEffort',
+        label: 'Too short to say anything',
+        // Short AND unvouched. The like floor and reply protections above have
+        // already run, so anything reaching here got zero traction too.
+        test: i => i.text.replace(WG_EMOJI_RE, '').trim().length < 12,
+    },
+    {
+        id: 'emptyComplaint',
+        label: 'Complaint with no substance',
+        // The narrowest rule here on purpose, and the one most worth watching in
+        // audit mode. All three must hold: it boos, it makes no argument, and
+        // it is short. Drop any one condition and it starts eating real critique.
+        test: i => WG_COMPLAINT_WORDS.test(i.text)
+            && !WG_SUBSTANCE_MARKERS.test(i.text)
+            && i.text.trim().split(/\s+/).length <= 7,
+    },
+];
+
+/** Comments the user has personally cleared in audit mode. Keys, not text. */
+let commentAllowlist = new Set();
+/** Per-rule hit counts for the current page, shown on the audit bar. */
+let commentFilterStats = {};
+
+/**
+ * @returns {{filtered: boolean, rule?: object, protectedBy?: string}}
+ */
+function classifyComment(info) {
+    if (commentAllowlist.has(info.key)) return { filtered: false, protectedBy: 'you cleared it' };
+    for (const p of COMMENT_PROTECTIONS) {
+        const why = p(info);
+        if (why) return { filtered: false, protectedBy: why };
+    }
+    for (const rule of WG_COMMENT_RULES) {
+        let hit = false;
+        try { hit = !!rule.test(info); } catch { hit = false; }
+        if (hit) return { filtered: true, rule };
+    }
+    return { filtered: false };
+}
+
+function applyCommentFilterCSS() {
+    let el = document.getElementById('wallgarden-comment-filter-css');
+    if (!el) {
+        el = document.createElement('style');
+        el.id = 'wallgarden-comment-filter-css';
+        document.head.appendChild(el);
+    }
+    el.textContent = `
+        /* Filtering is CSS over a class, never a DOM removal: turning the
+           setting off restores every comment with no re-scrape. */
+        html.wg-cf-on ytd-comment-thread-renderer.wg-comment-filtered {
+            display: none !important;
+        }
+        /* Audit mode: show the filtered comments, marked, so false positives
+           are inspectable instead of invisible. */
+        html.wg-cf-on.wg-cf-audit ytd-comment-thread-renderer.wg-comment-filtered {
+            display: block !important;
+            opacity: 0.6;
+            outline: 1px dashed rgba(255, 138, 128, 0.7);
+            border-radius: 8px;
+            padding: 6px 8px;
+            margin: 4px 0;
+        }
+        html.wg-cf-on.wg-cf-audit ytd-comment-thread-renderer.wg-comment-filtered:hover {
+            opacity: 1;
+        }
+        .wg-cf-tag {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 4px;
+            font-family: "Roboto", Arial, sans-serif;
+            font-size: 11px;
+            color: rgba(255, 138, 128, 0.95);
+        }
+        html.wg-cf-on.wg-cf-audit ytd-comment-thread-renderer.wg-comment-filtered .wg-cf-tag {
+            display: flex;
+        }
+        .wg-cf-tag button {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: var(--yt-spec-text-primary, #f1f1f1);
+            border-radius: 999px;
+            padding: 2px 10px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .wg-cf-tag button:hover { background: rgba(255,255,255,0.2); }
+        .wg-cf-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            width: 100%;
+            box-sizing: border-box;
+            padding: 8px 12px;
+            margin-bottom: 8px;
+            background: var(--yt-spec-badge-chip-background, rgba(255,255,255,0.08));
+            border: 1px solid var(--yt-spec-10-percent-layer, rgba(255,255,255,0.1));
+            border-radius: 10px;
+            color: var(--yt-spec-text-primary, #f1f1f1);
+            font-family: "Roboto", Arial, sans-serif;
+            font-size: 12px;
+        }
+        html:not(.wg-cf-on) .wg-cf-bar { display: none; }
+        .wg-cf-bar .wg-cf-breakdown { opacity: 0.6; font-size: 11px; }
+        .wg-cf-bar button {
+            margin-left: auto;
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: inherit;
+            border-radius: 999px;
+            padding: 3px 12px;
+            font-size: 11px;
+            font-weight: 500;
+            cursor: pointer;
+        }
+        .wg-cf-bar button:hover { background: rgba(255,255,255,0.2); }
+    `;
+}
+
+function syncCommentFilterClasses() {
+    document.documentElement.classList.toggle('wg-cf-on', !!settings.filterComments);
+    document.documentElement.classList.toggle('wg-cf-audit', !!settings.commentAuditMode);
+}
+
+/** Mark the "not spam" affordance onto a filtered comment. */
+function tagFilteredComment(threadEl, info, rule) {
+    let tag = threadEl.querySelector(':scope > .wg-cf-tag');
+    if (!tag) {
+        tag = document.createElement('div');
+        tag.className = 'wg-cf-tag';
+        threadEl.prepend(tag);
+    }
+    tag.innerHTML = '';
+    const label = document.createElement('span');
+    label.textContent = `⚑ hidden — ${rule.label}`;
+    const btn = document.createElement('button');
+    btn.textContent = 'Not spam';
+    btn.title = 'Restore this comment and remember the decision';
+    btn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        clearFilteredComment(threadEl, info);
+    });
+    tag.append(label, btn);
+}
+
+/** User says we got it wrong: restore it and remember, across pages and sessions. */
+function clearFilteredComment(threadEl, info) {
+    commentAllowlist.add(info.key);
+    chrome.storage.local.set({ commentAllowlist: [...commentAllowlist] });
+    threadEl.classList.remove('wg-comment-filtered');
+    threadEl.querySelector(':scope > .wg-cf-tag')?.remove();
+    const rule = threadEl.dataset.wgCfRule;
+    if (rule && commentFilterStats[rule]) {
+        commentFilterStats[rule] -= 1;
+        if (!commentFilterStats[rule]) delete commentFilterStats[rule];
+    }
+    delete threadEl.dataset.wgCfRule;
+    renderCommentFilterBar();
+}
+
+/**
+ * Classify every comment thread not yet seen on this page.
+ * Idempotent: threads carry data-wg-cf once processed. Cheap enough to run on
+ * every mutation batch as YouTube lazy-loads more comments.
+ */
+function filterComments() {
+    if (!settings.filterComments) return;
+    const threads = document.querySelectorAll('ytd-comment-thread-renderer:not([data-wg-cf])');
+    if (!threads.length) return;
+
+    threads.forEach(threadEl => {
+        const info = scrapeComment(threadEl);
+        // No text yet means the thread is still rendering — leave it unmarked
+        // so the next mutation batch picks it up rather than passing it
+        // permanently on an empty read.
+        if (!info.text) return;
+        threadEl.dataset.wgCf = '1';
+
+        const verdict = classifyComment(info);
+        if (!verdict.filtered) return;
+
+        threadEl.classList.add('wg-comment-filtered');
+        threadEl.dataset.wgCfRule = verdict.rule.id;
+        commentFilterStats[verdict.rule.id] = (commentFilterStats[verdict.rule.id] || 0) + 1;
+        tagFilteredComment(threadEl, info, verdict.rule);
+    });
+
+    renderCommentFilterBar();
+}
+
+/** Summary + audit toggle, injected at the top of the comments section. */
+function renderCommentFilterBar() {
+    const host = document.querySelector('ytd-comments#comments');
+    if (!host) return;
+
+    const total = Object.values(commentFilterStats).reduce((a, b) => a + b, 0);
+    let bar = host.querySelector(':scope > .wg-cf-bar');
+    if (!total) {
+        bar?.remove();
+        return;
+    }
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.className = 'wg-cf-bar';
+        // Below the collapse bar, which prepends itself to the same host.
+        const collapseBar = host.querySelector(':scope > .wg-collapse-bar');
+        if (collapseBar) collapseBar.after(bar); else host.prepend(bar);
+    }
+
+    const auditing = !!settings.commentAuditMode;
+    bar.innerHTML = '';
+
+    const summary = document.createElement('span');
+    summary.textContent = `🌿 ${total} comment${total === 1 ? '' : 's'} filtered`;
+
+    const breakdown = document.createElement('span');
+    breakdown.className = 'wg-cf-breakdown';
+    breakdown.textContent = Object.entries(commentFilterStats)
+        .sort((a, b) => b[1] - a[1])
+        .map(([id, n]) => `${WG_COMMENT_RULES.find(r => r.id === id)?.label || id} ${n}`)
+        .join(' · ');
+
+    const btn = document.createElement('button');
+    btn.textContent = auditing ? 'Hide them' : 'Review what was filtered';
+    btn.title = auditing
+        ? 'Hide filtered comments again'
+        : 'Show every filtered comment with the rule that caught it';
+    btn.addEventListener('click', () => {
+        settings.commentAuditMode = !settings.commentAuditMode;
+        chrome.storage.local.set({ commentAuditMode: settings.commentAuditMode });
+        syncCommentFilterClasses();
+        renderCommentFilterBar();
+    });
+
+    bar.append(summary, breakdown, btn);
+}
+
+/** Comments lazy-load forever, so this watcher runs for the life of the page. */
+function startCommentFilterWatcher() {
+    let pending = null;
+    const observer = new MutationObserver(() => {
+        if (!settings.filterComments) return;
+        if (pending) return;
+        pending = setTimeout(() => {
+            pending = null;
+            filterComments();
+        }, 250);
+    });
+    const root = document.getElementById('page-manager') || document.body;
+    observer.observe(root, { childList: true, subtree: true });
+}
+
+/** A new video means a new comment section: drop the per-page tallies. */
+function resetCommentFilterState() {
+    commentFilterStats = {};
+    document.querySelectorAll('[data-wg-cf]').forEach(el => {
+        delete el.dataset.wgCf;
+        delete el.dataset.wgCfRule;
+        el.classList.remove('wg-comment-filtered');
+        el.querySelector(':scope > .wg-cf-tag')?.remove();
+    });
+    document.querySelector('.wg-cf-bar')?.remove();
 }
 
 // ============================================================
