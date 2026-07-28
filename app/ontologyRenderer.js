@@ -3,11 +3,12 @@
 //  Native HTML5 Canvas Force-Directed Graph Engine
 // ============================================================
 
+// Editorial Garden palette — keep in sync with the :root tokens in index.html
 const TYPE_COLORS = {
-    Topic: "#3b82f6",
-    Channel: "#10b981",
-    ContentPattern: "#8b5cf6",
-    default: "#64748b"
+    Topic: "#7FB48B",          /* moss */
+    Channel: "#C9A954",        /* dry gold */
+    ContentPattern: "#C67B5C", /* terracotta */
+    default: "#7E877C"         /* sage-gray */
 };
 
 function drawRoundedRect(ctx, x, y, width, height, radius) {
@@ -236,7 +237,7 @@ class OntologyGraphCanvas {
         this.canvas.style.display = 'block';
         this.canvas.style.width = '100%';
         this.canvas.style.height = '100%';
-        this.canvas.style.background = '#0a0f1a';
+        this.canvas.style.background = '#131714';
         
         // Remove existing children and append canvas
         this.container.innerHTML = '';
@@ -555,7 +556,7 @@ class OntologyGraphCanvas {
         const endY = (this.canvas.height - this.transform.offsetY) / this.transform.scale + 200;
         
         if (this.transform.scale > 0.3) {
-            this.ctx.fillStyle = 'rgba(51, 65, 85, 0.12)';
+            this.ctx.fillStyle = 'rgba(126, 135, 124, 0.12)';
             for (let x = Math.floor(startX / gridSize) * gridSize; x < endX; x += gridSize) {
                 for (let y = Math.floor(startY / gridSize) * gridSize; y < endY; y += gridSize) {
                     this.ctx.fillRect(x - 0.5, y - 0.5, 1, 1);
@@ -602,7 +603,7 @@ class OntologyGraphCanvas {
             this.ctx.beginPath();
             this.ctx.moveTo(computedSourceX, computedSourceY);
             this.ctx.lineTo(targetX, targetY);
-            this.ctx.strokeStyle = `rgba(120, 140, 165, ${baseOpacity})`;
+            this.ctx.strokeStyle = `rgba(140, 150, 140, ${baseOpacity})`;
             this.ctx.lineWidth = 0.3 + edgeWeight * 2.5;
             this.ctx.stroke();
             
@@ -615,7 +616,7 @@ class OntologyGraphCanvas {
                 this.ctx.lineTo(targetX - arrowLength * Math.cos(angle - arrowAngle), targetY - arrowLength * Math.sin(angle - arrowAngle));
                 this.ctx.lineTo(targetX - arrowLength * Math.cos(angle + arrowAngle), targetY - arrowLength * Math.sin(angle + arrowAngle));
                 this.ctx.closePath();
-                this.ctx.fillStyle = `rgba(120, 140, 165, ${baseOpacity * 0.8})`;
+                this.ctx.fillStyle = `rgba(140, 150, 140, ${baseOpacity * 0.8})`;
                 this.ctx.fill();
             }
             this.ctx.globalAlpha = 1.0;
@@ -649,7 +650,7 @@ class OntologyGraphCanvas {
                 const glowAlpha = 0.04 + (node.activation || 0) * 0.08;
                 this.ctx.beginPath();
                 this.ctx.arc(node.x, node.y, glowRadius, 0, Math.PI * 2);
-                this.ctx.fillStyle = `rgba(100, 180, 255, ${glowAlpha})`;
+                this.ctx.fillStyle = `rgba(127, 180, 139, ${glowAlpha})`;
                 this.ctx.fill();
             }
             
@@ -710,14 +711,14 @@ class OntologyGraphCanvas {
                 this.ctx.globalAlpha = baseAlpha;
                 
                 drawRoundedRect(this.ctx, rectX, rectY, rectWidth, rectHeight, 4);
-                this.ctx.fillStyle = isSelected ? 'rgba(15, 23, 42, 0.95)' : isHovered ? 'rgba(30, 41, 59, 0.92)' : 'rgba(10, 15, 26, 0.78)';
+                this.ctx.fillStyle = isSelected ? 'rgba(18, 22, 19, 0.95)' : isHovered ? 'rgba(27, 33, 28, 0.92)' : 'rgba(12, 15, 13, 0.78)';
                 this.ctx.fill();
                 
                 this.ctx.strokeStyle = isSelected ? '#ffffff' : isHovered ? 'rgba(255, 255, 255, 0.5)' : 'rgba(255, 255, 255, 0.08)';
                 this.ctx.lineWidth = isSelected ? 1.5 : 1;
                 this.ctx.stroke();
                 
-                this.ctx.fillStyle = isSelected ? '#ffffff' : isHovered ? '#f8fafc' : '#cbd5e1';
+                this.ctx.fillStyle = isSelected ? '#ffffff' : isHovered ? '#F1EFE6' : '#A9B2A4';
                 this.ctx.fillText(labelText, node.x, rectY + rectHeight / 2);
                 
                 this.ctx.globalAlpha = 1.0;
