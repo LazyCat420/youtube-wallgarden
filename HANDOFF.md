@@ -1,3 +1,59 @@
+# Handoff — "Editorial Garden" UI retheme shipped (2026-07-28)
+
+Commit `8b87871`, deployed to synology, live-verified (v55 assets serving,
+Fraunces loading, smoke 12/12, popup e2e 14/14).
+
+## What changed
+
+Full visual redesign replacing the generic Tailwind-blue/glassmorphism look
+with an editorial magazine style on a moss/sage garden palette:
+
+- **Tokens are single-source** in `app/index.html` `:root` (inline critical
+  CSS) — app.css no longer defines any. OKLCH moss accent kit
+  (base/hover/deep/subtle/contrast), 3-step warm surfaces, 4-step text ramp,
+  alpha hairline border ramp, terracotta danger / dry-gold warning. Legacy
+  names (`--card-border`, `--theme-blue-*`, …) are ALIASES to new tokens —
+  migrate off them, don't redefine.
+- **Fraunces** (Google Fonts) is the display face: wordmark, view titles,
+  video/card titles, modal headers, empty states. Inter stays for UI.
+- **Compact buttons**: `.btn` 26px / `.btn-sm` 22px, hairline quiet variants,
+  solid moss primary with dark-ink text. No glows, no press-scale, no lifts.
+- **Editorial cards**: `.video-card` has no box chrome — rounded thumbnail +
+  serif title + 11px meta on the page surface. Hover = thumb brightness, not
+  translateY.
+- **Emoji → SVG**: `icon(name, size)` helper + `ICONS` map at top of app.js;
+  index.html emoji buttons are inline Lucide-style SVGs. 🌿 stays as the brand
+  mark; 🌤 stays in the weather widget. Toast emoji prefixes stripped.
+- Inline styles consolidated: index.html 117 → 49 (rest are token-refs/layout);
+  new utility classes at the bottom of app.css (`.input-field`, `.filter-input`,
+  `.stat-box`, `.settings-section-card`, `.icon-14`, …).
+- `extension/popup/popup.css` rewritten on mirrored token values (extension
+  can't import app css — keep in sync manually). Old #4CAF50 theme is gone.
+- `ontologyRenderer.js` canvas colors moved to the garden palette
+  (TYPE_COLORS + stage/tooltip/edge colors near their draw sites).
+
+## Traps for the next session
+
+- **Tokens live ONLY in index.html** — do not re-add a `:root` to app.css
+  (app.min.css loads after the inline block and would win the cascade).
+- `npm run build` + bump ALL `?v=` strings (now `20260728-v55`) or the theme
+  silently doesn't ship. min files are gitignored; deploy copies working tree.
+- `.ontology-node-detail` display toggling is JS `style.display` over a class
+  default of `display:none` — works, don't "fix" it.
+- Verification gates that must stay at zero: `rgba(74, 222, 128`,
+  `#3B82F6|#60A5FA|#1E40AF|#4CAF50`, `backdrop-filter` in app.css.
+
+## Open / follow-ups
+
+- app.js still has 97 inline styles in template strings (all token-referencing
+  or dynamic) — further consolidation is polish, not correctness.
+- A light theme is now a ~25-token override block under
+  `[data-theme="light"]` in index.html + a toggle; structure is ready.
+- Fraunces weight is set via `font-weight: 520/550` (variable axis); if a
+  fallback serif renders (offline), weights round to 500 — acceptable.
+
+---
+
 # Handoff — topic pipeline actually reaches the model now (2026-07-28)
 
 Commit `d73599f` (this repo) + `lazy-agent-service@33f9b05`. Both containers
