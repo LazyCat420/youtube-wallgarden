@@ -53,6 +53,9 @@ let state = {
     brainstormLoading: false,
     lastBrainstormTime: 0,
     lastBrainstormAttempt: 0,
+    // Consecutive brainstorm failures — drives exponential backoff in the
+    // preload refill loop. Not persisted; a page load starts the streak fresh.
+    brainstormFailureStreak: 0,
     videoRatings: {}, // explicit ratings set by user (videoId -> 5 | -5)
     likedVideos: [], // array of video objects liked by the user
     // Timestamped canonical rating log for cross-browser sync. videoId ->
@@ -5943,6 +5946,7 @@ async function refreshTasteProfile() {
         }
     } catch (err) {
         console.warn("[Taste Profile] Refresh failed:", err.message);
+        showToast("⚠️ Taste profile refresh failed", "danger");
     }
 }
 
@@ -6072,7 +6076,11 @@ function scheduleMining(delayMs) {
 function collectUnminedLikes() {
     return Object.entries(state.ratingStates || {})
         .filter(([id, st]) => st && st.r === 5 && st.v && st.v.title &&
-            st.v.title !== "Liked Video (Synced)" && !(state.minedVideos || {})[id])
+            st.v.title !== "Liked Video (Synced)" && !(state.minedVideos || {})[id] &&
+            // Videos the extractor has repeatedly returned nothing for are
+            // marked failed and never re-sent — they used to be re-paid on
+            // every dashboard load, forever.
+            !st.v.extractionFailed)
         .sort((a, b) => (b[1].t || 0) - (a[1].t || 0))
         .map(([id, st]) => ({ id, st }));
 }
@@ -6146,6 +6154,8 @@ async function mineLikedVideosIntoTopics() {
     debug(`[Mining] ${unmined.length} liked videos not yet mined — extracting topics...`);
 
     let totalAdded = 0;
+    let attemptsChanged = false;
+    const MAX_EXTRACTION_ATTEMPTS = 3;
     try {
         for (let i = 0; i < unmined.length; i += MINE_CHUNK_SIZE) {
             const chunk = unmined.slice(i, i + MINE_CHUNK_SIZE);
@@ -6173,11 +6183,27 @@ async function mineLikedVideosIntoTopics() {
                     totalAdded += applyMinedTopics(e.id, e.topics);
                 }
             });
-            // Chunks that came back without an extraction (LLM gave nothing
-            // usable) are left unmined so a later pass can retry them.
+            // The backend answered but gave some videos nothing usable. Count
+            // the strike per video; after MAX_EXTRACTION_ATTEMPTS strikes stop
+            // re-sending it forever. Network/HTTP failures throw before this
+            // point and deliberately do NOT count — that failure is ours, not
+            // the video's. (Does not bump st.t — see applyMinedTopics sink 3.)
+            const extractedIds = new Set((data.extractions || []).map(e => e && e.id));
+            chunk.forEach(({ id, st }) => {
+                if (extractedIds.has(id)) {
+                    if (st.v.extractionAttempts) { delete st.v.extractionAttempts; attemptsChanged = true; }
+                    return;
+                }
+                st.v.extractionAttempts = (st.v.extractionAttempts || 0) + 1;
+                if (st.v.extractionAttempts >= MAX_EXTRACTION_ATTEMPTS) {
+                    st.v.extractionFailed = true;
+                    debug(`[Mining] ${id}: giving up after ${st.v.extractionAttempts} failed extraction attempts`);
+                }
+                attemptsChanged = true;
+            });
         }
 
-        if (totalAdded > 0 || unmined.some(({ id }) => state.minedVideos[id])) {
+        if (totalAdded > 0 || attemptsChanged || unmined.some(({ id }) => state.minedVideos[id])) {
             pruneTopicPool();
             saveTopics();
             saveLikedTopics();
@@ -6192,6 +6218,7 @@ async function mineLikedVideosIntoTopics() {
         }
     } catch (err) {
         console.error("[Mining] Liked-video mining failed:", err);
+        showToast("⚠️ Liked-video topic mining failed", "danger");
     }
     _miningInProgress = false;
 }
@@ -6275,10 +6302,21 @@ async function generateBrainstormTopics(append, numRequests = 1) {
         } else {
             console.warn("[Smart Feed] Brainstorming returned no new usable topics.");
         }
+        // Backend worked — even "no new usable topics" (all deduped) ends the
+        // failure streak so the refill loop returns to its base cadence.
+        state.brainstormFailureStreak = 0;
     } catch (err) {
         console.error(`[Smart Feed] Background brainstorming failed:`, err);
+        state.brainstormFailureStreak = (state.brainstormFailureStreak || 0) + 1;
+        if (state.brainstormFailureStreak === 1) {
+            showToast("⚠️ Topic brainstorm failed — backing off and retrying", "danger");
+        }
+        state.brainstormLoading = false;
+        state.lastBrainstormTime = Date.now();
+        updateStatusText("Brainstorm failed — retrying later");
+        return;
     }
-    
+
     state.brainstormLoading = false;
     state.lastBrainstormTime = Date.now();
     updateStatusText("Ready");
@@ -6357,6 +6395,7 @@ async function generateSimilarTopicsFromSearch(searchQuery, isHighSignal = false
         }
     } catch (err) {
         console.error(`[Smart Feed] Similar topics generation failed:`, err);
+        showToast(`⚠️ Couldn't expand "${searchQuery}" into topics`, "danger");
     }
 }
 
@@ -6791,8 +6830,14 @@ async function fillSmartFeedPreloadBuffer() {
     // Check if we need to brainstorm more topics using LLM
     const totalUpcoming = state.smartFeedTopicsQueue.length;
     const now = Date.now();
-    const cooldownMs = 15000; // 15-second cooldown
-    const isCooldownActive = state.lastBrainstormTime && (now - state.lastBrainstormTime < cooldownMs);
+    // 15s base cooldown, doubling per consecutive brainstorm failure (capped
+    // at 5min) so a broken backend gets a backing-off trickle, not a hammer.
+    const streak = state.brainstormFailureStreak || 0;
+    const cooldownMs = Math.min(15000 * Math.pow(2, streak), 300000);
+    // lastBrainstormAttempt covers early-return paths where lastBrainstormTime
+    // is never written; take the later of the two.
+    const lastRef = Math.max(state.lastBrainstormTime || 0, state.lastBrainstormAttempt || 0);
+    const isCooldownActive = lastRef && (now - lastRef < cooldownMs);
 
     if (totalUpcoming < 150 && !state.brainstormLoading && !isCooldownActive) {
         debug("[Smart Feed] Total upcoming topics low, triggering background LLM brainstorm...");
