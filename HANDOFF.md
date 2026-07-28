@@ -40,10 +40,23 @@ with an editorial magazine style on a moss/sage garden palette:
   joined array of PLAIN strings — `${icon(...)}` rendered literally. Any
   future icon substitution there must use `' + icon("x") + '` concatenation.
 - `.btn` now has `white-space: nowrap`.
-- Desktop nav collapse: the header burger toggles `body.nav-collapsed`
-  (localStorage `nav-collapsed`); mobile keeps the drawer. TRAP: collapsed
-  grid must be `grid-template-columns: 1fr` — with `.sidebar` display:none,
-  `.main-content` auto-places into the FIRST track, so `0 1fr` swallows it.
+- Desktop nav collapse — REDONE in `df1d169` to match prism-client's
+  NavigationSidebarComponent (the first cut hid the sidebar entirely,
+  which was wrong):
+  - Collapsed = **52px icon rail**, not `display:none`. Icons stay
+    visible; `.nav-label`, `.nav-count`, `.brand-name`, `.brand-icon`,
+    `.btn-sidebar-label`, `.weather-widget` hide inside the rail.
+  - Toggle lives IN the sidebar brand row (`#btn-nav-collapse`), not the
+    header. Right-aligned when expanded; centered + `scaleX(-1)` when
+    collapsed so it reads as "expand". Header burger is mobile-only again.
+  - State is `html[data-nav-collapsed="true"]`, applied **pre-paint** by
+    an inline `<script>` in index.html — app.min.js is deferred, so a
+    JS-only restore flashed the full sidebar on every load.
+  - The rail CSS is DUPLICATED in the index.html critical block and in
+    app.css (app.min.css loads later and wins) — edit both or the
+    collapsed state changes after CSS load.
+  - Footer button labels are wrapped in `.btn-sidebar-label` spans; they
+    were bare text nodes that CSS could not hide.
 
 ## Traps for the next session
 
