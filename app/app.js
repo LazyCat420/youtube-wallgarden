@@ -1,5 +1,23 @@
 // 🌿 Wallgarden - Dashboard Controller
 
+// ── Inline SVG icon system (Lucide-style, stroke = currentColor) ──
+const ICONS = {
+    x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    check: '<path d="M20 6 9 17l-5-5"/>',
+    search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+    tv: '<rect width="20" height="15" x="2" y="7" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/>',
+    alert: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+    sprout: '<path d="M7 20h10"/><path d="M10 20c5.5-2.5.8-6.4 3-10"/><path d="M9.5 9.4c1.1.8 1.8 2.2 2.3 3.7-2 .4-3.5.4-4.8-.3-1.2-.6-2.3-1.9-3-4.2 2.8-.5 4.4 0 5.5.8z"/><path d="M14.1 6a7 7 0 0 0-1.1 4c1.9-.1 3.3-.6 4.3-1.4 1-1 1.6-2.3 1.7-4.6-2.7.1-4 1-4.9 2z"/>',
+    bulb: '<path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/>',
+    sparkles: '<path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>',
+};
+
+function icon(name, size = 14, extraClass = "") {
+    const paths = ICONS[name] || ICONS.x;
+    return `<svg class="icon-svg ${extraClass}" style="width:${size}px;height:${size}px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+}
+
+
 // Seeding Default Channels (if empty)
 const DEFAULT_CHANNELS = [
     { name: "Fireship", id: "UCsBjURrPoezykLs9EqgamOA" },
@@ -561,7 +579,7 @@ function renderSearchSuggestions(useExisting = false) {
 
         const deleteSpan = document.createElement("span");
         deleteSpan.className = "delete-suggestion";
-        deleteSpan.textContent = "✕";
+        deleteSpan.innerHTML = icon("x", 10);
         deleteSpan.title = `Remove "${topic}" — also damps similar topics`;
         deleteSpan.addEventListener("click", (e) => {
             e.stopPropagation();
@@ -1631,7 +1649,7 @@ function setupSettingsTabListeners() {
             state.ontologyGraph.lastPruned = Date.now();
             saveOntologyGraph();
             renderOntologyView();
-            showToast("🧹 Graph successfully pruned", "success");
+            showToast("Graph successfully pruned", "success");
         });
     }
 }
@@ -2057,7 +2075,7 @@ function setupHeaderAndLikedListeners() {
                 saveLikedVideos();
                 saveVideoRatings();
                 
-                showToast("🗑️ Cleared all liked videos", "success");
+                showToast("Cleared all liked videos", "success");
                 renderLikedVideosView();
             }
         });
@@ -2147,7 +2165,7 @@ function switchProfile(profileName) {
     const modal = document.getElementById("settings-modal");
     if (modal) modal.classList.add("hidden");
 
-    showToast(`👤 Switched profile to: ${profileName === "default" ? "Default" : profileName}`, "success");
+    showToast(`Switched profile to: ${profileName === "default" ? "Default" : profileName}`, "success");
     
     // Re-render feed and trigger background preload if there are topics
     renderFeed();
@@ -2167,13 +2185,13 @@ function switchProfile(profileName) {
 function createProfile(profileName) {
     profileName = profileName.trim().replace(/[^a-zA-Z0-9_\s-]/g, "");
     if (!profileName) {
-        showToast("❌ Profile name cannot be empty or contain special characters.", "danger");
+        showToast("Profile name cannot be empty or contain special characters.", "danger");
         return;
     }
     
     const profileKey = profileName.toLowerCase();
     if (state.profiles.includes(profileKey)) {
-        showToast(`❌ Profile "${profileName}" already exists.`, "danger");
+        showToast(`Profile "${profileName}" already exists.`, "danger");
         return;
     }
 
@@ -2182,13 +2200,13 @@ function createProfile(profileName) {
     
     // Switch to new profile
     switchProfile(profileKey);
-    showToast(`🌱 Created and switched to profile: ${profileName}`, "success");
+    showToast(`Created and switched to profile: ${profileName}`, "success");
 }
 
 // Delete profile
 function deleteProfile(profileName) {
     if (profileName === "default") {
-        showToast("❌ Cannot delete the default profile.", "danger");
+        showToast("Cannot delete the default profile.", "danger");
         return;
     }
 
@@ -2219,7 +2237,7 @@ function deleteProfile(profileName) {
     });
 
     renderProfileDropdowns();
-    showToast(`🗑️ Deleted profile "${profileName}"`, "info");
+    showToast(`Deleted profile "${profileName}"`, "info");
 }
 
 // Setup Profiles Event Listeners
@@ -2928,7 +2946,7 @@ function navigateToChannel(channelId, channelName) {
 }
 
 async function resolveAndInspectChannelByName(channelName) {
-    showToast(`🔍 Locating channel "${channelName}"...`, "info");
+    showToast(`Locating channel "${channelName}"...`, "info");
     try {
         let channelId = "";
         if (channelName.startsWith("@")) {
@@ -2954,7 +2972,7 @@ async function resolveAndInspectChannelByName(channelName) {
         if (channelId) {
             navigateToChannel(channelId, channelName);
         } else {
-            showToast(`❌ Could not resolve channel ID for "${channelName}"`, "danger");
+            showToast(`Could not resolve channel ID for "${channelName}"`, "danger");
         }
     } catch (err) {
         console.error("Error resolving channel:", err);
@@ -3006,7 +3024,7 @@ async function fetchChannelFeedOnDemand(channelId, channelName) {
         if (grid) {
             grid.innerHTML = `
                 <div class="empty-state" style="grid-column: 1 / -1; min-height: 200px;">
-                    <div class="empty-icon">⚠️</div>
+                    <div class="empty-icon">${icon("alert", 48)}</div>
                     <h3>Failed to load feed</h3>
                     <p>${escapeHTML(err.message)}</p>
                     <button class="btn btn-secondary btn-sm" id="btn-inspect-error-back">Back</button>
@@ -3070,7 +3088,7 @@ function createVideoCard(video) {
                     <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
                 </button>
             </div>
-            ${video.isDiscover && video.discoveryTopic ? `<div class="category-badge" style="background:var(--accent);color:var(--bg)">✨ ${capitalizePhrase(video.discoveryTopic)}</div>` : (video.isDiscover ? `<div class="search-badge">🔍 Search</div>` : (categoryText ? `<div class="category-badge">${categoryText}</div>` : ""))}
+            ${video.isDiscover && video.discoveryTopic ? `<div class="category-badge" style="background:var(--accent);color:var(--accent-contrast)">${icon("sparkles", 11)} ${capitalizePhrase(video.discoveryTopic)}</div>` : (video.isDiscover ? `<div class="search-badge">${icon("search", 11)} Search</div>` : (categoryText ? `<div class="category-badge">${categoryText}</div>` : ""))}
         </div>
         <div class="card-details">
             <div class="video-title-row">
@@ -3184,7 +3202,7 @@ function wireCardRatingButtons(card, video, videoTopicForRating) {
                 
                 card.querySelectorAll(".title-rating-btn").forEach(b => b.classList.remove("active"));
                 ev.currentTarget.classList.add("active");
-                showToast(rating > 0 ? '👍 Liked' : '👎 Disliked', rating > 0 ? "success" : "info");
+                showToast(rating > 0 ? 'Liked' : 'Disliked', rating > 0 ? "success" : "info");
             }
 
             // ── Ontology Graph Update ──
@@ -3293,7 +3311,7 @@ function wireCardActionMenu(card, video, isSubscribed) {
                 saveBlocked();
             }
             dropdown.remove();
-            showToast(`🚫 Blocked ${channelName || 'Channel'}`, "danger");
+            showToast(`Blocked ${channelName || 'Channel'}`, "danger");
             // Remove all cards from this channel with fade-out
             if (channelName) {
                 document.querySelectorAll(".video-card").forEach(c => {
@@ -3322,14 +3340,14 @@ function wireCardActionMenu(card, video, isSubscribed) {
                 saveChannels();
                 updateSubCount();
                 dropdown.remove();
-                showToast(`➖ Unsubscribed from ${channelName}`, "info");
+                showToast(`Unsubscribed from ${channelName}`, "info");
             } else {
                 // Subscribe
                 state.channels.push({ name: channelName, id: channelId });
                 saveChannels();
                 updateSubCount();
                 dropdown.remove();
-                showToast(`✅ Subscribed to ${channelName}`, "success");
+                showToast(`Subscribed to ${channelName}`, "success");
             }
             renderChannelsList();
         });
@@ -3346,7 +3364,7 @@ function wireCardActionMenu(card, video, isSubscribed) {
             dropdown.remove();
             card.classList.add("fade-out-remove");
             setTimeout(() => card.remove(), 350);
-            showToast(`🔇 Video hidden`, "info");
+            showToast(`Video hidden`, "info");
         });
         
         // Position absolutely relative to document body to avoid z-index/overflow issues
@@ -3501,7 +3519,7 @@ function renderFeed() {
             const emptyIcon = emptyState.querySelector(".empty-icon");
             const emptyH3 = emptyState.querySelector("h3");
             const emptyP = emptyState.querySelector("p");
-            if (emptyIcon) emptyIcon.textContent = "📺";
+            if (emptyIcon) emptyIcon.innerHTML = icon("tv", 48);
             if (emptyH3) emptyH3.textContent = "No subscriptions yet";
             if (emptyP) emptyP.textContent = "Add channels via Settings or subscribe from video cards.";
             return;
@@ -3548,7 +3566,7 @@ function renderFeed() {
                 state.channels.splice(idx, 1);
                 saveChannels();
                 updateSubCount();
-                showToast(`➖ Unsubscribed from ${channel.name}`, "info");
+                showToast(`Unsubscribed from ${channel.name}`, "info");
                 renderFeed();
             });
             
@@ -3630,7 +3648,7 @@ function renderFeed() {
                 state.channels = state.channels.filter(ch => ch.id !== channelId);
                 saveChannels();
                 updateSubCount();
-                showToast(`➖ Unsubscribed from ${channelName}`, "info");
+                showToast(`Unsubscribed from ${channelName}`, "info");
                 navigateToChannel(channelId, channelName);
             });
         } else {
@@ -3648,7 +3666,7 @@ function renderFeed() {
                 state.channels.push({ name: channelName, id: channelId });
                 saveChannels();
                 updateSubCount();
-                showToast(`✅ Subscribed to ${channelName}`, "success");
+                showToast(`Subscribed to ${channelName}`, "success");
                 navigateToChannel(channelId, channelName);
             });
         }
@@ -3658,7 +3676,7 @@ function renderFeed() {
                 state.blockedChannels.push({ name: channelName, id: channelId });
                 saveBlocked();
             }
-            showToast(`🚫 Blocked ${channelName}`, "danger");
+            showToast(`Blocked ${channelName}`, "danger");
             if (state.lastViewBeforeInspect) {
                 state.currentView = state.lastViewBeforeInspect;
                 state.lastViewBeforeInspect = null;
@@ -3810,7 +3828,7 @@ function renderFeed() {
             const emptyIcon = emptyState.querySelector(".empty-icon");
             const emptyH3 = emptyState.querySelector("h3");
             const emptyP = emptyState.querySelector("p");
-            if (emptyIcon) emptyIcon.textContent = "🌱";
+            if (emptyIcon) emptyIcon.innerHTML = icon("sprout", 48);
             if (emptyH3) emptyH3.textContent = "Welcome to your new profile!";
             if (emptyP) emptyP.textContent = "Add your first topic in Settings (Topics & Filters) to start discovering videos.";
             
@@ -3954,7 +3972,7 @@ function renderFeed() {
         if (allVideos.length === 0 && discoverVideos.length === 0 && isSearchLoading) {
             grid.innerHTML = `
                 <div class="empty-state" style="grid-column: 1 / -1; min-height: 200px;">
-                    <div class="sync-spinner" style="font-size: 2rem; position: static; transform: none; display: block; animation: spin 1s linear infinite; margin: 2rem auto;">🔄</div>
+                    <div class="loader-spinner" style="margin: 2rem auto;"></div>
                     <h3>Searching YouTube...</h3>
                     <p>Fetching public search results for "${capitalizePhrase(queryTerm)}"</p>
                 </div>
@@ -4207,7 +4225,7 @@ function playVideo(video) {
                 saveBlocked();
                 renderBlockedList();
             }
-            showToast(`🚫 Blocked ${videoChannelName}`, "danger");
+            showToast(`Blocked ${videoChannelName}`, "danger");
             closePlayer();
             renderFeed();
         });
@@ -4258,11 +4276,11 @@ function ensureInlinePlayer() {
         '      <div class="inline-player-meta">',
         '        <h2 class="player-title"></h2>',
         '        <p class="player-channel"></p>',
-        '        <p class="player-stats" style="font-size: 0.85rem; color: #aaa; margin-top: 4px;"></p>',
+        '        <p class="player-stats" style="font-size: 0.85rem; color: var(--text-secondary); margin-top: 4px;"></p>',
         '      </div>',
         '      <div class="player-bar-actions" style="display: flex; gap: 0.75rem; align-items: center;">',
-        '        <button class="btn btn-primary btn-sm btn-open-youtube" title="Open Video on YouTube (New Tab)">📺 Watch on YouTube</button>',
-        '        <button class="inline-player-close" title="Close Player">✕ Close</button>',
+        '        <button class="btn btn-primary btn-sm btn-open-youtube" title="Open Video on YouTube (New Tab)">${icon("tv")} Watch on YouTube</button>',
+        '        <button class="inline-player-close" title="Close Player">${icon("x")} Close</button>',
         '      </div>',
         '    </div>',
         '  </div>',
@@ -4518,8 +4536,8 @@ function playViaYouTubeEmbed(videoId, playerWrapper) {
                     const playerEl = document.getElementById("yt-player-element");
                     if (playerEl && playerEl.parentNode) {
                         playerEl.parentNode.innerHTML = `
-                            <div class="restricted-mode-panel" style="display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; min-height: 360px; background: #111; border: 1px solid var(--card-border); border-radius: 8px; text-align: center; padding: 2rem;">
-                                <div style="font-size: 3rem; margin-bottom: 1rem;">📺</div>
+                            <div class="restricted-mode-panel" style="display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; min-height: 360px; background: var(--bg-elevated); border: 1px solid var(--card-border); border-radius: 8px; text-align: center; padding: 2rem;">
+                                <div class="empty-icon">${icon("tv", 48)}</div>
                                 <h3 style="margin-bottom: 0.5rem; color: var(--text-primary);">Playing in New Tab</h3>
                                 <p style="color: var(--text-muted); margin-bottom: 1.5rem; max-width: 400px;">This video is restricted and has opened in a new tab.</p>
                                 <button class="btn btn-primary" onclick="window.open('https://www.youtube.com/watch?v=${videoId}', '_blank'); if(window.logYouTubeLaunch) window.logYouTubeLaunch('${videoId}');">Re-open Tab</button>
@@ -4712,8 +4730,8 @@ function renderQueueUI() {
         item.style.gap = "0.5rem";
         item.style.padding = "0.4rem";
         item.style.borderRadius = "4px";
-        item.style.background = "rgba(255, 255, 255, 0.02)";
-        item.style.border = "1px solid rgba(255, 255, 255, 0.04)";
+        item.style.background = "var(--bg-elevated)";
+        item.style.border = "1px solid var(--border-subtle)";
         item.style.cursor = "pointer";
         item.style.position = "relative";
         
@@ -4727,7 +4745,7 @@ function renderQueueUI() {
                     ${escapeHTML(v.channelName)}
                 </div>
             </div>
-            <button class="btn-remove-queue" style="background: transparent; border: none; color: var(--text-muted); font-size: 0.85rem; cursor: pointer; padding: 0.2rem 0.4rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0;" title="Remove from Queue">✕</button>
+            <button class="btn-remove-queue" style="background: transparent; border: none; color: var(--text-muted); font-size: 0.85rem; cursor: pointer; padding: 0.2rem 0.4rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0;" title="Remove from Queue">${icon("x", 12)}</button>
         `;
         
         item.onclick = (e) => {
@@ -4823,7 +4841,7 @@ function renderChannelsList() {
                 <span class="channel-name">${escapeHTML(channel.name)}</span>
                 <span class="channel-id">${channel.id}</span>
             </div>
-            <button class="btn-remove" data-idx="${idx}">✕</button>
+            <button class="btn-remove" data-idx="${idx}">${icon("x", 12)}</button>
         `;
         
         row.querySelector(".btn-remove").addEventListener("click", (e) => {
@@ -4855,7 +4873,7 @@ function renderPreferencesLists(filterQuery) {
             const row = document.createElement("div");
             row.className = "topic-row";
             row.style.marginBottom = "0.25rem";
-            row.style.background = "rgba(255,255,255,0.05)";
+            row.style.background = "var(--bg-elevated)";
             
             // Highlight matching text if searching
             let displayText = escapeHTML(topic);
@@ -4871,7 +4889,7 @@ function renderPreferencesLists(filterQuery) {
             
             row.innerHTML = `
                 <span class="topic-phrase" style="font-size:0.85rem;">${displayText}</span>
-                <button class="btn-remove" data-phrase="${escapeHTML(topic)}">✕</button>
+                <button class="btn-remove" data-phrase="${escapeHTML(topic)}">${icon("x", 12)}</button>
             `;
             row.querySelector(".btn-remove").addEventListener("click", (e) => {
                 deleteCallback(e.target.dataset.phrase);
@@ -4941,7 +4959,7 @@ function renderTopicsList(filterQuery) {
                 <button class="btn-like-legacy" data-phrase="${escapeHTML(topic.phrase)}" title="Move to Liked Topics" style="background: transparent; border: none; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; color: var(--accent); padding: 4px;">
                     <svg class="icon-svg" style="width: 14px; height: 14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
                 </button>
-                <button class="btn-remove btn-remove-legacy" data-phrase="${escapeHTML(topic.phrase)}" title="Remove Topic">✕</button>
+                <button class="btn-remove btn-remove-legacy" data-phrase="${escapeHTML(topic.phrase)}" title="Remove Topic">${icon("x", 12)}</button>
             </div>
         `;
         
@@ -5039,7 +5057,7 @@ function renderBlockedList() {
                 <span class="channel-name">${escapeHTML(bc.name)}</span>
                 ${bc.id ? `<span class="channel-id">${bc.id}</span>` : ""}
             </div>
-            <button class="btn-remove" data-idx="${idx}">✕</button>
+            <button class="btn-remove" data-idx="${idx}">${icon("x", 12)}</button>
         `;
         
         row.querySelector(".btn-remove").addEventListener("click", (e) => {
@@ -5946,7 +5964,7 @@ async function refreshTasteProfile() {
         }
     } catch (err) {
         console.warn("[Taste Profile] Refresh failed:", err.message);
-        showToast("⚠️ Taste profile refresh failed", "danger");
+        showToast("Taste profile refresh failed", "danger");
     }
 }
 
@@ -6213,12 +6231,12 @@ async function mineLikedVideosIntoTopics() {
             invalidateScoreCache();
             debug(`[Mining] Done: ${totalAdded} new topics entered the pool.`);
             if (totalAdded > 0) {
-                showToast(`⛏️ Mined ${totalAdded} topics from your liked videos`, "success");
+                showToast(`Mined ${totalAdded} topics from your liked videos`, "success");
             }
         }
     } catch (err) {
         console.error("[Mining] Liked-video mining failed:", err);
-        showToast("⚠️ Liked-video topic mining failed", "danger");
+        showToast("Liked-video topic mining failed", "danger");
     }
     _miningInProgress = false;
 }
@@ -6309,7 +6327,7 @@ async function generateBrainstormTopics(append, numRequests = 1) {
         console.error(`[Smart Feed] Background brainstorming failed:`, err);
         state.brainstormFailureStreak = (state.brainstormFailureStreak || 0) + 1;
         if (state.brainstormFailureStreak === 1) {
-            showToast("⚠️ Topic brainstorm failed — backing off and retrying", "danger");
+            showToast("Topic brainstorm failed — backing off and retrying", "danger");
         }
         state.brainstormLoading = false;
         state.lastBrainstormTime = Date.now();
@@ -6388,14 +6406,14 @@ async function generateSimilarTopicsFromSearch(searchQuery, isHighSignal = false
         if (addedPhrases.length > 0) {
             saveTopics();
             debug(`[Smart Feed] Successfully queued ${addedPhrases.length} similar topics for "${searchQuery}":`, addedPhrases);
-            showToast(`💡 Queued ${addedPhrases.length} topics similar to "${searchQuery}"`, "success");
+            showToast(`Queued ${addedPhrases.length} topics similar to "${searchQuery}"`, "success");
             fillSmartFeedPreloadBuffer();
         } else {
             console.warn(`[Smart Feed] Similar brainstorm returned no new usable topics.`);
         }
     } catch (err) {
         console.error(`[Smart Feed] Similar topics generation failed:`, err);
-        showToast(`⚠️ Couldn't expand "${searchQuery}" into topics`, "danger");
+        showToast(`Couldn't expand "${searchQuery}" into topics`, "danger");
     }
 }
 
@@ -7206,7 +7224,7 @@ function nukeDiscoverTopic(topic) {
         setTimeout(() => el.remove(), 350);
     });
     
-    showToast(`🗑️ Burned query "${capitalizePhrase(topic)}" — LLM won't suggest this again`, "info");
+    showToast(`Burned query "${capitalizePhrase(topic)}" — LLM won't suggest this again`, "info");
     
     // 6. Replenish and load next batch in background
     setTimeout(async () => {
@@ -7237,7 +7255,7 @@ async function editDiscoverTopic(topic) {
     
     const newTopicClean = newTopic.trim().toLowerCase();
     if (!newTopicClean) {
-        showToast("⚠️ Topic keyphrase cannot be empty.", "warning");
+        showToast("Topic keyphrase cannot be empty.", "warning");
         return;
     }
     
@@ -7263,7 +7281,7 @@ async function editDiscoverTopic(topic) {
     if (headerEl) {
         const titleTextEl = headerEl.querySelector(".discover-topic-text");
         if (titleTextEl) {
-            titleTextEl.innerHTML = `${escapeHTML(capitalizePhrase(newTopicClean))} <span class="sync-spinner" style="position: static; display: inline-block; animation: spinLoader 1s linear infinite; margin-left: 0.5rem; transform: none;">🔄</span>`;
+            titleTextEl.innerHTML = `${escapeHTML(capitalizePhrase(newTopicClean))} <span class="loader-spinner" style="width: 12px; height: 12px; border-width: 2px; display: inline-block; margin-left: 0.5rem;"></span>`;
         }
     }
     
@@ -7278,7 +7296,7 @@ async function editDiscoverTopic(topic) {
     
     state.smartFeedVideos = state.smartFeedVideos.filter(v => (v.discoveryTopic || "").toLowerCase() !== normalizedTopic);
     
-    showToast(`✏️ Updating topic to "${capitalizePhrase(newTopicClean)}"...`, "info");
+    showToast(`Updating topic to "${capitalizePhrase(newTopicClean)}"...`, "info");
     
     try {
         const videos = await fetchVideosForTopic(newTopicClean);
@@ -7299,7 +7317,7 @@ async function editDiscoverTopic(topic) {
                     <span class="discover-topic-text" style="color: var(--accent);">${escapeHTML(capitalizePhrase(newTopicClean))}</span>
                     <div class="discover-topic-actions">
                         <button class="discover-action-btn edit-btn" title="Edit Topic" data-topic="${escapeHTML(newTopicClean)}"><svg class="icon-svg" style="width: 12px; height: 12px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
-                        <button class="discover-action-btn remove-btn" title="Remove Topic" data-topic="${escapeHTML(newTopicClean)}">✕</button>
+                        <button class="discover-action-btn remove-btn" title="Remove Topic" data-topic="${escapeHTML(newTopicClean)}">${icon("x", 12)}</button>
                     </div>
                 </h2>
                 <span class="discover-badge" style="font-size: 0.7rem; opacity: 0.6;">Smart Feed Suggestion</span>
@@ -7328,16 +7346,16 @@ async function editDiscoverTopic(topic) {
                 });
                 
                 currentHeaderEl.after(fragment);
-                showToast(`✅ Loaded new videos for "${capitalizePhrase(newTopicClean)}"`, "success");
+                showToast(`Loaded new videos for "${capitalizePhrase(newTopicClean)}"`, "success");
             } else {
-                showToast(`⚠️ No videos found for "${capitalizePhrase(newTopicClean)}"`, "warning");
+                showToast(`No videos found for "${capitalizePhrase(newTopicClean)}"`, "warning");
                 currentHeaderEl.classList.add("fade-out-remove");
                 setTimeout(() => currentHeaderEl.remove(), 350);
             }
         }
     } catch (err) {
         console.error(`[Edit Topic] Fetch failed for "${newTopicClean}":`, err);
-        showToast(`❌ Failed fetching videos for "${capitalizePhrase(newTopicClean)}"`, "danger");
+        showToast(`Failed fetching videos for "${capitalizePhrase(newTopicClean)}"`, "danger");
         
         const currentHeaderEl = Array.from(document.querySelectorAll('.discover-section-header'))
             .find(el => el.getAttribute('data-discover-topic') === normalizedTopic);
@@ -7613,7 +7631,7 @@ function renderDiscoverChannelsView() {
     if (!state.discoveredChannels || state.discoveredChannels.length === 0) {
         grid.innerHTML = `
             <div class="empty-state" style="grid-column: 1 / -1; min-height: 200px;">
-                <div class="empty-icon">💡</div>
+                <div class="empty-icon">${icon("bulb", 48)}</div>
                 <h3>No recommendations yet</h3>
                 <p>Click "Refresh Suggestions" to run the dynamic discovery pipeline.</p>
             </div>
@@ -7642,7 +7660,7 @@ function renderDiscoverChannelsView() {
                 <div class="discover-channel-reason">${escapeHTML(rec.reason)}</div>
             </div>
             <div class="discover-channel-actions">
-                <button class="btn btn-secondary btn-sm btn-inspect-rec">🔍 Inspect Feed</button>
+                <button class="btn btn-secondary btn-sm btn-inspect-rec">${icon("search")} Inspect Feed</button>
                 <button class="btn btn-primary btn-sm btn-sub-rec" style="background:var(--accent);color:var(--bg-primary);border-color:var(--accent);">
                     <svg class="icon-svg" style="width:14px; height:14px; margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="20" y1="8" x2="20" y2="14"></line><line x1="23" y1="11" x2="17" y2="11"></line></svg>
                     Subscribe
@@ -7693,7 +7711,7 @@ function renderDiscoverChannelsView() {
                         state.channels.push({ name: rec.name, id: channelId });
                         saveChannels();
                         updateSubCount();
-                        showToast(`✅ Subscribed to ${rec.name}`, "success");
+                        showToast(`Subscribed to ${rec.name}`, "success");
                         btn.textContent = "Subscribed";
                         btn.style.background = "transparent";
                         btn.style.color = "var(--text-muted)";
@@ -7759,7 +7777,7 @@ async function fetchWeather() {
         console.error("Weather fetch failed:", e);
         const widget = document.getElementById("weather-widget");
         if (widget) {
-            widget.innerHTML = `<div style="font-size: 0.85rem; color: #ff5555; padding: 0.5rem 1rem; border-top: 1px solid var(--card-border); border-bottom: 1px solid var(--card-border); margin: 0.5rem 0;">
+            widget.innerHTML = `<div style="font-size: 0.85rem; color: var(--danger-bright); padding: 0.5rem 1rem; border-top: 1px solid var(--card-border); border-bottom: 1px solid var(--card-border); margin: 0.5rem 0;">
                 🌤️ Weather unavailable
             </div>`;
         }
@@ -7769,7 +7787,7 @@ async function fetchWeather() {
 async function renderNewsFeed() {
     const newsGrid = document.getElementById("news-feed-grid");
     if (!newsGrid) return;
-    newsGrid.innerHTML = `<div class="sync-spinner" style="font-size: 2rem; display: block; animation: spin 1s linear infinite; margin: 2rem auto;">🔄</div><p style="text-align:center; color: var(--text-muted);">Fetching news...</p>`;
+    newsGrid.innerHTML = `<div class="loader-spinner" style="margin: 2rem auto;"></div><p style="text-align:center; color: var(--text-muted);">Fetching news...</p>`;
     
     const ALL_NEWS_SOURCES = [
         { name: "BBC News", url: "http://feeds.bbci.co.uk/news/rss.xml" },
@@ -7989,7 +8007,7 @@ function renderPlaylistsView() {
                     // Add remove button overlay
                     const removeBtn = document.createElement("button");
                     removeBtn.className = "btn btn-danger btn-sm";
-                    removeBtn.textContent = "✕";
+                    removeBtn.innerHTML = icon("x", 12);
                     removeBtn.style.position = "absolute";
                     removeBtn.style.top = "5px";
                     removeBtn.style.right = "5px";
@@ -8230,14 +8248,14 @@ function showReconciliationPrompt(videoId) {
     // Create a banner inside the inline player
     const banner = document.createElement("div");
     banner.className = "reconciliation-banner";
-    banner.style.cssText = "background: rgba(74, 222, 128, 0.1); border: 1px solid var(--accent); padding: 1rem; border-radius: 8px; margin: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; animation: fadeIn 0.3s ease;";
+    banner.style.cssText = "background: var(--accent-subtle); border: 1px solid var(--accent); padding: 1rem; border-radius: var(--radius-lg); margin: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; animation: fadeIn 0.3s ease;";
     banner.innerHTML = `
         <div>
             <h4 style="margin: 0 0 0.25rem 0; color: var(--accent);">Welcome back!</h4>
             <p style="margin: 0; font-size: 0.9rem; color: var(--text-primary);">Did you finish watching ${escapeHTML(videoTitle)} on YouTube?</p>
         </div>
         <div style="display: flex; gap: 0.5rem;">
-            <button class="btn btn-primary btn-sm btn-mark-watched" style="padding: 0.4rem 0.8rem;">✅ Mark Watched</button>
+            <button class="btn btn-primary btn-sm btn-mark-watched" style="padding: 0.4rem 0.8rem;">${icon("check")} Mark Watched</button>
             <button class="btn btn-secondary btn-sm btn-dismiss" style="padding: 0.4rem 0.8rem;">Dismiss</button>
         </div>
     `;
@@ -8359,7 +8377,7 @@ window.addEventListener("message", (event) => {
             renderLikedVideosView();
         }
         
-        showToast("👍 Synced Like from YouTube", "success");
+        showToast("Synced Like from YouTube", "success");
         if (state.currentlyPlayingId === payload.videoId) {
             const likeBtn = document.querySelector(".sidebar-btn-like");
             const dislikeBtn = document.querySelector(".sidebar-btn-dislike");
@@ -8403,7 +8421,7 @@ window.addEventListener("message", (event) => {
             renderLikedVideosView();
         }
         
-        showToast("👎 Synced Dislike from YouTube", "info");
+        showToast("Synced Dislike from YouTube", "info");
         if (state.currentlyPlayingId === payload.videoId) {
             const likeBtn = document.querySelector(".sidebar-btn-like");
             const dislikeBtn = document.querySelector(".sidebar-btn-dislike");
@@ -8433,7 +8451,7 @@ window.addEventListener("message", (event) => {
         if (!state.watchedHistory) state.watchedHistory = {};
         state.watchedHistory[payload.videoId] = Date.now();
         localStorage.setItem("wallgarden_watched", JSON.stringify(state.watchedHistory));
-        showToast("✅ Synced Watch Completion from YouTube", "success");
+        showToast("Synced Watch Completion from YouTube", "success");
     } else if (payload.action === 'WATCHLIST_ADD' || payload.action === 'PLAYLIST_SAVE') {
         // User saved a video to Watch Later / a playlist on YouTube —
         // mirror it into the wallgarden queue and treat it as a positive
@@ -8472,7 +8490,7 @@ window.addEventListener("message", (event) => {
 
         const label = payload.action === 'WATCHLIST_ADD'
             ? "⏳ Synced Watch Later from YouTube"
-            : `📃 Synced save to "${payload.playlistName || 'playlist'}" from YouTube`;
+            : `Synced save to "${payload.playlistName || 'playlist'}" from YouTube`;
         showToast(alreadyQueued ? "Already in Watchlist (synced)" : label, alreadyQueued ? "info" : "success");
     } else if (payload.action === 'WATCHLIST_REMOVE') {
         const before = state.queue.length;
