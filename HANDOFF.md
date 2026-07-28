@@ -1,125 +1,104 @@
-# Handoff — popup layout + comment filter (2026-07-20)
+# Handoff — likes → topics engine + ranked discovery (2026-07-27)
 
-## Popup layout fix (`bda0138`)
-The popup was unscrollable: the bottom sections and the Save button could not be
-reached at all. Cause was `max-height: 520px` on `<body>` alone — **the popup
-window sizes itself to `<html>`**, so body never became a scroll container; the
-page just grew past the window. Anything added to the end of `popup.html` was
-effectively invisible, which is how the comment filter shipped undiscoverable.
+Commit `cd6b57b` (this repo) + `lazy-agent-service@5f1ab29` + `trading-service@038d365,652cdf9`
+(scraper source). All three containers deployed to synology and live-verified.
 
-Now: fixed header / scrolling middle / pinned footer.
-- `html { height: 580px }` — a definite height up the whole chain, under
-  Chrome's ~600px popup ceiling.
-- `.scroll-area { flex: 1 1 auto; min-height: 0; overflow-y: auto }` — the only
-  scroll container. `min-height: 0` is load-bearing: without it a flex item
-  refuses to shrink below its content height and no scrollbar ever appears.
-- `.topbar` / `.bottombar` are `flex: 0 0 auto`, so Save is always on screen.
+## Why
 
-Every section is a `<details class="section" data-sec="...">` collapsed by
-default, so all eight headings fit on one screen. Open state persists under
-`popupOpenSections`. Each collapsed header carries an `n/total` badge of its
-enabled toggles (`refreshSectionCounts()`), so a shut section still reports its
-state. Adding a section = one `<details>` block with a `data-sec`; the JS is
-generic over them.
-
-`npm run test:popup` (`test/popup_layout_e2e.py`, 14 checks) pins this: the
-document must fit the popup window, every heading must be visible unscrolled,
-Save must stay pinned across scrolling, and opening all sections must not grow
-the document. If you add settings, that test is what stops the popup silently
-becoming unreachable again.
-
----
-
-# Comment filter (`e6eaa64`)
+54 accumulated likes were barely influencing anything:
+- Only the **last 15 liked titles** reached the topic brainstormer — and after a
+  sync merge not even the recent 15 (`_wgRebuildFromRatingStates` rebuilt
+  `likedVideos` in Mongo key order; `slice(-15)` was an arbitrary 15 of 54).
+- **Liking never created a topic.** The graph only reinforced the topic that
+  *surfaced* a video; extension-synced likes had no `matchedTopics` → zero
+  CO_LIKED edges; `state.likedTopics` (the graph-discovery seed) was only
+  written by a manual settings input.
+- Discovery pulled bland literal videos: the `before:/after:` "era" operators
+  are **Google syntax that YouTube ignores**, every fetch was `sort:"date"`
+  (newest-first = slop filter), and there was **no ranking** — the pool was
+  shuffled, viewCount/duration discarded, and the "Explicit user rating
+  override" comment at the scorer had no code under it.
+- Bonus trap found during verification: the scraper's `use_ddg_first` shortcut
+  sent transcript-less searches to **DuckDuckGo first, which cannot honor any
+  sort** — an explicit sort silently degraded whenever DDG succeeded.
 
 ## What shipped
-The comments section can now be *filtered* rather than only collapsed: comments
-with no substance are hidden in place, the rest stay. Off by default. Commit
-`e6eaa64` on `master`, pushed and deployed to synology (`:8007`).
 
-Two new settings in the popup, under "💬 Comment filter":
-- `filterComments` — the feature switch. Default **off**.
-- `commentAuditMode` — default **on**, so the first thing you see after enabling
-  the filter is what it is actually catching, not a silently shorter thread.
+**Phase 0 — correctness.** `getRecentLikedVideos()` derives recent likes from
+timestamped `ratingStates` (newest first, sync placeholders skipped); the
+browse path switched date → relevance.
 
-## The three rules that govern the design
-1. **Nothing is deleted.** A filtered comment keeps its place in the DOM with
-   `.wg-comment-filtered` on it; the hiding is pure CSS off `html.wg-cf-on`.
-   Turning the setting off restores everything with no re-scrape.
-2. **Protections beat rules.** Likes ≥ 5, any reply, a pin, or a creator heart
-   means a human vouched for it and no rule may touch it (`COMMENT_PROTECTIONS`).
-3. **Rules match form, not opinion.** "This is wrong because X" survives;
-   "absolute garbage" does not. Filtering for *substance*, not sentiment — the
-   sharpest criticism under a video is often the most useful comment on it.
+**Discovery fetch + ranking (app.js).** `fetchVideosForTopic` now fires three
+real query forms — `broad` (raw topic, relevance) + `depth` (topic + qualifier
+like "full process", relevance) + `proven` (view-count sort) — and ranks all
+candidates with `scoreDiscoveryVideo`, a pure 4-axis port of the benchmarked
+HTML-Notes heuristic (intent/authority/maturity/watchability; freshness
+deliberately inverted: 90d–8y = 1.0, <7d = 0.3, Shorts = 0.15). Ranked
+best-first before the 8-per-topic cap; `shuffleArray` stays for presentation
+only. Liked-channel affinity (`getLikedChannelAffinity`, keyed by channel
+*name* — discovery videos carry no channelId) + the previously-empty rating
+override (+25 like / −50 dislike). Old date-sorted pool flushed once via
+`pool_version`. The HTML fallback now parses views/duration/age so it isn't
+signal-blind.
 
-## Where the code is
-All in `extension/scripts/content.js`, in the section headed
-`Comment Filter — heuristic, reversible, auditable`:
-- `WG_COMMENT_RULES` — the seven rules. Order matters: the audit bar names the
-  *first* match, so specific rules sit above generic ones (`characterMash`
-  before `lowEffort`).
-- `COMMENT_PROTECTIONS` — the vetoes, checked before any rule runs.
-- `scrapeComment()` — DOM → fields. Every selector has fallbacks; a missing
-  field must degrade to "can't tell" (which protects the comment).
-- `classifyComment()` — pure, and the unit-test entry point.
-- `filterComments()` / `startCommentFilterWatcher()` — idempotent pass over
-  `ytd-comment-thread-renderer:not([data-wg-cf])`, re-run on lazy-load.
-- `renderCommentFilterBar()` — summary + per-rule breakdown + audit toggle.
-- `clearFilteredComment()` — the "Not spam" undo.
+**Likes → topics mining.** `mineLikedVideosIntoTopics()` sends unmined likes
+to `POST /api/wallgarden/extract-topics` (8 videos × ≤3 topics = ≤24 per call,
+under the measured 25-topic output ceiling) and feeds four sinks:
+1. topic pool at tier+2 (mined A=10 outranks brainstormed A=8),
+2. `likedTopics` (A-tier, cap 60) — **revives the dead graph-discovery seed**,
+3. `matchedTopics` backfill **without bumping the LWW `t`** + `graphProcessRating`
+   → CO_LIKED edges finally form for extension likes,
+4. `minedVideos` marker → idempotent; failed chunks stay unmined and retry.
+Triggers: load+8s, 30s-debounced from `saveLikedVideos` (covers card/sidebar/
+sync-rebuild paths).
 
-Popup wiring is the same three-edit recipe as the collapse panels: a default in
-`settings`, a checkbox in `popup.html`, the key in `SETTING_KEYS` in `popup.js`.
+**Taste profile + clusters.** `refreshTasteProfile()` → `POST
+/api/wallgarden/taste-profile` over ALL likes (regen at 5+ new likes or 7 days)
+→ ≤120-word profile + named clusters. `buildLikedClusters()` groups likes
+(channel ≥2 likes seeds; singletons fold by shared mined topics) and each
+brainstorm batch expands a DIFFERENT cluster; burned topics ride along as
+shape-negative few-shots; umbrella-word ban added to the shared anchor block.
+`/brainstorm` and `/similar` response shapes unchanged for old clients.
 
-## Checking for false positives
-This is what audit mode is for. Enable the filter, leave audit mode on, and
-filtered comments stay visible — dimmed, dashed outline, tagged with the rule
-that caught them. Each carries a **Not spam** button that restores it and
-records its key in `commentAllowlist`, so it survives future pages and sessions.
-"Forget my not-spam decisions" in the popup clears that list.
+**Grounding gate.** `groundNextQueuedTopics()` looks ahead 5 queue topics, runs
+one relevance search each, and `POST /api/wallgarden/judge-topics` verdicts
+them from the *actual result titles*: REAL → +2 weight; SLOP/DEAD → pulled
+from the queue + demoted to 0.5, **burned only on a second strike**. Fail-open
+(missing verdicts = MIXED), 30-day verdict cache, settings toggle ("Grounding
+Gate for Topics"). Live: "one man sawmill" → REAL, "water treatment" → SLOP.
 
-`emptyComplaint` is the rule most worth watching. It is deliberately the
-narrowest — it needs a complaint word AND no argument marker AND ≤ 7 words. Drop
-any one of those conditions and it starts eating real critique.
+**Sync.** `SYNC_FIELDS` += `mined` (per-video LWW) + `profile` (LWW on
+`generatedAt`). A second browser replays remote extractions into its own pool
+with zero LLM calls.
 
-**Deliberately not a rule: timestamp lists.** They pattern-match as low-effort
-(few words, repeated digits) and are frequently the single most useful comment
-on a long video.
+**Scraper (source of truth = `trading-service/app/scraper` — `scraper-service/app/`
+is a gitignored build copy; committing there commits nothing).** `sort:"views"`
+→ `sp=CAMSAhAB`; raw `sp` pass-through param; explicit relevance/views/sp now
+bypass DDG-first.
 
-## Gotchas found along the way
-- `\p{Emoji_Component}` **includes the ASCII digits 0-9**. The first version of
-  `WG_EMOJI_RE` used it, so "the treaty was 1919 not 1918" scanned as eight
-  emoji and got binned as character-mashing. Use `\p{Extended_Pictographic}`
-  plus explicit joiners/modifiers. The unit-test corpus caught this.
-- Punctuation is far too weak a substance signal. A comma in the substance
-  regex let "mid video, worst channel" pass as reasoned. Conjunctions only.
-- A thread that scrapes to empty text is still rendering — leave it *unmarked*
-  so the next mutation batch retries, rather than passing it permanently on an
-  empty read.
-- The filter bar is a direct child of `ytd-comments#comments`, so the existing
-  collapse CSS (`> *:not(.wg-collapse-bar)`) hides it when comments are
-  collapsed. That is correct, but it's why the bar is inserted *after* the
-  collapse bar rather than prepended.
+## Live verification (deployed stack, real data)
 
-## Verification
-- `npm test` — `test/comment-filter.test.mjs` runs a labelled corpus (15 keeps,
-  17 drops) through the real `classifyComment` out of the unmodified
-  content.js. The **keeps are the contract**: reasoned criticism, corrections,
-  blunt-but-specific complaints, timestamp lists. Add to it when you touch a rule.
-- `npm run test:comments` — `test/comment_filter_e2e.py` drives content.js in
-  headless chromium against a comment-section DOM: scrape, hide the right six of
-  twelve, audit reveal, tag rendering, the undo path (class + tag + persisted
-  allowlist + bar decrement), and filter-off restoring everything. 21/21.
-- Deployed artifact confirmed byte-identical to local `content.js` on `:8007`.
-  (Note: `grep` needs `-a` on that file — the emoji make it read as binary.)
+- Headless browser against :8007 mined **41/54 likes → 78 new topics** in one
+  pass ("slipcasting", "hide tanning", "riparium aquarium", "drying kinetics",
+  "home barista techniques"…), built 78 Topic nodes + 78 CO_LIKED edges,
+  generated a 5-cluster taste profile (Technical Deep Dives / Botanical &
+  Terpene Science / Tactile Craft & Homesteading / Culinary Mastery & BBQ /
+  Geopolitics & Market Intelligence), and the gate pulled "financial thriller
+  soundtracks" as SLOP mid-run. `mined` (41) + `profile` confirmed in the Mongo
+  sync doc — every browser inherits them.
+- Scraper curls: views-sort returns multi-million-view classics; zero DDG log
+  lines for relevance/views after the bypass fix.
+- `npm test` (learn + comment-filter + **rank.test.mjs**(8) + **mining.test.mjs**(5)),
+  smoke 12/12, backend vitest 500/500 (14 new), `tsc --noEmit` clean.
 
-This closes the "no automated test covers the collapse panels" gap from the
-previous handoff for the comment path at least; the e2e harness is now committed
-rather than a scratchpad throwaway.
+## Notes / not done
 
-## Not done
-- The LLM ranking tier (score the top ~30 by likes, float substance up) is not
-  built. This is the free heuristic tier only. `plan/llm_filtering_plan.md` and
-  the prism plumbing in `app/app.js` are the starting points, but note the
-  extension and dashboard are separate runtimes — routing would go through
-  `background.js`.
-- Rules are global. No per-channel or per-category tuning.
+- 13 of 54 likes returned no usable extraction in the E2E pass; they stay
+  unmined and retry on each dashboard load (idempotent).
+- LLM rerank of *videos* (benchmark strategy B) is designed but deferred:
+  trigger when a topic's heuristic top-8 mean `_rankScore` is low, via a new
+  `/wallgarden/rerank`. Supersedes `plan/llm_filtering_plan.md`.
+- `/suggest/` nginx autocomplete pre-filter (phase 5b) not wired — only add if
+  the gate feels slow.
+- `DISCOVERY_WEIGHTS` is a code const; expose in settings only if tuning
+  becomes a habit.
