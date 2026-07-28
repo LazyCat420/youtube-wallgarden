@@ -32,6 +32,19 @@ with an editorial magazine style on a moss/sage garden palette:
 - `ontologyRenderer.js` canvas colors moved to the garden palette
   (TYPE_COLORS + stage/tooltip/edge colors near their draw sites).
 
+## Follow-up (same day): watch-page compaction + nav collapse (`68e9545`)
+
+- Player sidebar actions are compact auto-width `btn-sm` chips in wrap rows
+  (`.sidebar-actions-grid` is now flex-wrap; `.sidebar-actions-row` added).
+- FIXED a v55 regression: `ensureInlinePlayer` builds its HTML from a
+  joined array of PLAIN strings — `${icon(...)}` rendered literally. Any
+  future icon substitution there must use `' + icon("x") + '` concatenation.
+- `.btn` now has `white-space: nowrap`.
+- Desktop nav collapse: the header burger toggles `body.nav-collapsed`
+  (localStorage `nav-collapsed`); mobile keeps the drawer. TRAP: collapsed
+  grid must be `grid-template-columns: 1fr` — with `.sidebar` display:none,
+  `.main-content` auto-places into the FIRST track, so `0 1fr` swallows it.
+
 ## Traps for the next session
 
 - **Tokens live ONLY in index.html** — do not re-add a `:root` to app.css
