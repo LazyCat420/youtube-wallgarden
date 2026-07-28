@@ -2717,36 +2717,82 @@ body {
 /* Sidebar Toggle: compact icon button, works on desktop (collapse) and
    mobile (drawer). .sidebar-close stays mobile-only. */
 .sidebar-toggle {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: transparent;
-    border: none;
-    color: var(--text-secondary);
-    width: 28px;
-    height: 28px;
-    border-radius: var(--radius);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: background var(--t-fast), color var(--t-fast);
-}
-.sidebar-toggle:hover {
-    background: var(--bg-elevated);
-    color: var(--text-primary);
+    display: none;
 }
 .sidebar-close {
     display: none;
 }
 
-/* Desktop nav collapse (toggled by the header burger, persisted).
-   Single-column grid: with .sidebar display:none, .main-content is the
-   first grid item — a 0px first track would swallow it. */
+/* ── Nav collapse rail (mirrors the critical CSS in index.html) ── */
+.nav-collapse-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: auto;
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background var(--t-fast), color var(--t-fast);
+}
+.nav-collapse-btn:hover {
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+}
 @media (min-width: 769px) {
-    body.nav-collapsed .app-layout {
-        grid-template-columns: 1fr;
+    html[data-nav-collapsed="true"] .app-layout {
+        grid-template-columns: 52px 1fr;
     }
-    body.nav-collapsed .sidebar {
+    html[data-nav-collapsed="true"] .sidebar {
+        padding: 1.25rem 0;
+        overflow: hidden;
+    }
+    html[data-nav-collapsed="true"] .sidebar-brand {
+        justify-content: center;
+        padding-left: 0;
+        gap: 0;
+    }
+    /* The chevron IS the expand affordance once collapsed: centre it,
+       flip it to point right, and drop the wordmark + leaf. */
+    html[data-nav-collapsed="true"] .brand-icon,
+    html[data-nav-collapsed="true"] .brand-name,
+    html[data-nav-collapsed="true"] .nav-label,
+    html[data-nav-collapsed="true"] .nav-item .nav-count,
+    html[data-nav-collapsed="true"] .btn-sidebar-label,
+    html[data-nav-collapsed="true"] .weather-widget,
+    html[data-nav-collapsed="true"] .nav-divider {
         display: none;
+    }
+    html[data-nav-collapsed="true"] .nav-collapse-btn {
+        margin-left: 0;
+    }
+    html[data-nav-collapsed="true"] .nav-collapse-btn svg {
+        transform: scaleX(-1);
+    }
+    html[data-nav-collapsed="true"] .nav-item {
+        justify-content: center;
+        gap: 0;
+        padding: 0.5rem 0;
+        border-radius: 0;
+    }
+    html[data-nav-collapsed="true"] .sidebar-footer {
+        padding-top: 0.75rem;
+    }
+    html[data-nav-collapsed="true"] .btn-sidebar {
+        justify-content: center;
+        gap: 0;
+        padding: 0.4rem 0;
+        border-color: transparent;
+    }
+    html[data-nav-collapsed="true"] .btn-sidebar:hover {
+        border-color: transparent;
+    }
+    html[data-nav-collapsed="true"] .btn-sidebar .icon-14-r {
+        margin-right: 0;
     }
 }
 
@@ -2832,6 +2878,11 @@ body {
 
 /* ── Mobile Responsive Support (max-width: 768px) ── */
 @media (max-width: 768px) {
+    /* The drawer has its own close button; the rail toggle is desktop-only */
+    .nav-collapse-btn {
+        display: none;
+    }
+
     /* Hide sidebar toggle and close by default, show on mobile */
     .sidebar-toggle {
         display: block !important;

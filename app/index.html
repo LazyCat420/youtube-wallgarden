@@ -13,6 +13,10 @@
     <link rel="preload" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400..700&display=swap" as="style" onload="this.onload=null;this.rel='stylesheet'">
     <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400..700&display=swap"></noscript>
 
+    <!-- Pre-paint nav-collapse restore. app.min.js is deferred, so reading this
+         in JS later would flash a full-width sidebar first. -->
+    <script>try{if(localStorage.getItem("nav-collapsed")==="1"){document.documentElement.setAttribute("data-nav-collapsed","true");}}catch(e){}</script>
+
     <!-- Inline critical CSS for above-the-fold content (eliminates render-blocking app.css) -->
     <style>
         /* ============================================================
@@ -232,11 +236,86 @@
             color: var(--text-muted);
             margin-top: 0.25rem;
         }
+
+        /* ── Nav collapse: 52px icon rail (prism-style) ──
+           Set pre-paint via html[data-nav-collapsed]. Desktop only —
+           on mobile the sidebar is an overlay drawer instead. */
+        .nav-collapse-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-left: auto;
+            width: 24px;
+            height: 24px;
+            flex-shrink: 0;
+            background: transparent;
+            border: none;
+            border-radius: var(--radius);
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: background var(--t-fast), color var(--t-fast);
+        }
+        .nav-collapse-btn:hover {
+            background: var(--bg-elevated);
+            color: var(--text-primary);
+        }
+        @media (min-width: 769px) {
+            html[data-nav-collapsed="true"] .app-layout {
+                grid-template-columns: 52px 1fr;
+            }
+            html[data-nav-collapsed="true"] .sidebar {
+                padding: 1.25rem 0;
+                overflow: hidden;
+            }
+            html[data-nav-collapsed="true"] .sidebar-brand {
+                justify-content: center;
+                padding-left: 0;
+                gap: 0;
+            }
+            /* The chevron IS the expand affordance once collapsed: centre it,
+               flip it to point right, and drop the wordmark + leaf. */
+            html[data-nav-collapsed="true"] .brand-icon,
+            html[data-nav-collapsed="true"] .brand-name,
+            html[data-nav-collapsed="true"] .nav-label,
+            html[data-nav-collapsed="true"] .nav-item .nav-count,
+            html[data-nav-collapsed="true"] .btn-sidebar-label,
+            html[data-nav-collapsed="true"] .weather-widget,
+            html[data-nav-collapsed="true"] .nav-divider {
+                display: none;
+            }
+            html[data-nav-collapsed="true"] .nav-collapse-btn {
+                margin-left: 0;
+            }
+            html[data-nav-collapsed="true"] .nav-collapse-btn svg {
+                transform: scaleX(-1);
+            }
+            html[data-nav-collapsed="true"] .nav-item {
+                justify-content: center;
+                gap: 0;
+                padding: 0.5rem 0;
+                border-radius: 0;
+            }
+            html[data-nav-collapsed="true"] .sidebar-footer {
+                padding-top: 0.75rem;
+            }
+            html[data-nav-collapsed="true"] .btn-sidebar {
+                justify-content: center;
+                gap: 0;
+                padding: 0.4rem 0;
+                border-color: transparent;
+            }
+            html[data-nav-collapsed="true"] .btn-sidebar:hover {
+                border-color: transparent;
+            }
+            html[data-nav-collapsed="true"] .btn-sidebar .icon-14-r {
+                margin-right: 0;
+            }
+        }
     </style>
 
     <!-- Non-blocking full CSS via preload pattern -->
-    <link rel="preload" href="app.min.css?v=20260728-v56" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="app.min.css?v=20260728-v56"></noscript>
+    <link rel="preload" href="app.min.css?v=20260728-v57" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="app.min.css?v=20260728-v57"></noscript>
 </head>
 <body>
     <div class="app-layout">
@@ -245,36 +324,37 @@
             <div class="sidebar-brand">
                 <svg class="icon-svg brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 1.5rem; height: 1.5rem; color: var(--accent);"><path d="M2 22C2 12 10 4 22 2M8 16c0-4.4 3.6-8 8-8M12 20c0-2.2 1.8-4 4-4"></path></svg>
                 <span class="brand-name">Wallgarden</span>
+                <button id="btn-nav-collapse" class="nav-collapse-btn" aria-label="Collapse navigation" title="Collapse sidebar"><svg class="icon-svg icon-14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11 17-5-5 5-5"/><path d="m18 17-5-5 5-5"/></svg></button>
                 <button id="btn-sidebar-close" class="sidebar-close" aria-label="Close Navigation"><svg class="icon-svg icon-14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
             </div>
 
             <nav class="sidebar-nav">
-                <button class="nav-item active" data-view="smart-feed">
+                <button class="nav-item active" data-view="smart-feed" title="Discovery Feed">
                     <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
                     <span class="nav-label">Discovery Feed</span>
                 </button>
-                <button class="nav-item" data-view="subscription-feed">
+                <button class="nav-item" data-view="subscription-feed" title="Subscription Feed">
                     <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a9 9 0 0 1 9 9"></path><path d="M4 4a16 16 0 0 1 16 16"></path><circle cx="5" cy="19" r="1"></circle></svg>
                     <span class="nav-label">Subscription Feed</span>
                 </button>
-                <button class="nav-item" data-view="news-feed">
+                <button class="nav-item" data-view="news-feed" title="News Feed">
                     <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"></path><line x1="8" y1="8" x2="16" y2="8"></line><line x1="8" y1="12" x2="16" y2="12"></line><line x1="8" y1="16" x2="12" y2="16"></line></svg>
                     <span class="nav-label">News Feed</span>
                 </button>
-                <button class="nav-item" data-view="playlists">
+                <button class="nav-item" data-view="playlists" title="Playlists">
                     <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
                     <span class="nav-label">Playlists</span>
                 </button>
-                <button class="nav-item" data-view="liked-videos">
+                <button class="nav-item" data-view="liked-videos" title="Liked Videos">
                     <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
                     <span class="nav-label">Liked Videos</span>
                 </button>
-                <button class="nav-item" data-view="subscriptions">
+                <button class="nav-item" data-view="subscriptions" title="Manage Subscriptions">
                     <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
                     <span class="nav-label">Manage Subscriptions</span>
                     <span class="nav-count" id="nav-sub-count">0</span>
                 </button>
-                <button class="nav-item" data-view="discover-channels">
+                <button class="nav-item" data-view="discover-channels" title="Discover Channels">
                     <svg class="nav-icon icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"></polygon></svg>
                     <span class="nav-label">Discover Channels</span>
                 </button>
@@ -286,10 +366,10 @@
 
             <div class="sidebar-footer">
                 <a href="/extension/" class="btn-sidebar" target="_blank" title="Browse Chrome Extension Files">
-                    <svg class="icon-svg icon-14 icon-14-r" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg> Chrome Extension
+                    <svg class="icon-svg icon-14 icon-14-r" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg> <span class="btn-sidebar-label">Chrome Extension</span>
                 </a>
                 <button id="btn-open-settings" class="btn-sidebar">
-                    <svg class="icon-svg icon-14 icon-14-r" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg> Settings
+                    <svg class="icon-svg icon-14 icon-14-r" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg> <span class="btn-sidebar-label">Settings</span>
                 </button>
             </div>
         </aside>
@@ -820,8 +900,8 @@
         </div>
     </div>
 
-    <script src="ontology.js?v=20260728-v56" defer></script>
-    <script src="ontologyRenderer.js?v=20260728-v56" defer></script>
-    <script src="app.min.js?v=20260728-v56" defer></script>
+    <script src="ontology.js?v=20260728-v57" defer></script>
+    <script src="ontologyRenderer.js?v=20260728-v57" defer></script>
+    <script src="app.min.js?v=20260728-v57" defer></script>
 </body>
 </html>

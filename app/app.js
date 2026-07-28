@@ -1524,23 +1524,35 @@ function setupNavListeners() {
     const sidebarOverlay = document.getElementById("sidebar-overlay");
     const sidebar = document.querySelector(".sidebar");
 
-    const isMobileViewport = () => window.matchMedia("(max-width: 768px)").matches;
-
-    // Restore persisted desktop nav collapse
-    if (localStorage.getItem("nav-collapsed") === "1") {
-        document.body.classList.add("nav-collapsed");
-    }
-
     if (btnToggle) {
         btnToggle.addEventListener("click", () => {
-            if (isMobileViewport()) {
-                if (sidebar) sidebar.classList.add("open");
-                if (sidebarOverlay) sidebarOverlay.classList.remove("hidden");
-            } else {
-                const collapsed = document.body.classList.toggle("nav-collapsed");
-                localStorage.setItem("nav-collapsed", collapsed ? "1" : "0");
-            }
+            if (sidebar) sidebar.classList.add("open");
+            if (sidebarOverlay) sidebarOverlay.classList.remove("hidden");
         });
+    }
+
+    // Desktop nav collapse to an icon rail. The initial state is applied
+    // pre-paint by the inline script in index.html; this only toggles.
+    const btnNavCollapse = document.getElementById("btn-nav-collapse");
+    if (btnNavCollapse) {
+        btnNavCollapse.addEventListener("click", () => {
+            const root = document.documentElement;
+            const collapsed = root.getAttribute("data-nav-collapsed") === "true";
+            if (collapsed) {
+                root.removeAttribute("data-nav-collapsed");
+                btnNavCollapse.title = "Collapse sidebar";
+                btnNavCollapse.setAttribute("aria-label", "Collapse navigation");
+            } else {
+                root.setAttribute("data-nav-collapsed", "true");
+                btnNavCollapse.title = "Expand sidebar";
+                btnNavCollapse.setAttribute("aria-label", "Expand navigation");
+            }
+            localStorage.setItem("nav-collapsed", collapsed ? "0" : "1");
+        });
+        if (document.documentElement.getAttribute("data-nav-collapsed") === "true") {
+            btnNavCollapse.title = "Expand sidebar";
+            btnNavCollapse.setAttribute("aria-label", "Expand navigation");
+        }
     }
     if (btnCloseSidebar) {
         btnCloseSidebar.addEventListener("click", closeMobileSidebar);
