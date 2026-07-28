@@ -805,6 +805,7 @@ body {
     align-items: center;
     justify-content: center;
     gap: 0.4rem;
+    white-space: nowrap;
     border: 1px solid var(--border-medium);
     outline: none;
     font-family: var(--font-stack);
@@ -1008,13 +1009,20 @@ body {
 }
 
 .sidebar-actions-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
 }
 
 .sidebar-actions-grid .btn {
-    width: 100%;
+    width: auto;
+}
+
+.sidebar-actions-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 0.6rem;
 }
 
 .sidebar-btn-subscribe {
@@ -2706,12 +2714,40 @@ body {
     flex: 1;
 }
 
-/* Sidebar Toggle & Close defaults (hidden on desktop) */
+/* Sidebar Toggle: compact icon button, works on desktop (collapse) and
+   mobile (drawer). .sidebar-close stays mobile-only. */
 .sidebar-toggle {
-    display: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background var(--t-fast), color var(--t-fast);
+}
+.sidebar-toggle:hover {
+    background: var(--bg-elevated);
+    color: var(--text-primary);
 }
 .sidebar-close {
     display: none;
+}
+
+/* Desktop nav collapse (toggled by the header burger, persisted).
+   Single-column grid: with .sidebar display:none, .main-content is the
+   first grid item — a 0px first track would swallow it. */
+@media (min-width: 769px) {
+    body.nav-collapsed .app-layout {
+        grid-template-columns: 1fr;
+    }
+    body.nav-collapsed .sidebar {
+        display: none;
+    }
 }
 
 /* ── Watch Page Side-by-Side Layout ── */
