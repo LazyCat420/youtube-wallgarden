@@ -586,6 +586,16 @@
                         </div>
                         <div class="filter-option" style="margin-top: 1rem; display: flex; align-items: center; justify-content: space-between; gap: 2rem;">
                             <div>
+                                <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">Grounding Gate for Topics</label>
+                                <span style="font-size: 0.85rem; color: var(--text-muted); display: block; line-height: 1.4;">Before the feed spends time on an upcoming topic, check its actual YouTube results and drop topics that only return generic slop. Uses one small AI call per ~10 topics.</span>
+                            </div>
+                            <label class="switch-toggle">
+                                <input type="checkbox" id="toggle-grounding">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                        <div class="filter-option" style="margin-top: 1rem; display: flex; align-items: center; justify-content: space-between; gap: 2rem;">
+                            <div>
                                 <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">Alternative Embed Player Instance</label>
                                 <span style="font-size: 0.85rem; color: var(--text-muted); display: block; line-height: 1.4;">Specify a public Invidious or Piped instance URL used to bypass age restrictions.</span>
                             </div>

@@ -60,7 +60,13 @@ app.add_middleware(
 
 # Fields we sync. Anything not listed here stays browser-local by design
 # (e.g. the ontology graph, which each browser rebuilds from merged ratings).
-SYNC_FIELDS = ["ratings", "queue", "playlists", "watched"]
+#
+# * `mined`: { videoId: { t, topics: [..] } } — liked videos already mined into
+#   topics by the LLM. Per-video LWW so a second browser reuses the extraction
+#   instead of re-paying the LLM call.
+# * `profile`: { text, clusters, generatedAt, likeCount } — the LLM-written
+#   taste profile. Whole-value LWW on `generatedAt`.
+SYNC_FIELDS = ["ratings", "queue", "playlists", "watched", "mined", "profile"]
 
 
 def _merge_lww_map(base, incoming):
@@ -113,11 +119,24 @@ def _merge_playlists(base, incoming):
     return out
 
 
+def _merge_profile(base, incoming):
+    """Whole-value LWW on `generatedAt` — the newest taste profile wins."""
+    if not isinstance(incoming, dict) or not incoming:
+        return base
+    if not isinstance(base, dict) or not base:
+        return incoming
+    base_t = base.get("generatedAt", 0) or 0
+    inc_t = incoming.get("generatedAt", 0) or 0
+    return incoming if inc_t >= base_t else base
+
+
 _MERGERS = {
     "ratings": _merge_lww_map,
     "queue": _merge_lww_map,
     "playlists": _merge_playlists,
     "watched": _merge_watched,
+    "mined": _merge_lww_map,
+    "profile": _merge_profile,
 }
 
 

@@ -26,6 +26,17 @@ const PROPAGATION_FACTOR = 0.5;        // Neighbors lose edge_weight × 0.5
 // ── Channel Similarity ───────────────────────────────────────
 const MIN_SHARED_TOPICS_FOR_SIMILARITY = 3;
 
+// ── Score-marker strings that are NOT topics ─────────────────
+// getScoreAndMatches pushes these into matchedTopics as audit markers;
+// none of them may become Topic nodes. ("vintage" used to leak through.)
+const NON_TOPIC_MARKERS = new Set([
+    "all-caps", "punctuation", "viral-spam", "vintage",
+    "liked-channel", "user-liked", "user-disliked"
+]);
+function isTopicLabel(t) {
+    return t && !NON_TOPIC_MARKERS.has(t) && !t.startsWith("disliked:");
+}
+
 // ── Helpers ─────────────────────────────────────────────────
 
 function makeNodeId(label) {
@@ -114,8 +125,7 @@ function graphProcessRating(graph, video, rating) {
         topicLabels.push(video.discoveryTopic.toLowerCase());
     }
     (video.matchedTopics || []).forEach(t => {
-        if (t === "all-caps" || t === "punctuation" || t === "viral-spam") return;
-        if (t.startsWith("disliked:")) return;
+        if (!isTopicLabel(t)) return;
         const normalized = t.trim().toLowerCase();
         if (normalized && !topicLabels.includes(normalized)) {
             topicLabels.push(normalized);
@@ -189,8 +199,7 @@ function graphProcessWatch(graph, video) {
 
     // Extract all topics
     (video.matchedTopics || []).forEach(t => {
-        if (t === "all-caps" || t === "punctuation" || t === "viral-spam") return;
-        if (t.startsWith("disliked:")) return;
+        if (!isTopicLabel(t)) return;
         const normalized = t.trim().toLowerCase();
         if (normalized) {
             const nid = graphUpsertNode(graph, normalized, "Topic", watchDelta);
@@ -483,7 +492,7 @@ function graphScoreVideo(graph, video) {
     const topicLabels = [];
     if (video.discoveryTopic) topicLabels.push(video.discoveryTopic);
     (video.matchedTopics || []).forEach(t => {
-        if (t !== "all-caps" && t !== "punctuation" && t !== "viral-spam" && !t.startsWith("disliked:")) {
+        if (isTopicLabel(t)) {
             topicLabels.push(t);
         }
     });
