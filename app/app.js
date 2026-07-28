@@ -64,6 +64,13 @@ let state = {
     // playlistStates: plId -> { name, createdAt, deleted, t, videos:{vId:{p,t,v}} }.
     queueStates: {},
     playlistStates: {},
+    // Liked videos already mined into topics by the LLM. videoId ->
+    // { t: <ms>, topics: [..] }. Synced (LWW per video) so a second browser
+    // reuses the extraction instead of re-paying the LLM call.
+    minedVideos: {},
+    // LLM-written summary of the user's taste, regenerated as likes accrue.
+    // { text, clusters, generatedAt, likeCount } | null. Synced whole-value.
+    tasteProfile: null,
     settings: {
         useGoogleApiSearch: false,
         useYtdlp: true,
@@ -205,6 +212,17 @@ document.addEventListener("DOMContentLoaded", () => {
             generateBrainstormTopics(true, 1); // Appends new topics with 1 request
         }
     }, 1000);
+
+    // Mine any not-yet-extracted likes into topics. 8s puts this after the
+    // first cross-browser sync pull has merged remote likes in; idempotent
+    // via state.minedVideos, so running on every load is fine.
+    setTimeout(() => mineLikedVideosIntoTopics(), 8000);
+
+    // Regenerate the taste profile if likes moved enough since the last one.
+    setTimeout(() => refreshTasteProfile(), 12000);
+
+    // Grounding gate over the upcoming topic queue (fail-open, cached 30d).
+    scheduleGrounding(20000);
 });
 
 // Update subscription count badge in sidebar
@@ -716,6 +734,20 @@ function loadState() {
     state.newsSourceRatings = rawNewsRatings ? JSON.parse(rawNewsRatings) : {};
     state.queue = rawQueue ? JSON.parse(rawQueue) : [];
     state.ontologyGraph = rawGraph ? JSON.parse(rawGraph) : { nodes: {}, edges: {}, clusters: {} };
+    const rawMined = getStoredItem("mined_videos");
+    state.minedVideos = rawMined ? JSON.parse(rawMined) : {};
+    const rawTasteProfile = getStoredItem("taste_profile");
+    state.tasteProfile = rawTasteProfile ? JSON.parse(rawTasteProfile) : null;
+    const rawVerdicts = getStoredItem("grounding_verdicts");
+    state.groundingVerdicts = rawVerdicts ? JSON.parse(rawVerdicts) : {};
+    // Expire grounding verdicts after 30 days — YouTube results move.
+    const verdictCutoff = Date.now() - 30 * 86400e3;
+    Object.keys(state.groundingVerdicts).forEach(k => {
+        if ((state.groundingVerdicts[k].t || 0) < verdictCutoff) delete state.groundingVerdicts[k];
+    });
+    if (state.settings.groundingEnabled === undefined) {
+        state.settings.groundingEnabled = true;
+    }
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
@@ -723,10 +755,21 @@ function loadState() {
         state.cache = { videos: {}, lastSync: 0 };
     }
     
+    // One-time flush when the ranking pipeline changes: pool entries fetched
+    // under an older strategy (e.g. the date-sorted era queries) would keep
+    // serving slop for days. Bump WG_POOL_VERSION to invalidate.
+    const WG_POOL_VERSION = "2";
+    if (getStoredItem("pool_version") !== JSON.stringify(WG_POOL_VERSION) && state.smartFeedSuggestionPool.length > 0) {
+        debug(`[Smart Feed] Pool version changed — flushing ${state.smartFeedSuggestionPool.length} pre-ranking suggestions.`);
+        state.smartFeedSuggestionPool = [];
+        saveSmartFeedSuggestionPool();
+    }
+    persistField("pool_version", WG_POOL_VERSION);
+
     // Discard expired cached suggestions older than 14 days
     const fourteenDaysAgo = Date.now() - (14 * 24 * 60 * 60 * 1000);
     const initialPoolSize = state.smartFeedSuggestionPool.length;
-    state.smartFeedSuggestionPool = state.smartFeedSuggestionPool.filter(v => 
+    state.smartFeedSuggestionPool = state.smartFeedSuggestionPool.filter(v =>
         v.crawledAt && v.crawledAt > fourteenDaysAgo
     );
     if (state.smartFeedSuggestionPool.length !== initialPoolSize) {
@@ -771,6 +814,8 @@ function loadState() {
     if (googleApiToggle) googleApiToggle.checked = state.settings.useGoogleApiSearch;
     document.getElementById("toggle-use-ytdlp").checked = state.settings.useYtdlp;
     document.getElementById("toggle-mute-shorts").checked = state.settings.muteShorts;
+    const groundingToggle = document.getElementById("toggle-grounding");
+    if (groundingToggle) groundingToggle.checked = state.settings.groundingEnabled !== false;
     const altPlayerInput = document.getElementById("input-alt-player-instance");
     if (altPlayerInput) {
         altPlayerInput.value = state.settings.altPlayerInstance || "https://yewtu.be";
@@ -859,11 +904,22 @@ function saveChannels() {
 
 function saveTopics()         { persistField("topics", state.topics); }
 function saveLikedTopics()    { persistField("liked_topics", state.likedTopics); }
+function saveMinedVideos()    { persistField("mined_videos", state.minedVideos); schedulePushRemoteState(); }
+function saveTasteProfile()   { persistField("taste_profile", state.tasteProfile); schedulePushRemoteState(); }
+function saveGroundingVerdicts() { persistField("grounding_verdicts", state.groundingVerdicts); }
 function saveDislikedTopics() { persistField("disliked_topics", state.dislikedTopics); }
 function saveCache()          { persistField("cache", state.cache); }
 function saveVideoRatings()   { persistField("video_ratings", state.videoRatings); schedulePushRemoteState(); }
 function saveNewsRatings()    { persistField("news_ratings", state.newsSourceRatings); }
-function saveLikedVideos()    { persistField("liked_videos", state.likedVideos); scheduleAppStateBroadcast(); schedulePushRemoteState(); }
+function saveLikedVideos()    {
+    persistField("liked_videos", state.likedVideos);
+    invalidateLikedChannelCache();
+    scheduleAppStateBroadcast();
+    schedulePushRemoteState();
+    // Every path that changes likes ends here (card buttons, sidebar, sync
+    // rebuild) — debounce a mining pass so new likes become topics.
+    scheduleMining(30000);
+}
 function saveSearchHistory()  { persistField("search_history", state.searchHistory); }
 
 // The pool and ontology graph are saved from hot paths (scroll batches, watch
@@ -1168,12 +1224,19 @@ function _wgSyncSnapshot() {
     stampRatingStates();
     stampQueueStates();
     stampPlaylistStates();
-    return {
+    const snapshot = {
         ratings: state.ratingStates || {},
         queue: state.queueStates || {},
         playlists: state.playlistStates || {},
-        watched: state.watchedHistory || {}
+        watched: state.watchedHistory || {},
+        mined: state.minedVideos || {}
     };
+    // Only ship a profile that exists — an empty object would fight the
+    // server's LWW merge for no reason.
+    if (state.tasteProfile && state.tasteProfile.generatedAt) {
+        snapshot.profile = state.tasteProfile;
+    }
+    return snapshot;
 }
 
 // Rebuild the derived videoRatings map + likedVideos list from ratingStates,
@@ -1181,7 +1244,12 @@ function _wgSyncSnapshot() {
 function _wgRebuildFromRatingStates(changedIds) {
     const newRatings = {};
     const liked = [];
-    Object.entries(state.ratingStates).forEach(([id, st]) => {
+    // Sort by rating time so likedVideos stays chronological — a sync merge
+    // hands us Mongo key order, and every consumer of "recent likes" breaks
+    // silently on that (slice(-15) becomes an arbitrary 15).
+    Object.entries(state.ratingStates)
+        .sort((a, b) => (a[1].t || 0) - (b[1].t || 0))
+        .forEach(([id, st]) => {
         if (st.r === 5) {
             newRatings[id] = 5;
             const existing = (state.likedVideos || []).find(v => v && v.id === id);
@@ -1249,6 +1317,38 @@ function _wgApplyRemoteFields(fields) {
                 state.watchedHistory[vid] = Math.max(state.watchedHistory[vid] || 0, ts || 0);
             });
             localStorage.setItem("wallgarden_watched", JSON.stringify(state.watchedHistory));
+        }
+        if (fields.mined) {
+            // Another browser already paid the LLM call — replay its
+            // extractions into our local topic pool. applyMinedTopics marks
+            // each id in minedVideos, so this is idempotent.
+            if (!state.minedVideos) state.minedVideos = {};
+            let applied = 0;
+            Object.entries(fields.mined).forEach(([vid, rec]) => {
+                if (!rec || !Array.isArray(rec.topics)) return;
+                const cur = state.minedVideos[vid];
+                if (cur && (cur.t || 0) >= (rec.t || 0)) return;
+                // Remote entries carry plain labels; re-enter them at the
+                // default mined weight (tier unknown -> treat as B).
+                applyMinedTopics(vid, rec.topics.map(t2 => ({ topic: t2, tier: "B", weight: 4 })), { quiet: true });
+                state.minedVideos[vid] = rec; // keep the remote timestamp
+                applied++;
+            });
+            if (applied > 0) {
+                pruneTopicPool();
+                saveTopics();
+                saveLikedTopics();
+                persistField("mined_videos", state.minedVideos);
+                saveOntologyGraph();
+                debug(`[Sync] Applied ${applied} mined-video extractions from another browser.`);
+            }
+        }
+        if (fields.profile && fields.profile.generatedAt) {
+            if (!state.tasteProfile || (state.tasteProfile.generatedAt || 0) < fields.profile.generatedAt) {
+                state.tasteProfile = fields.profile;
+                persistField("taste_profile", state.tasteProfile);
+                debug("[Sync] Adopted newer taste profile from another browser.");
+            }
         }
     } finally {
         _syncApplying = false;
@@ -1707,6 +1807,14 @@ function setupSettingsToggleListeners() {
         saveSettings();
         renderFeed();
     });
+    const groundingToggleEl = document.getElementById("toggle-grounding");
+    if (groundingToggleEl) {
+        groundingToggleEl.addEventListener("change", (e) => {
+            state.settings.groundingEnabled = e.target.checked;
+            saveSettings();
+            if (e.target.checked) scheduleGrounding(2000);
+        });
+    }
     const selectLlmModel = document.getElementById("select-llm-model");
     if (selectLlmModel) {
         selectLlmModel.addEventListener("change", (e) => {
@@ -2100,7 +2208,8 @@ function deleteProfile(profileName) {
         "search_history", "brainstorm_topics", "video_ratings",
         "discovered_channels", "smart_feed_pool", "liked_topics",
         "disliked_topics", "burned_queries", "playlists", "liked_videos",
-        "news_ratings", "queue", "ontology_graph"
+        "news_ratings", "queue", "ontology_graph",
+        "mined_videos", "taste_profile", "grounding_verdicts", "pool_version"
     ];
     keysToRemove.forEach(k => {
         localStorage.removeItem(`wallgarden_${profileName}_${k}`);
@@ -2593,6 +2702,119 @@ function invalidateScoreCache() {
     }
 }
 
+// ── Discovery ranking (pure helpers) ─────────────────────────
+// Parsers for YouTube's human-readable renderer strings, used by the
+// /youtube/results HTML fallback so those videos aren't signal-blind.
+function parseYtViewsText(text) {
+    if (!text) return null;
+    const m = String(text).replace(/,/g, "").match(/([\d.]+)\s*([KMB])?/i);
+    if (!m) return null;
+    let n = parseFloat(m[1]);
+    if (isNaN(n)) return null;
+    const suffix = (m[2] || "").toUpperCase();
+    if (suffix === "K") n *= 1e3;
+    else if (suffix === "M") n *= 1e6;
+    else if (suffix === "B") n *= 1e9;
+    return Math.round(n);
+}
+
+function parseYtDurationText(text) {
+    if (!text) return null;
+    const parts = String(text).trim().split(":").map(p => parseInt(p, 10));
+    if (parts.some(isNaN)) return null;
+    return parts.reduce((acc, p) => acc * 60 + p, 0);
+}
+
+function parseYtAgeText(text) {
+    if (!text) return null;
+    const m = String(text).match(/(\d+)\s*(year|month|week|day|hour|minute)/i);
+    if (!m) return null;
+    const n = parseInt(m[1], 10);
+    const unitMs = {
+        minute: 60e3, hour: 3600e3, day: 86400e3,
+        week: 7 * 86400e3, month: 30 * 86400e3, year: 365 * 86400e3
+    }[m[2].toLowerCase()];
+    return unitMs ? Date.now() - n * unitMs : null;
+}
+
+// Map of channelName(lower) -> like count, from the timestamped rating log.
+// Discovery videos carry an empty channelId, so name is the only join key.
+let _likedChannelCache = null;
+function getLikedChannelAffinity() {
+    if (_likedChannelCache) return _likedChannelCache;
+    const map = new Map();
+    Object.values(state.ratingStates || {}).forEach(st => {
+        if (!st || st.r !== 5 || !st.v || !st.v.channelName) return;
+        const key = st.v.channelName.toLowerCase();
+        if (key === "youtube curation") return; // sync placeholder, not a channel
+        map.set(key, (map.get(key) || 0) + 1);
+    });
+    _likedChannelCache = map;
+    return map;
+}
+function invalidateLikedChannelCache() { _likedChannelCache = null; }
+
+// 4-axis discovery scorer, ported from the benchmarked heuristic in
+// HTML-Notes/app/youtube_search.py (A=9.20/10 vs 9.68 for an LLM rerank).
+// Pure: reads only its arguments, so it's unit-testable in the VM harness.
+// Freshness is deliberately INVERTED vs the benchmark: this feed prizes
+// proven/vintage content, so 90d–8y scores highest and week-old uploads
+// (the slop tier that date-sorted fetching used to surface) score lowest.
+const DISCOVERY_WEIGHTS = { intent: 1.0, authority: 0.6, maturity: 0.4, watchability: 0.5 };
+const WG_CLICKBAIT_RE = /\b(you won'?t believe|gone wrong|shocking|insane|must (?:see|watch)|top \d+|life hacks?|exposed|destroyed|1 in a million)\b/i;
+
+function scoreDiscoveryVideo(video, ctx) {
+    const w = (ctx && ctx.weights) || DISCOVERY_WEIGHTS;
+    const rawTitle = video.title || "";
+    const title = rawTitle.toLowerCase();
+
+    // intent: token overlap with the topic + rank prior from the fetch
+    const topicTokens = ((ctx && ctx.topic) || "").toLowerCase().split(/\s+/).filter(t => t.length > 2);
+    const overlap = topicTokens.length
+        ? topicTokens.filter(t => title.includes(t)).length / topicTokens.length
+        : 0;
+    const rankPrior = Math.max(0, 1 - (video._fetchRank || 0) * 0.08);
+    const intent = 0.7 * overlap + 0.3 * rankPrior;
+
+    // authority: log-scale views + liked-channel flag (no verified badge via yt-dlp;
+    // personal affinity is the better signal anyway)
+    const views = Math.max(10, video.viewCount || 10);
+    const likedChannel = ctx && ctx.likedChannels &&
+        ctx.likedChannels.has((video.channelName || "").toLowerCase()) ? 1 : 0;
+    const authority = 0.7 * Math.min(1, Math.log10(views) / 7) + 0.3 * likedChannel;
+
+    // maturity: proven beats brand-new
+    let maturity = 0.5;
+    if (video.published) {
+        const ageDays = (Date.now() - video.published) / 86400e3;
+        if (ageDays < 7) maturity = 0.3;
+        else if (ageDays < 90) maturity = 0.7;
+        else if (ageDays < 8 * 365) maturity = 1.0;
+        else maturity = 0.85;
+    }
+
+    // watchability: duration fit minus clickbait styling
+    let durFit = 0.6;
+    const d = video.duration;
+    if (typeof d === "number" && d > 0) {
+        if (d < 60) durFit = 0.15;          // Shorts
+        else if (d < 120) durFit = 0.5;
+        else if (d <= 30 * 60) durFit = 1.0;
+        else if (d <= 90 * 60) durFit = 0.7;
+        else durFit = 0.4;
+    }
+    let penalty = 0;
+    const letters = rawTitle.replace(/[^a-zA-Z]/g, "");
+    const caps = rawTitle.replace(/[^A-Z]/g, "");
+    if (letters.length > 5 && caps.length / letters.length > 0.6) penalty += 0.2;
+    if (/[!?]{2,}/.test(rawTitle) || WG_CLICKBAIT_RE.test(rawTitle)) penalty += 0.3;
+    const watchability = Math.max(0, durFit - penalty);
+
+    const score = w.intent * intent + w.authority * authority +
+        w.maturity * maturity + w.watchability * watchability;
+    return { score, breakdown: { intent, authority, maturity, watchability } };
+}
+
 function getScoreAndMatches(video) {
     if (video._score !== undefined && video._matchedTopics !== undefined) {
         return { score: video._score, matches: video._matchedTopics };
@@ -2661,12 +2883,30 @@ function getScoreAndMatches(video) {
         }
     }
     
+    // Liked-channel affinity: channels the user has actually liked videos
+    // from get a direct boost (the graph channel bonus keys on channelId,
+    // which discovery videos don't carry — this works by name).
+    const likedFromChannel = getLikedChannelAffinity().get((video.channelName || "").toLowerCase()) || 0;
+    if (likedFromChannel > 0) {
+        score += Math.min(9, 3 * likedFromChannel);
+        matches.push("liked-channel");
+    }
+
     // Add graph-learned bonus
     if (state.ontologyGraph) {
         score += graphScoreVideo(state.ontologyGraph, video);
     }
 
     // Explicit user rating override
+    const userRating = state.videoRatings ? state.videoRatings[video.id] : undefined;
+    if (userRating > 0) {
+        score += 25;
+        matches.push("user-liked");
+    } else if (userRating < 0) {
+        score -= 50;
+        matches.push("user-disliked");
+    }
+
     video._score = score;
     video._matchedTopics = matches;
     return { score, matches };
@@ -5068,7 +5308,7 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                     days_back: 0,
                     require_transcript: false,
                     stream: true,
-                    sort: "date"
+                    sort: "relevance"
                 }),
                 signal: controller.signal
             });
@@ -5653,6 +5893,123 @@ function parseModelSetting(val) {
     return { provider, model: rest.join("::")};
 }
 
+// True-recent liked videos, newest first, from the timestamped ratingStates
+// log. state.likedVideos can arrive in Mongo key order after a sync merge, so
+// slicing it was an arbitrary subset — ratingStates carries the real times.
+// Skips metadata-less sync placeholders ("Liked Video (Synced)").
+function getRecentLikedVideos(limit) {
+    const fromStates = Object.entries(state.ratingStates || {})
+        .filter(([, st]) => st && st.r === 5 && st.v && st.v.title && st.v.title !== "Liked Video (Synced)")
+        .sort((a, b) => (b[1].t || 0) - (a[1].t || 0))
+        .map(([id, st]) => ({ id, ...st.v }));
+    if (fromStates.length) return fromStates.slice(0, limit);
+    return (state.likedVideos || []).slice(-limit).reverse();
+}
+
+// ── Taste profile ────────────────────────────────────────────
+// Regenerate the LLM taste profile when likes have moved enough: 5+ new
+// likes since the last profile, or the profile is older than a week.
+async function refreshTasteProfile() {
+    const likedAll = getRecentLikedVideos(Infinity);
+    if (likedAll.length < 5) return; // not enough signal to profile yet
+    const prof = state.tasteProfile;
+    const stale = !prof ||
+        (likedAll.length - (prof.likeCount || 0)) >= 5 ||
+        (Date.now() - (prof.generatedAt || 0)) > 7 * 86400e3;
+    if (!stale) return;
+
+    try {
+        const videos = likedAll.map(v => v.channelName && v.channelName !== "YouTube Curation"
+            ? `${v.title} (${v.channelName})` : v.title).filter(Boolean);
+        const interests = state.topics.filter(t => t.weight > 0)
+            .sort((a, b) => b.weight - a.weight).slice(0, 20).map(t => t.phrase);
+        const resp = await fetch("/api/wallgarden/taste-profile", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ videos, interests }),
+            signal: AbortSignal.timeout(120000)
+        });
+        if (!resp.ok) throw new Error(`Backend returned ${resp.status}`);
+        const data = await resp.json();
+        if (data && data.profile) {
+            state.tasteProfile = {
+                text: data.profile,
+                clusters: data.clusters || [],
+                generatedAt: Date.now(),
+                likeCount: likedAll.length
+            };
+            saveTasteProfile();
+            debug(`[Taste Profile] Regenerated from ${likedAll.length} likes (${state.tasteProfile.clusters.length} clusters).`);
+        }
+    } catch (err) {
+        console.warn("[Taste Profile] Refresh failed:", err.message);
+    }
+}
+
+// Group liked videos into taste clusters so each brainstorm batch can expand
+// a DIFFERENT corner of taste. Channels with 2+ likes seed clusters; the
+// rest fold in by shared mined topics (tiny union-find over ≤ a few dozen).
+function buildLikedClusters() {
+    const likedAll = getRecentLikedVideos(Infinity);
+    if (likedAll.length < 4) return [];
+
+    const label = v => v.channelName && v.channelName !== "YouTube Curation"
+        ? `${v.title} (${v.channelName})` : v.title;
+
+    // Union-find
+    const parent = likedAll.map((_, i) => i);
+    const find = i => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+    const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; };
+
+    // Same channel -> same cluster
+    const byChannel = new Map();
+    likedAll.forEach((v, i) => {
+        const key = (v.channelName || "").toLowerCase();
+        if (!key || key === "youtube curation") return;
+        if (byChannel.has(key)) union(byChannel.get(key), i);
+        else byChannel.set(key, i);
+    });
+    // Shared mined topic -> same cluster
+    const byTopic = new Map();
+    likedAll.forEach((v, i) => {
+        const mined = (state.minedVideos || {})[v.id];
+        (mined && mined.topics || []).forEach(t => {
+            if (byTopic.has(t)) union(byTopic.get(t), i);
+            else byTopic.set(t, i);
+        });
+    });
+
+    const groups = new Map();
+    likedAll.forEach((v, i) => {
+        const root = find(i);
+        if (!groups.has(root)) groups.set(root, []);
+        groups.get(root).push(v);
+    });
+
+    // Largest clusters first, singleton leftovers pooled into a final mixed one
+    const sorted = [...groups.values()].sort((a, b) => b.length - a.length);
+    const clusters = [];
+    const leftovers = [];
+    sorted.forEach(members => {
+        if (clusters.length < 5 && members.length >= 2) {
+            // Name the cluster after its dominant mined topic, if any
+            const counts = new Map();
+            members.forEach(v => {
+                const mined = (state.minedVideos || {})[v.id];
+                (mined && mined.topics || []).forEach(t => counts.set(t, (counts.get(t) || 0) + 1));
+            });
+            const name = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+            clusters.push({ name, videos: members.slice(0, 10).map(label).filter(Boolean) });
+        } else {
+            leftovers.push(...members);
+        }
+    });
+    if (leftovers.length >= 2 && clusters.length < 6) {
+        clusters.push({ name: undefined, videos: leftovers.slice(0, 10).map(label).filter(Boolean) });
+    }
+    return clusters;
+}
+
 // Build the common context payload for brainstorm/similar calls
 function buildLlmContext() {
     const liked = state.topics.filter(t => t.weight > 0).sort((a, b) => b.weight - a.weight).slice(0, 15).map(t => t.phrase);
@@ -5670,7 +6027,7 @@ function buildLlmContext() {
     const formatVideoSignal = v => v.channelName && v.channelName !== "YouTube Curation"
         ? `${v.title} (${v.channelName})`
         : v.title;
-    const likedVideos = (state.likedVideos || []).slice(-15)
+    const likedVideos = getRecentLikedVideos(15)
         .map(formatVideoSignal).filter(Boolean);
     const watchlist = (state.queue || []).slice(-15)
         .map(formatVideoSignal).filter(Boolean);
@@ -5683,9 +6040,160 @@ function buildLlmContext() {
         searches: state.searchHistory.slice(-10),
         likedVideos: likedVideos,
         watchlist: watchlist,
+        tasteProfile: (state.tasteProfile && state.tasteProfile.text) || undefined,
+        likedClusters: buildLikedClusters(),
+        failedExamples: state.burnedQueries.slice(-10),
         model: model,
         provider: provider
     };
+}
+
+// ── Liked-video topic mining ─────────────────────────────────
+// Turns accumulated likes into topics via the backend LLM extractor, then
+// feeds every sink that was starving:
+//   1. the topic pool (mined evidence enters ABOVE brainstormed guesses),
+//   2. state.likedTopics (the graph-discovery seed, previously manual-only),
+//   3. matchedTopics on the rating record -> CO_LIKED edges in the graph
+//      (extension-synced likes used to build none),
+//   4. minedVideos marker so the whole loop is idempotent (and synced, so a
+//      second browser reuses the extraction instead of re-paying the LLM).
+const MINE_CHUNK_SIZE = 8; // ×3 topics = 24, under the 25-topic output ceiling
+let _miningInProgress = false;
+let _miningTimer = null;
+
+function scheduleMining(delayMs) {
+    if (_miningTimer) clearTimeout(_miningTimer);
+    _miningTimer = setTimeout(() => {
+        _miningTimer = null;
+        mineLikedVideosIntoTopics();
+    }, delayMs);
+}
+
+function collectUnminedLikes() {
+    return Object.entries(state.ratingStates || {})
+        .filter(([id, st]) => st && st.r === 5 && st.v && st.v.title &&
+            st.v.title !== "Liked Video (Synced)" && !(state.minedVideos || {})[id])
+        .sort((a, b) => (b[1].t || 0) - (a[1].t || 0))
+        .map(([id, st]) => ({ id, st }));
+}
+
+// Apply one extraction result to all sinks. Shared by the mining loop and the
+// sync path (remote minedVideos entries replay through here without any LLM
+// call). Returns the number of topics that actually entered the pool.
+function applyMinedTopics(videoId, ratedTopics, opts) {
+    const quiet = opts && opts.quiet;
+    let added = 0;
+    const acceptedLabels = [];
+
+    ratedTopics.forEach(rt => {
+        const phrase = normalizeTopic(rt.topic);
+        if (!phrase || isBurned(phrase)) return;
+        acceptedLabels.push(phrase);
+
+        // Sink 1: topic pool. Mined topics carry direct evidence, so they
+        // enter 2 above their brainstorm-tier weight (A=10, B=6).
+        const weight = (rt.weight || 4) + 2;
+        const existing = state.topics.find(t => normalizeTopic(t.phrase) === phrase);
+        if (!existing) {
+            state.topics.push({ phrase, weight, addedAt: Date.now() });
+            added++;
+        } else if (existing.weight > 0 && existing.weight < weight) {
+            existing.weight = weight;
+        }
+        const inQueue = state.smartFeedTopicsQueue.includes(phrase);
+        const inUsed = state.smartFeedUsedTopics.includes(phrase);
+        if (!inQueue && !inUsed) {
+            state.smartFeedTopicsQueue.push(phrase);
+        }
+
+        // Sink 2: likedTopics — revives graph-based discovery. A-tier only,
+        // capped so the seed list stays sharp.
+        if (rt.tier === "A" && !state.likedTopics.some(t => normalizeTopic(t) === phrase)) {
+            state.likedTopics.push(phrase);
+            if (state.likedTopics.length > 60) {
+                state.likedTopics = state.likedTopics.slice(-60);
+            }
+        }
+    });
+
+    // Sink 3: backfill matchedTopics on the rating record and build CO_LIKED
+    // edges. Deliberately does NOT bump st.t — a metadata enrichment must not
+    // win last-write-wins against a newer decision made elsewhere.
+    const st = state.ratingStates[videoId];
+    if (st && st.r === 5 && acceptedLabels.length > 0) {
+        const existingMatched = (st.v && st.v.matchedTopics) || [];
+        const merged = Array.from(new Set([...existingMatched, ...acceptedLabels]));
+        if (st.v) st.v.matchedTopics = merged;
+        if (state.ontologyGraph) {
+            graphProcessRating(state.ontologyGraph, { ...(st.v || {}), id: videoId, matchedTopics: acceptedLabels }, 1);
+        }
+    }
+
+    // Sink 4: idempotence marker.
+    state.minedVideos[videoId] = { t: Date.now(), topics: acceptedLabels };
+
+    if (!quiet && acceptedLabels.length > 0) {
+        debug(`[Mining] ${videoId}: ${acceptedLabels.join(", ")}`);
+    }
+    return added;
+}
+
+async function mineLikedVideosIntoTopics() {
+    if (_miningInProgress) return;
+    const unmined = collectUnminedLikes();
+    if (unmined.length === 0) return;
+    _miningInProgress = true;
+    debug(`[Mining] ${unmined.length} liked videos not yet mined — extracting topics...`);
+
+    let totalAdded = 0;
+    try {
+        for (let i = 0; i < unmined.length; i += MINE_CHUNK_SIZE) {
+            const chunk = unmined.slice(i, i + MINE_CHUNK_SIZE);
+            const payload = chunk.map(({ id, st }) => ({
+                id,
+                title: st.v.title,
+                channel: st.v.channelName || undefined,
+                durationSecs: typeof st.v.duration === "number" ? st.v.duration : undefined,
+                ageDays: st.v.published ? Math.max(0, (Date.now() - st.v.published) / 86400e3) : undefined
+            }));
+
+            const resp = await fetch("/api/wallgarden/extract-topics", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ videos: payload }),
+                signal: AbortSignal.timeout(120000)
+            });
+            if (!resp.ok) {
+                const errBody = await resp.text().catch(() => "");
+                throw new Error(`Backend returned ${resp.status}: ${errBody.substring(0, 200)}`);
+            }
+            const data = await resp.json();
+            (data.extractions || []).forEach(e => {
+                if (e && e.id && Array.isArray(e.topics)) {
+                    totalAdded += applyMinedTopics(e.id, e.topics);
+                }
+            });
+            // Chunks that came back without an extraction (LLM gave nothing
+            // usable) are left unmined so a later pass can retry them.
+        }
+
+        if (totalAdded > 0 || unmined.some(({ id }) => state.minedVideos[id])) {
+            pruneTopicPool();
+            saveTopics();
+            saveLikedTopics();
+            saveMinedVideos();
+            saveOntologyGraph();
+            persistField("rating_states", state.ratingStates);
+            invalidateScoreCache();
+            debug(`[Mining] Done: ${totalAdded} new topics entered the pool.`);
+            if (totalAdded > 0) {
+                showToast(`⛏️ Mined ${totalAdded} topics from your liked videos`, "success");
+            }
+        }
+    } catch (err) {
+        console.error("[Mining] Liked-video mining failed:", err);
+    }
+    _miningInProgress = false;
 }
 
 async function generateBrainstormTopics(append, numRequests = 1) {
@@ -5852,11 +6360,11 @@ async function generateSimilarTopicsFromSearch(searchQuery, isHighSignal = false
     }
 }
 
-// Deep-cut era buckets for classic YouTube content
-const DEEP_CUT_ERAS = ["before:2015", "before:2018", "before:2020"];
+// Qualifiers for the "depth" query form — bias toward long-form/craft content.
+const DEPTH_QUALIFIERS = ["documentary", "deep dive", "explained", "full process", "start to finish"];
 
-function getRandomDeepCutEra() {
-    return DEEP_CUT_ERAS[Math.floor(Math.random() * DEEP_CUT_ERAS.length)];
+function getRandomDepthQualifier() {
+    return DEPTH_QUALIFIERS[Math.floor(Math.random() * DEPTH_QUALIFIERS.length)];
 }
 
 // Interleave arrays round-robin for era diversity
@@ -5874,19 +6382,22 @@ function interleaveArrays(...arrays) {
 async function fetchVideosForTopic(topic) {
     let videos = [];
     let success = false;
-    const fetchCountPerRequest = 10; // 10 per era x 3 eras = 30 total
+    const fetchCountPerRequest = 10; // 10 per form x 3 forms = 30 total
     
     if (state.settings.useYtdlp) {
         try {
-            // 3-way parallel era fetching: vintage + modern + deep cut
-            const deepCutEra = getRandomDeepCutEra();
-            const vintageQuery = `${topic} before:2023`;
-            const modernQuery = `${topic} after:2022`;
-            const deepCutQuery = `${topic} ${deepCutEra}`;
-            
-            debug(`[Smart Feed Fetch] 3-way parallel for "${topic}" — vintage(before:2023) + modern(after:2022) + deep(${deepCutEra})`);
-            
-            const fetchOne = async (query, label) => {
+            // 3-way parallel fetch, three REAL query forms. (The old "era"
+            // variants used before:/after: — Google web-search operators that
+            // YouTube search ignores, so all three were the same date-sorted
+            // query with junk tokens appended.)
+            //   broad:  YouTube's own relevance ranking for the raw topic
+            //   depth:  long-form/craft slant via a qualifier word
+            //   proven: view-count sort — the enduring classics of the niche
+            const qualifier = getRandomDepthQualifier();
+
+            debug(`[Smart Feed Fetch] 3-way parallel for "${topic}" — broad(relevance) + depth(${qualifier}) + proven(views)`);
+
+            const fetchOne = async (query, sort, label) => {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 15000);
                 try {
@@ -5899,7 +6410,7 @@ async function fetchVideosForTopic(topic) {
                             limit: fetchCountPerRequest,
                             days_back: 0,
                             require_transcript: false,
-                            sort: "date"
+                            sort: sort
                         }),
                         signal: controller.signal
                     });
@@ -5917,18 +6428,18 @@ async function fetchVideosForTopic(topic) {
                 }
                 return [];
             };
-            
+
             // Fire all 3 in parallel
-            const [vintageItems, modernItems, deepItems] = await Promise.all([
-                fetchOne(vintageQuery, "vintage(before:2023)"),
-                fetchOne(modernQuery, "modern(after:2022)"),
-                fetchOne(deepCutQuery, `deep(${deepCutEra})`)
+            const [broadItems, depthItems, provenItems] = await Promise.all([
+                fetchOne(topic, "relevance", "broad(relevance)"),
+                fetchOne(`${topic} ${qualifier}`, "relevance", `depth(${qualifier})`),
+                fetchOne(topic, "views", "proven(views)")
             ]);
-            
-            // Map items to video objects, tagging with _era for reference
-            const mapItems = (items, era) => {
+
+            // Map items to video objects, tagging form + in-form rank for the scorer
+            const mapItems = (items, form) => {
                 const mapped = [];
-                items.forEach(item => {
+                items.forEach((item, idx) => {
                     if (item.video_id) {
                         mapped.push({
                             id: item.video_id,
@@ -5940,20 +6451,21 @@ async function fetchVideosForTopic(topic) {
                             viewCount: item.view_count,
                             isDiscover: true,
                             discoveryTopic: topic,
-                            _era: era
+                            _form: form,
+                            _fetchRank: idx
                         });
                     }
                 });
                 return mapped;
             };
-            
-            const vintageVideos = mapItems(vintageItems, "vintage");
-            const modernVideos = mapItems(modernItems, "modern");
-            const deepVideos = mapItems(deepItems, "deep");
-            
-            // Interleave eras round-robin for diversity (vintage1, modern1, deep1, vintage2, ...)
-            const interleaved = interleaveArrays(vintageVideos, modernVideos, deepVideos);
-            
+
+            const broadVideos = mapItems(broadItems, "broad");
+            const depthVideos = mapItems(depthItems, "depth");
+            const provenVideos = mapItems(provenItems, "proven");
+
+            // Interleave forms round-robin so dedupe treats them evenly
+            const interleaved = interleaveArrays(broadVideos, depthVideos, provenVideos);
+
             // Deduplicate by video id
             const seenIds = new Set();
             interleaved.forEach(v => {
@@ -5962,15 +6474,15 @@ async function fetchVideosForTopic(topic) {
                     videos.push(v);
                 }
             });
-            
+
             if (videos.length > 0) {
                 success = true;
-                const eraBreakdown = {
-                    vintage: videos.filter(v => v._era === "vintage").length,
-                    modern: videos.filter(v => v._era === "modern").length,
-                    deep: videos.filter(v => v._era === "deep").length
+                const formBreakdown = {
+                    broad: videos.filter(v => v._form === "broad").length,
+                    depth: videos.filter(v => v._form === "depth").length,
+                    proven: videos.filter(v => v._form === "proven").length
                 };
-                debug(`[Smart Feed Fetch] Total unique videos for "${topic}": ${videos.length} (vintage:${eraBreakdown.vintage}, modern:${eraBreakdown.modern}, deep:${eraBreakdown.deep})`);
+                debug(`[Smart Feed Fetch] Total unique videos for "${topic}": ${videos.length} (broad:${formBreakdown.broad}, depth:${formBreakdown.depth}, proven:${formBreakdown.proven})`);
             }
         } catch (err) {
             console.error(`[Smart Feed Fetch] Scraper fetch failed for "${topic}":`, err);
@@ -6029,8 +6541,13 @@ async function fetchVideosForTopic(topic) {
                                         title: title,
                                         channelName: channelName,
                                         channelId: "",
+                                        published: parseYtAgeText(vr.publishedTimeText?.simpleText),
+                                        duration: parseYtDurationText(vr.lengthText?.simpleText),
+                                        viewCount: parseYtViewsText(vr.viewCountText?.simpleText),
                                         isDiscover: true,
-                                        discoveryTopic: topic
+                                        discoveryTopic: topic,
+                                        _form: "broad",
+                                        _fetchRank: videos.length
                                     });
                                     if (videos.length >= fetchCountPerRequest) break;
                                 }
@@ -6047,7 +6564,7 @@ async function fetchVideosForTopic(topic) {
     }
     
     if (videos.length > 0) {
-        return videos.filter(v => {
+        const kept = videos.filter(v => {
             const evaluation = getScoreAndMatches(v);
             v.score = evaluation.score;
             v.matchedTopics = evaluation.matches;
@@ -6061,9 +6578,134 @@ async function fetchVideosForTopic(topic) {
 
             return !isBlockedId && !isBlockedName && !isWatched && !isDisliked && v.score > -10;
         });
+
+        // Rank best-first so the downstream per-topic cap keeps the top
+        // candidates instead of whatever arrived first. The personal keyword
+        // score contributes, clamped so one hot topic word can't drown the
+        // quality axes.
+        const likedChannels = new Set(getLikedChannelAffinity().keys());
+        kept.forEach(v => {
+            const axis = scoreDiscoveryVideo(v, { topic, likedChannels });
+            v._rankScore = axis.score * 10 + Math.max(-15, Math.min(15, v.score)) * 0.4;
+            v._rankBreakdown = axis.breakdown;
+        });
+        kept.sort((a, b) => b._rankScore - a._rankScore);
+        return kept;
     }
 
     return [];
+}
+
+// ── Grounding gate ───────────────────────────────────────────
+// Judge upcoming queue topics by their ACTUAL YouTube results before the
+// feed spends a full 3-way fetch on them. Evidence replaces guessing:
+// a topic whose top results are unrelated listicle slop gets pulled from
+// the queue; one that fronts a real niche gets a weight bump. Fail-open —
+// any error just leaves topics ungated.
+const GROUNDING_LOOKAHEAD = 5;
+let _groundingInProgress = false;
+let _groundingTimer = null;
+
+function scheduleGrounding(delayMs) {
+    if (!state.settings.groundingEnabled) return;
+    if (_groundingTimer) clearTimeout(_groundingTimer);
+    _groundingTimer = setTimeout(() => {
+        _groundingTimer = null;
+        groundNextQueuedTopics();
+    }, delayMs);
+}
+
+function applyGroundingVerdict(topic, verdict) {
+    const norm = normalizeTopic(topic);
+    const prev = state.groundingVerdicts[norm];
+    state.groundingVerdicts[norm] = { verdict, t: Date.now() };
+
+    if (verdict === "REAL") {
+        const entry = state.topics.find(t => normalizeTopic(t.phrase) === norm);
+        if (entry && entry.weight > 0) entry.weight += 2; // evidence bonus
+        return;
+    }
+    if (verdict === "SLOP" || verdict === "DEAD") {
+        state.smartFeedTopicsQueue = state.smartFeedTopicsQueue.filter(t => normalizeTopic(t) !== norm);
+        if (prev && (prev.verdict === "SLOP" || prev.verdict === "DEAD")) {
+            // Second strike: burn, which generalises the negative signal.
+            debug(`[Grounding] Second ${verdict} verdict for "${norm}" — burning.`);
+            burnTopic(norm);
+        } else {
+            // First strike: demote so pruneTopicPool decays it out.
+            const entry = state.topics.find(t => normalizeTopic(t.phrase) === norm);
+            if (entry) entry.weight = 0.5;
+            debug(`[Grounding] "${norm}" judged ${verdict} — demoted and pulled from the queue.`);
+        }
+    }
+}
+
+async function groundNextQueuedTopics() {
+    if (_groundingInProgress || !state.settings.groundingEnabled) return;
+    // Next K queue topics without a live verdict
+    const pending = state.smartFeedTopicsQueue
+        .filter(t => !state.groundingVerdicts[normalizeTopic(t)])
+        .slice(0, GROUNDING_LOOKAHEAD);
+    if (pending.length === 0) return;
+    _groundingInProgress = true;
+
+    try {
+        const items = [];
+        for (const topic of pending) {
+            // One cheap relevance search per topic — sequential, kind to yt-dlp.
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 15000);
+                const resp = await fetch("/scraper/collect", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        source: "youtube",
+                        query: topic,
+                        limit: 8,
+                        days_back: 0,
+                        require_transcript: false,
+                        sort: "relevance"
+                    }),
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+                const data = resp.ok ? await resp.json() : null;
+                const results = (data && Array.isArray(data.items)) ? data.items : [];
+                if (results.length === 0) {
+                    applyGroundingVerdict(topic, "DEAD");
+                } else {
+                    items.push({
+                        topic,
+                        titles: results.map(r => r.title).filter(Boolean).slice(0, 8),
+                        channels: [...new Set(results.map(r => r.channel).filter(Boolean))].slice(0, 8)
+                    });
+                }
+            } catch (err) {
+                debug(`[Grounding] Search failed for "${topic}" — leaving ungated.`, err.message);
+            }
+        }
+
+        if (items.length > 0) {
+            const resp = await fetch("/api/wallgarden/judge-topics", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ items }),
+                signal: AbortSignal.timeout(120000)
+            });
+            if (resp.ok) {
+                const data = await resp.json();
+                (data.verdicts || []).forEach(v => {
+                    if (v && v.topic && v.verdict) applyGroundingVerdict(v.topic, v.verdict);
+                });
+            }
+        }
+        saveGroundingVerdicts();
+        saveTopics();
+    } catch (err) {
+        console.warn("[Grounding] Gate pass failed (fail-open):", err.message);
+    }
+    _groundingInProgress = false;
 }
 
 let smartFeedPreloadTimeout = null;
@@ -6181,6 +6823,9 @@ async function fillSmartFeedPreloadBuffer() {
     
     state.smartFeedPreloadLoading = true;
     state.smartFeedUsedTopics.push(...topicsToFetch);
+
+    // Keep the grounding lookahead window full as the queue drains.
+    scheduleGrounding(5000);
     
     if (isPoolEmpty) {
         debug(`[Smart Feed Preload] Cold start — parallel fetching ${topicsToFetch.length} topics: ${topicsToFetch.join(', ')}`);

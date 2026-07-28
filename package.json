@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test": "node test/learn.test.mjs && node test/comment-filter.test.mjs",
+    "test": "node test/learn.test.mjs && node test/comment-filter.test.mjs && node test/rank.test.mjs && node test/mining.test.mjs",
     "test:smoke": ".venv/bin/python test/smoke.py",
     "test:comments": ".venv/bin/python test/comment_filter_e2e.py",
     "test:popup": ".venv/bin/python test/popup_layout_e2e.py",
