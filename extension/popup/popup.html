@@ -66,22 +66,32 @@
         </details>
 
         <!-- COMMENT FILTER -->
-        <details class="section" data-sec="comments">
-            <summary>💬 Comment Filter <span class="pill">New</span></summary>
+        <details class="section section-highlight" data-sec="comments">
+            <summary>💬 Comment Moderation &amp; Filter <span class="pill">New</span></summary>
             <div class="section-body">
-                <p class="section-desc">Hides no-substance comments &mdash; emoji-only, scam bait, self-promo, &ldquo;who&rsquo;s watching in 2026&rdquo;. Anything with likes, replies, a pin or a creator heart is never touched.</p>
+                <p class="section-desc">Auditable multi-layer moderation. Replaces toxic comments, scam bait, and deep reply noise with interactive black-box overlays while keeping DOM elements inspectable.</p>
                 <label class="toggle-container">
-                    <input type="checkbox" id="filterComments">
+                    <input type="checkbox" id="filterComments" checked>
                     <span class="toggle-slider"></span>
-                    Filter low-substance comments
+                    Enable Comment Moderation
                 </label>
                 <label class="toggle-container">
-                    <input type="checkbox" id="commentAuditMode" checked>
+                    <input type="checkbox" id="deepThreadFiltering" checked>
                     <span class="toggle-slider"></span>
-                    Audit mode &mdash; show what was filtered
+                    Deep Reply Thread Filter (Depth 3+)
                 </label>
-                <p class="section-desc">Audit mode leaves filtered comments visible and dimmed, tagged with the rule that caught them, each with a <strong>Not spam</strong> button that restores it and remembers. Nothing is ever deleted &mdash; turning the filter off brings everything back.</p>
-                <button id="clearCommentAllowlist" class="btn-small" style="width:100%;">Forget my &ldquo;not spam&rdquo; decisions</button>
+                <label class="toggle-container">
+                    <input type="checkbox" id="enableModelInference" checked>
+                    <span class="toggle-slider"></span>
+                    Toxic-BERT AI Model Scoring
+                </label>
+                <label class="toggle-container">
+                    <input type="checkbox" id="commentAuditMode">
+                    <span class="toggle-slider"></span>
+                    Audit Mode (Show dimmed outlines instead of black boxes)
+                </label>
+                <p class="section-desc">Black boxes conceal comment body text until clicked. Clicking reveals the text, detailed category scores, depth, and 1-click false-positive controls.</p>
+                <button id="clearCommentAllowlist" class="btn-small" style="width:100%;">Forget my "not spam" decisions</button>
             </div>
         </details>
 

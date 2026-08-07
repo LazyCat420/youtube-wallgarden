@@ -34,12 +34,13 @@ let settings = {
     // until you ask it to.
     collapseChat: false,
     collapseRelated: false,
-    collapseComments: false,
-    // Comment filter — hides no-substance comments in place. Off by default;
-    // audit mode defaults ON so the first thing you see when you enable it is
-    // what it is actually catching, not a silently shorter comment section.
-    filterComments: false,
-    commentAuditMode: true
+    // Comment filter — hides no-substance & toxic comments in place with blackbox overlays.
+    // Enabled by default; audit mode defaults OFF so black boxes are active out of the box.
+    filterComments: true,
+    commentAuditMode: false,
+    enableModelInference: true,
+    deepThreadFiltering: true,
+    deepThreadThreshold: 3
 };
 
 // Persistent blocklist data
@@ -1139,7 +1140,6 @@ function getCommentDepth(threadEl) {
 const COMMENT_PROTECTIONS = [
     i => !i.text && 'no text scraped',
     i => i.likes >= WG_COMMENT_LIKE_FLOOR && `${i.likes} likes`,
-    i => i.replies > 0 && 'has replies',
     i => i.pinned && 'pinned',
     i => i.hearted && 'hearted by creator',
     i => i.byOwner && 'by the channel owner',
@@ -1192,7 +1192,7 @@ const WG_COMMENT_RULES = [
     {
         id: 'lowEffort',
         label: 'Too short to say anything',
-        test: i => i.text.replace(WG_EMOJI_RE, '').trim().length < 12,
+        test: i => i.replies === 0 && i.text.replace(WG_EMOJI_RE, '').trim().length < 12,
     },
     {
         id: 'emptyComplaint',
