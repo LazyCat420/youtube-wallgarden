@@ -15,7 +15,7 @@ const SETTING_KEYS = [
     // Collapsible panels (fold away, don't delete)
     'collapseChat', 'collapseRelated', 'collapseComments',
     // Comment filter (hide in place, always reversible)
-    'filterComments', 'commentAuditMode', 'deepThreadFiltering', 'enableModelInference'
+    'filterComments', 'commentAuditMode'
 ];
 
 const TEXT_KEYS = [];
