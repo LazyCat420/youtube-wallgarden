@@ -1175,7 +1175,6 @@ function getCommentDepth(threadEl) {
  */
 const COMMENT_PROTECTIONS = [
     i => !i.text && 'no text scraped',
-    i => i.likes >= WG_COMMENT_LIKE_FLOOR && `${i.likes} likes`,
     i => i.pinned && 'pinned',
     i => i.hearted && 'hearted by creator',
     i => i.byOwner && 'by the channel owner',
@@ -1228,7 +1227,7 @@ const WG_COMMENT_RULES = [
     {
         id: 'lowEffort',
         label: 'Too short to say anything',
-        test: i => i.replies === 0 && i.text.replace(WG_EMOJI_RE, '').trim().length < 12,
+        test: i => i.replies === 0 && i.likes < WG_COMMENT_LIKE_FLOOR && i.text.replace(WG_EMOJI_RE, '').trim().length < 12,
     },
     {
         id: 'emptyComplaint',
