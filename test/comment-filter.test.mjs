@@ -143,11 +143,49 @@ assert.strictEqual(ctx.commentKey(c("hello there")), ctx.commentKey(c("hello the
 assert.notStrictEqual(ctx.commentKey(c("hello there")), ctx.commentKey(c("goodbye there")));
 assert.strictEqual(ctx.commentKey(c("x", { id: "Ugz123" })), "Ugz123", "real comment id wins over the hash");
 
+// ── Four Comment States & Model Toxicity Probabilities ─────────────────────
+const { COMMENT_STATES } = ctx;
+assert.ok(COMMENT_STATES, "COMMENT_STATES exported");
+
+// 1. Direct Threat -> BLOCKED_TOXICITY
+const threatComment = c("I will kill you if you upload again");
+const vThreat = classifyComment(threatComment, { threat: 0.85, toxicity: 0.90 });
+assert.strictEqual(vThreat.state, COMMENT_STATES.BLOCKED_TOXICITY, "threat must be BLOCKED_TOXICITY");
+assert.ok(vThreat.filtered, "threat filtered");
+
+// 2. Identity Attack -> BLOCKED_TOXICITY
+const hateComment = c("you dirty retard go away");
+const vHate = classifyComment(hateComment, { identity_hate: 0.92, toxicity: 0.95 });
+assert.strictEqual(vHate.state, COMMENT_STATES.BLOCKED_TOXICITY, "identity attack must be BLOCKED_TOXICITY");
+
+// 3. Medium confidence near threshold -> REVIEW
+const reviewComment = c("This channel is getting questionable lately");
+const vReview = classifyComment(reviewComment, { toxicity: 0.68 });
+assert.strictEqual(vReview.state, COMMENT_STATES.REVIEW, "near-threshold score must be REVIEW");
+assert.strictEqual(vReview.filtered, false, "REVIEW state remains visible");
+
+// 4. Profanity in non-hostile context -> VISIBLE
+const benignProfane = c("Holy fuck that guitar solo at 3:14 was absolutely insane!");
+const vBenign = classifyComment(benignProfane, { obscene: 0.50, toxicity: 0.25 });
+assert.strictEqual(vBenign.state, COMMENT_STATES.VISIBLE, "non-hostile profanity stays VISIBLE");
+assert.strictEqual(vBenign.filtered, false, "benign profanity not filtered");
+
+// 5. Deep-thread filtering -> BLOCKED_DEPTH
+const deepReply = c("I agree with the reply above", { depth: 3 });
+const vDeep = classifyComment(deepReply);
+assert.strictEqual(vDeep.state, COMMENT_STATES.BLOCKED_DEPTH, "depth 3+ reply must be BLOCKED_DEPTH");
+assert.strictEqual(vDeep.rule.id, "deepThread", "deep thread rule ID match");
+assert.strictEqual(vDeep.filtered, true, "deep thread filtered");
+
+// 6. Shallow reply -> VISIBLE
+const shallowReply = c("I agree with the comment above", { depth: 2 });
+const vShallow = classifyComment(shallowReply);
+assert.notStrictEqual(vShallow.state, COMMENT_STATES.BLOCKED_DEPTH, "depth < 3 reply is not BLOCKED_DEPTH");
+
 if (failures) {
   console.error(`\n✗ comment filter: ${failures} classification failure(s)`);
   process.exit(1);
 }
-console.log(`✓ comment filter: ${keep.length} keeps, ${drop.length} drops, protections + parsing + keys`);
-// content.js leaves timers/observers running in the VM context, which keeps the
-// event loop alive forever. We only test pure functions, so exit explicitly.
+console.log(`✓ comment filter: ${keep.length} keeps, ${drop.length} drops, 4 states, model probabilities, deep-thread filtering, protections + parsing + keys`);
 process.exit(0);
+
