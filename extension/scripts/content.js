@@ -1109,6 +1109,12 @@ function commentKey(info) {
     return `h${(h >>> 0).toString(36)}`;
 }
 
+const WG_TEXT_SELECTORS = '#content-text, yt-attributed-string#content-text, #comment-content #content-text, yt-formatted-string#content-text, [id="content-text"], div#content-text, #content, .yt-core-attributed-string';
+
+function getCommentTextElements(threadEl) {
+    return Array.from(threadEl.querySelectorAll(WG_TEXT_SELECTORS));
+}
+
 /**
  * Pull the fields the rules need out of a rendered comment thread.
  * Every selector has fallbacks: YouTube ships comment DOM changes regularly,
@@ -1118,10 +1124,10 @@ function commentKey(info) {
 function scrapeComment(threadEl) {
     const q = sel => threadEl.querySelector(sel);
 
-    const textEl = q('#content-text, yt-attributed-string#content-text, #comment-content #content-text');
-    const text = (textEl?.textContent || '').trim();
+    const textEls = getCommentTextElements(threadEl);
+    const text = textEls.map(e => e.textContent || '').join(' ').trim();
 
-    const authorEl = q('#author-text, #header-author #author-text, a#author-text');
+    const authorEl = q('#author-text, #header-author #author-text, a#author-text, #author-comment-badge, #authorName');
     const author = (authorEl?.textContent || '').trim();
 
     // Likes: the visible count sits in #vote-count-middle. When YouTube renders
@@ -1537,23 +1543,30 @@ function syncCommentFilterClasses() {
 /** Render Black Box Overlay over comment body without deleting original DOM content */
 function renderBlackBoxOverlay(threadEl, info, verdict) {
     let overlay = threadEl.querySelector('.wg-cf-overlay');
+    const textEls = getCommentTextElements(threadEl);
+    const primaryTextEl = textEls[0];
+
     if (!overlay) {
         overlay = document.createElement('div');
         overlay.className = 'wg-cf-overlay';
-        const textEl = threadEl.querySelector('#content-text, yt-attributed-string#content-text, #comment-content #content-text');
-        if (textEl) {
-            textEl.after(overlay);
+        if (primaryTextEl) {
+            primaryTextEl.after(overlay);
         } else {
             threadEl.prepend(overlay);
         }
     }
 
-    const textEl = threadEl.querySelector('#content-text, yt-attributed-string#content-text, #comment-content #content-text');
     let isRevealed = threadEl.classList.contains('wg-cf-revealed');
 
     const updateDisplay = () => {
         overlay.innerHTML = '';
-        if (textEl) textEl.style.display = isRevealed ? 'block' : 'none';
+        textEls.forEach(el => {
+            if (isRevealed) {
+                el.style.removeProperty('display');
+            } else {
+                el.style.setProperty('display', 'none', 'important');
+            }
+        });
 
         if (!isRevealed) {
             threadEl.classList.remove('wg-cf-revealed');
@@ -1641,7 +1654,7 @@ function renderBlackBoxOverlay(threadEl, info, verdict) {
                 commentFilterStats.falsePositives = (commentFilterStats.falsePositives || 0) + 1;
                 logModerationFeedback(info, verdict, 'false_positive');
                 clearCommentOverlay(threadEl);
-                if (textEl) textEl.style.display = 'block';
+                textEls.forEach(el => el.style.removeProperty('display'));
                 renderCommentFilterBar();
             });
 
@@ -1659,7 +1672,7 @@ function renderBlackBoxOverlay(threadEl, info, verdict) {
                 }
                 logModerationFeedback(info, verdict, 'allow_author');
                 clearCommentOverlay(threadEl);
-                if (textEl) textEl.style.display = 'block';
+                textEls.forEach(el => el.style.removeProperty('display'));
                 renderCommentFilterBar();
             });
 
@@ -1684,22 +1697,23 @@ function renderBlackBoxOverlay(threadEl, info, verdict) {
 }
 
 function renderReviewBadge(threadEl, info, verdict) {
-    const textEl = threadEl.querySelector('#content-text, yt-attributed-string#content-text, #comment-content #content-text');
-    if (textEl) textEl.style.display = 'block';
+    const textEls = getCommentTextElements(threadEl);
+    textEls.forEach(el => el.style.removeProperty('display'));
+    const primaryTextEl = textEls[0];
 
     let chip = threadEl.querySelector('.wg-cf-review-chip');
     if (!chip) {
         chip = document.createElement('div');
         chip.className = 'wg-cf-review-chip';
-        if (textEl) textEl.before(chip); else threadEl.prepend(chip);
+        if (primaryTextEl) primaryTextEl.before(chip); else threadEl.prepend(chip);
     }
     const catInfo = (verdict.reviewCategories || []).map(c => `${c.category}: ${Math.round(c.score * 100)}%`).join(', ');
     chip.textContent = `⚠ Review / uncertain score: ${catInfo || 'Near threshold'}`;
 }
 
 function clearCommentOverlay(threadEl) {
-    const textEl = threadEl.querySelector('#content-text, yt-attributed-string#content-text, #comment-content #content-text');
-    if (textEl) textEl.style.display = 'block';
+    const textEls = getCommentTextElements(threadEl);
+    textEls.forEach(el => el.style.removeProperty('display'));
     threadEl.querySelector('.wg-cf-overlay')?.remove();
     threadEl.querySelector('.wg-cf-review-chip')?.remove();
     threadEl.classList.remove('wg-cf-revealed');
