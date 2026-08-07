@@ -160,7 +160,7 @@ assert.strictEqual(vHate.state, COMMENT_STATES.BLOCKED_TOXICITY, "identity attac
 
 // 3. Medium confidence near threshold -> REVIEW
 const reviewComment = c("This channel is getting questionable lately");
-const vReview = classifyComment(reviewComment, { toxicity: 0.68 });
+const vReview = classifyComment(reviewComment, { toxicity: 0.44 });
 assert.strictEqual(vReview.state, COMMENT_STATES.REVIEW, "near-threshold score must be REVIEW");
 assert.strictEqual(vReview.filtered, false, "REVIEW state remains visible");
 

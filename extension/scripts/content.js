@@ -1267,12 +1267,12 @@ function classifyComment(info, modelScores = null, customSettings = null) {
         deepThreadFiltering: (typeof settings !== 'undefined' && settings.deepThreadFiltering !== undefined) ? settings.deepThreadFiltering : true,
         deepThreadThreshold: (typeof settings !== 'undefined' && settings.deepThreadThreshold !== undefined) ? settings.deepThreadThreshold : 3,
         categoryThresholds: (typeof settings !== 'undefined' && settings.categoryThresholds) ? settings.categoryThresholds : {
-            threat: 0.4,
-            identity_hate: 0.4,
-            severe_toxicity: 0.5,
-            insult: 0.7,
-            obscene: 0.7,
-            toxicity: 0.8,
+            threat: 0.35,
+            identity_hate: 0.35,
+            severe_toxicity: 0.45,
+            insult: 0.50,
+            obscene: 0.70,
+            toxicity: 0.50,
         },
         reviewMargin: (typeof settings !== 'undefined' && settings.reviewMargin !== undefined) ? settings.reviewMargin : 0.15,
         ...customSettings
@@ -1317,7 +1317,7 @@ function classifyComment(info, modelScores = null, customSettings = null) {
     }
 
     // 5. Toxicity model score policy check
-    const scores = modelScores || (typeof localFallbackScorer === 'function' ? localFallbackScorer(info.text) : null);
+    const scores = modelScores ? { threat: 0, identity_hate: 0, severe_toxicity: 0, insult: 0, obscene: 0, toxicity: 0, ...modelScores } : (typeof localFallbackScorer === 'function' ? localFallbackScorer(info.text) : null);
     if (scores) {
         const triggered = [];
         const reviewCategories = [];
