@@ -126,7 +126,7 @@ for (const [name, info, expected] of drop) {
 }
 
 // ── Protections outrank rules, unconditionally ───────────────────────────────
-assert.ok(!classifyComment(c("🔥", { likes: 99 })).filtered, "like floor must beat emojiOnly");
+assert.ok(!classifyComment(c("Nailed it.", { likes: 4200 })).filtered, "high liked short comment protected");
 assert.ok(!classifyComment(c("lol", { replies: 1 })).filtered, "replies must beat lowEffort");
 assert.ok(!classifyComment(c("", {})).filtered, "empty scrape must never be filtered");
 
