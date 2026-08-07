@@ -77,29 +77,59 @@ function normalizeAppState(raw) {
     };
 }
 
-// Load settings + blocklist initially
-chrome.storage.local.get(null, (data) => {
-    // One-time migration: reset blockShorts to true if it was saved as false from v6 default change
-    if (!data._v7_shorts_reset) {
-        chrome.storage.local.set({ blockShorts: true, _v7_shorts_reset: true });
-        data.blockShorts = true;
+/**
+ * Safely dispatch messages to chrome.runtime.sendMessage without throwing
+ * 'Extension context invalidated' or 'Cannot read properties of undefined'
+ * when an extension has been reloaded while a tab remains open.
+ */
+function safeSendMessage(message, callback) {
+    try {
+        if (typeof chrome !== 'undefined' && chrome.runtime?.id && typeof chrome.runtime.sendMessage === 'function') {
+            chrome.runtime.sendMessage(message, (response) => {
+                try {
+                    const err = typeof chrome !== 'undefined' && chrome.runtime?.lastError;
+                    if (err) return;
+                    if (callback) callback(response);
+                } catch (e) {
+                    // Ignore context invalidation during callback execution
+                }
+            });
+        }
+    } catch (e) {
+        // Silently swallow extension context invalidated exceptions on tab reloads
     }
-    Object.assign(settings, data);
-    if (data.blocklist) blocklist = data.blocklist;
-    if (data.wg_app_state) appState = normalizeAppState(data.wg_app_state);
-    if (Array.isArray(data.commentAllowlist)) commentAllowlist = new Set(data.commentAllowlist);
-    applyBlockingCSS();
-    syncCollapseClasses();
-    injectCollapseBars();
-    applyCommentFilterCSS();
-    syncCommentFilterClasses();
-    startObserver();
-    startMenuInterceptor();
-    startCollapseWatcher();
-    startCommentFilterWatcher();
-    startWatchButtonWatcher();
-    filterComments();
-});
+}
+
+// Load settings + blocklist initially
+try {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+        chrome.storage.local.get(null, (data) => {
+            if (typeof chrome !== 'undefined' && chrome.runtime?.lastError) return;
+            if (!data) data = {};
+            if (!data._v7_shorts_reset) {
+                try { chrome.storage.local.set({ blockShorts: true, _v7_shorts_reset: true }); } catch (e) {}
+                data.blockShorts = true;
+            }
+            Object.assign(settings, data);
+            if (data.blocklist) blocklist = data.blocklist;
+            if (data.wg_app_state) appState = normalizeAppState(data.wg_app_state);
+            if (Array.isArray(data.commentAllowlist)) commentAllowlist = new Set(data.commentAllowlist);
+            applyBlockingCSS();
+            syncCollapseClasses();
+            injectCollapseBars();
+            applyCommentFilterCSS();
+            syncCommentFilterClasses();
+            startObserver();
+            startMenuInterceptor();
+            startCollapseWatcher();
+            startCommentFilterWatcher();
+            startWatchButtonWatcher();
+            filterComments();
+        });
+    }
+} catch (e) {
+    // Ignore invalidated extension context
+}
 
 // Re-apply if settings change
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -1676,22 +1706,20 @@ function clearCommentOverlay(threadEl) {
 }
 
 function logModerationFeedback(info, verdict, feedbackType) {
-    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-        chrome.runtime.sendMessage({
-            type: 'LOG_MODERATION_EVENT',
-            event: {
-                commentKey: info.key,
-                text: info.text,
-                author: info.author,
-                depth: info.depth,
-                scores: verdict.scores || null,
-                state: verdict.state,
-                rule: verdict.rule?.id || null,
-                userFeedback: feedbackType,
-                timestamp: Date.now()
-            }
-        }).catch(() => {});
-    }
+    safeSendMessage({
+        type: 'LOG_MODERATION_EVENT',
+        event: {
+            commentKey: info.key,
+            text: info.text,
+            author: info.author,
+            depth: info.depth,
+            scores: verdict.scores || null,
+            state: verdict.state,
+            rule: verdict.rule?.id || null,
+            userFeedback: feedbackType,
+            timestamp: Date.now()
+        }
+    });
 }
 
 function applyCommentVerdict(threadEl, info, verdict) {
@@ -1792,8 +1820,8 @@ function filterComments() {
     if (!scrapeBatch.length) return;
 
     // Check async classification via background worker if runtime exists
-    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage && (typeof settings === 'undefined' || settings.enableModelInference !== false)) {
-        chrome.runtime.sendMessage({
+    if (typeof chrome !== 'undefined' && chrome.runtime?.id && (typeof settings === 'undefined' || settings.enableModelInference !== false)) {
+        safeSendMessage({
             type: 'CLASSIFY_COMMENTS',
             items: scrapeBatch.map(b => ({ id: b.info.id || b.info.key, text: b.info.text }))
         }, (res) => {
@@ -2200,24 +2228,16 @@ function sendSyncEvent(action, data = {}) {
         }
     }
     console.log(`[Wallgarden Sync] sendSyncEvent: Sending ${action} for ${videoId}`);
-    try {
-        chrome.runtime.sendMessage({
-            type: 'WALLGARDEN_SYNC',
-            data: {
-                action,
-                videoId,
-                ...data
-            }
-        }, () => {
-            if (chrome.runtime.lastError) {
-                console.warn("[Wallgarden Sync] sendMessage error callback:", chrome.runtime.lastError.message);
-            } else {
-                console.log("[Wallgarden Sync] sendMessage success");
-            }
-        });
-    } catch (e) {
-        console.error("[Wallgarden Sync] sendMessage failed with exception:", e.message);
-    }
+    safeSendMessage({
+        type: 'WALLGARDEN_SYNC',
+        data: {
+            action,
+            videoId,
+            ...data
+        }
+    }, (resp) => {
+        console.log("[Wallgarden Sync] sendMessage success");
+    });
 }
 
 function scrapeVideoMetadata() {
