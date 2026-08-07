@@ -225,5 +225,143 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // playlist picker and badge already-saved videos.
         chrome.storage.local.set({ [APP_STATE_KEY]: message.data || {} });
         sendResponse({ success: true });
+    } else if (message.type === 'CLASSIFY_COMMENTS') {
+        const items = message.items || [];
+        requestModelInference(items)
+            .then(results => sendResponse({ success: true, results }))
+            .catch(err => {
+                console.error("[Background] CLASSIFY_COMMENTS error:", err);
+                sendResponse({ success: false, error: err.message, results: {} });
+            });
+        return true;
+    } else if (message.type === 'LOG_MODERATION_EVENT') {
+        const event = message.event;
+        chrome.storage.local.get([MODERATION_FEEDBACK_KEY], (data) => {
+            const feedback = data[MODERATION_FEEDBACK_KEY] || [];
+            feedback.push({ ...event, timestamp: Date.now() });
+            chrome.storage.local.set({ [MODERATION_FEEDBACK_KEY]: feedback.slice(-500) });
+            sendResponse({ success: true });
+        });
+        return true;
     }
 });
+
+// ============================================================
+//  Comment Filter Model Classification & Cache Layer
+// ============================================================
+const COMMENT_SCORE_CACHE_KEY = "wg_comment_scores_cache";
+const MODERATION_FEEDBACK_KEY = "wg_moderation_feedback";
+const MODEL_VERSION = "toxic-bert-v1";
+const DEFAULT_INFERENCE_URL = "http://10.0.0.16:8000/v1/moderation";
+const INFERENCE_TIMEOUT_MS = 2500;
+
+/**
+ * Local fallback heuristic scorer when local AI inference server is offline/timing out.
+ * Provides basic raw category probability outputs for testing & graceful offline operation.
+ */
+function localFallbackScorer(text) {
+    const lower = text.toLowerCase();
+    let threat = 0.0, identity_hate = 0.0, severe_toxicity = 0.0, insult = 0.0, obscene = 0.0, toxicity = 0.0;
+
+    if (/\b(kill|murder|stab|die|threat|hang|gun down)\s+(you|yourself|them|him|her)\b/i.test(lower)) {
+        threat = 0.88;
+        toxicity = 0.92;
+        severe_toxicity = 0.75;
+    }
+    if (/\b(nigger|faggot|retard|chink|spic|kike|tranny)\b/i.test(lower)) {
+        identity_hate = 0.95;
+        toxicity = 0.96;
+        insult = 0.90;
+    }
+    if (/\b(stfu|fuck off|idiot|moron|dumbass|bitch|bastard|shut up|piece of shit)\b/i.test(lower)) {
+        insult = 0.82;
+        obscene = 0.78;
+        toxicity = 0.85;
+    }
+    if (/\b(fuck|shit|cunt|dick|asshole)\b/i.test(lower) && !insult) {
+        obscene = 0.70;
+        toxicity = 0.65;
+    }
+
+    return { toxicity, severe_toxicity, obscene, threat, insult, identity_hate };
+}
+
+async function requestModelInference(items) {
+    const results = {};
+    const uncached = [];
+
+    // 1. Read existing cache
+    const storageData = await chrome.storage.local.get([COMMENT_SCORE_CACHE_KEY]);
+    const cache = storageData[COMMENT_SCORE_CACHE_KEY] || {};
+
+    for (const item of items) {
+        const itemKey = item.id || item.text;
+        const cacheKey = `${MODEL_VERSION}:${itemKey.slice(0, 100)}`;
+        if (cache[cacheKey]) {
+            results[itemKey] = { ...cache[cacheKey], cached: true };
+        } else {
+            uncached.push(item);
+        }
+    }
+
+    if (uncached.length === 0) {
+        return results;
+    }
+
+    // 2. Fetch scores for uncached items from local inference service or local fallback
+    let remoteScores = null;
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), INFERENCE_TIMEOUT_MS);
+
+        const response = await fetch(DEFAULT_INFERENCE_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                model: MODEL_VERSION,
+                inputs: uncached.map(i => i.text)
+            }),
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (response.ok) {
+            const data = await response.json();
+            if (data && Array.isArray(data.results)) {
+                remoteScores = data.results;
+            }
+        }
+    } catch (e) {
+        console.warn("[Background] Remote inference offline or timed out, using safe fallback:", e.message);
+    }
+
+    // 3. Populate results & cache
+    const updatedCache = { ...cache };
+    uncached.forEach((item, index) => {
+        const key = item.id || item.text;
+        const cacheKey = `${MODEL_VERSION}:${key.slice(0, 100)}`;
+        let scores = remoteScores && remoteScores[index] ? remoteScores[index] : localFallbackScorer(item.text);
+
+        const record = {
+            scores,
+            modelVersion: MODEL_VERSION,
+            timestamp: Date.now()
+        };
+
+        results[key] = { ...record, cached: false };
+        updatedCache[cacheKey] = record;
+    });
+
+    // Prune cache if too large (> 1000 items)
+    const keys = Object.keys(updatedCache);
+    if (keys.length > 1000) {
+        const pruned = {};
+        keys.slice(-800).forEach(k => pruned[k] = updatedCache[k]);
+        await chrome.storage.local.set({ [COMMENT_SCORE_CACHE_KEY]: pruned });
+    } else {
+        await chrome.storage.local.set({ [COMMENT_SCORE_CACHE_KEY]: updatedCache });
+    }
+
+    return results;
+}
+

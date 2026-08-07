@@ -1110,9 +1110,26 @@ function scrapeComment(threadEl) {
     const permalink = q('a[href*="lc="]')?.getAttribute('href') || '';
     const id = permalink.match(/lc=([\w.\-]+)/)?.[1] || '';
 
-    const info = { text, author, likes, replies, pinned, hearted, byOwner, id };
+    const depth = getCommentDepth(threadEl);
+
+    const info = { text, author, likes, replies, pinned, hearted, byOwner, id, depth };
     info.key = commentKey(info);
     return info;
+}
+
+/** Compute comment reply depth from YouTube's rendered DOM structure. */
+function getCommentDepth(threadEl) {
+    if (!threadEl) return 0;
+    if (typeof threadEl.depth === 'number') return threadEl.depth;
+    let depth = 0;
+    let curr = threadEl.parentElement;
+    while (curr && curr !== document.body && curr !== document.documentElement) {
+        if (curr.matches && (curr.matches('#replies, ytd-comment-replies-renderer') || curr.id === 'replies')) {
+            depth += 1;
+        }
+        curr = curr.parentElement;
+    }
+    return depth;
 }
 
 /**
@@ -1146,8 +1163,6 @@ const WG_COMMENT_RULES = [
     {
         id: 'scam',
         label: 'Scam / contact bait',
-        // The dominant scam genres under finance and tutorial videos: an offer
-        // plus an off-platform contact handle.
         test: i => /\b(telegram|whats\s?app|whatsapp|t\.me\/|wa\.me\/)\b/i.test(i.text)
             || /\b(dm|message|contact|reach out to|write)\s+(me|him|her|them|us)\b.{0,40}\b(on|via|at|@)/i.test(i.text)
             || /\b(recovery (?:expert|agent|specialist)|hack(?:er|ing) (?:service|expert)|binary options|forex (?:expert|trader)|crypto (?:expert|mentor)|investment (?:mentor|manager))\b/i.test(i.text)
@@ -1171,51 +1186,146 @@ const WG_COMMENT_RULES = [
     {
         id: 'characterMash',
         label: 'Character mashing',
-        // Ordered ahead of lowEffort: both would catch "great 😂😂😂😂😂😂😂😂",
-        // but the audit bar names the FIRST matching rule, and it should report
-        // the specific reason rather than the generic one.
         test: i => /(.)\1{7,}/.test(i.text)
             || (i.text.match(WG_EMOJI_RE) || []).length >= 6,
     },
     {
         id: 'lowEffort',
         label: 'Too short to say anything',
-        // Short AND unvouched. The like floor and reply protections above have
-        // already run, so anything reaching here got zero traction too.
         test: i => i.text.replace(WG_EMOJI_RE, '').trim().length < 12,
     },
     {
         id: 'emptyComplaint',
         label: 'Complaint with no substance',
-        // The narrowest rule here on purpose, and the one most worth watching in
-        // audit mode. All three must hold: it boos, it makes no argument, and
-        // it is short. Drop any one condition and it starts eating real critique.
         test: i => WG_COMPLAINT_WORDS.test(i.text)
             && !WG_SUBSTANCE_MARKERS.test(i.text)
             && i.text.trim().split(/\s+/).length <= 7,
     },
 ];
 
+const COMMENT_STATES = {
+    VISIBLE: 'visible',
+    REVIEW: 'review',
+    BLOCKED_TOXICITY: 'blocked_toxicity',
+    BLOCKED_DEPTH: 'blocked_depth',
+};
+if (typeof globalThis !== 'undefined') globalThis.COMMENT_STATES = COMMENT_STATES;
+
 /** Comments the user has personally cleared in audit mode. Keys, not text. */
 let commentAllowlist = new Set();
-/** Per-rule hit counts for the current page, shown on the audit bar. */
+/** Per-rule and page-level hit counts shown on the audit summary bar. */
 let commentFilterStats = {};
 
 /**
- * @returns {{filtered: boolean, rule?: object, protectedBy?: string}}
+ * Layered Policy Classifier:
+ * Layer 1: Allowlist & Deterministic Rules
+ * Layer 2: Deep Thread Structural Filtering
+ * Layer 3: Creator Protections
+ * Layer 4: Toxicity Model Probabilities against Configurable Category Thresholds
+ *
+ * @returns {{filtered: boolean, state: string, rule?: object, protectedBy?: string, triggered?: array, reviewCategories?: array, scores?: object}}
  */
-function classifyComment(info) {
-    if (commentAllowlist.has(info.key)) return { filtered: false, protectedBy: 'you cleared it' };
+function classifyComment(info, modelScores = null, customSettings = null) {
+    const activeSettings = {
+        filterComments: (typeof settings !== 'undefined' && settings.filterComments !== undefined) ? settings.filterComments : true,
+        deepThreadFiltering: (typeof settings !== 'undefined' && settings.deepThreadFiltering !== undefined) ? settings.deepThreadFiltering : true,
+        deepThreadThreshold: (typeof settings !== 'undefined' && settings.deepThreadThreshold !== undefined) ? settings.deepThreadThreshold : 3,
+        categoryThresholds: (typeof settings !== 'undefined' && settings.categoryThresholds) ? settings.categoryThresholds : {
+            threat: 0.4,
+            identity_hate: 0.4,
+            severe_toxicity: 0.5,
+            insult: 0.7,
+            obscene: 0.7,
+            toxicity: 0.8,
+        },
+        reviewMargin: (typeof settings !== 'undefined' && settings.reviewMargin !== undefined) ? settings.reviewMargin : 0.15,
+        ...customSettings
+    };
+
+    // 1. Allowlist check
+    if (commentAllowlist.has(info.key) || (info.author && commentAllowlist.has(`author:${info.author}`))) {
+        return { filtered: false, state: COMMENT_STATES.VISIBLE, protectedBy: 'you cleared it' };
+    }
+
+    // 2. Creator Protections
     for (const p of COMMENT_PROTECTIONS) {
         const why = p(info);
-        if (why) return { filtered: false, protectedBy: why };
+        if (why) return { filtered: false, state: COMMENT_STATES.VISIBLE, protectedBy: why };
     }
+
+    // 3. Deterministic low-cost rules
     for (const rule of WG_COMMENT_RULES) {
         let hit = false;
         try { hit = !!rule.test(info); } catch { hit = false; }
-        if (hit) return { filtered: true, rule };
+        if (hit) {
+            return {
+                filtered: true,
+                state: COMMENT_STATES.BLOCKED_TOXICITY,
+                rule,
+                reason: rule.label,
+                confidence: 1.0
+            };
+        }
     }
-    return { filtered: false };
+
+    // 4. Deep-thread structural rule
+    if (activeSettings.deepThreadFiltering && (info.depth || 0) >= activeSettings.deepThreadThreshold) {
+        const rule = { id: 'deepThread', label: `Deep thread — depth ${info.depth}` };
+        return {
+            filtered: true,
+            state: COMMENT_STATES.BLOCKED_DEPTH,
+            rule,
+            reason: `Deep thread — depth ${info.depth}`,
+            depth: info.depth
+        };
+    }
+
+    // 5. Toxicity model score policy check
+    const scores = modelScores || (typeof localFallbackScorer === 'function' ? localFallbackScorer(info.text) : null);
+    if (scores) {
+        const triggered = [];
+        const reviewCategories = [];
+        let maxScore = 0;
+
+        for (const [cat, thresh] of Object.entries(activeSettings.categoryThresholds)) {
+            const score = scores[cat] || 0;
+            if (score > maxScore) maxScore = score;
+            if (score >= thresh) {
+                triggered.push({ category: cat, score, threshold: thresh });
+            } else if (score >= (thresh - activeSettings.reviewMargin)) {
+                reviewCategories.push({ category: cat, score, threshold: thresh });
+            }
+        }
+
+        if (triggered.length > 0) {
+            const rule = {
+                id: 'toxicity',
+                label: `Blocked by toxicity (${triggered.map(t => `${t.category}: ${Math.round(t.score * 100)}%`).join(', ')})`
+            };
+            return {
+                filtered: true,
+                state: COMMENT_STATES.BLOCKED_TOXICITY,
+                rule,
+                reason: 'Toxicity model flagged',
+                triggered,
+                scores,
+                maxScore
+            };
+        }
+
+        if (reviewCategories.length > 0) {
+            return {
+                filtered: false,
+                state: COMMENT_STATES.REVIEW,
+                reason: 'Review / near threshold',
+                reviewCategories,
+                scores,
+                maxScore
+            };
+        }
+    }
+
+    return { filtered: false, state: COMMENT_STATES.VISIBLE, scores };
 }
 
 function applyCommentFilterCSS() {
@@ -1226,46 +1336,136 @@ function applyCommentFilterCSS() {
         document.head.appendChild(el);
     }
     el.textContent = `
-        /* Filtering is CSS over a class, never a DOM removal: turning the
-           setting off restores every comment with no re-scrape. */
-        html.wg-cf-on ytd-comment-thread-renderer.wg-comment-filtered {
-            display: none !important;
+        /* Black Box Panel Overlay */
+        .wg-cf-blackbox {
+            background: #000000 !important;
+            color: #f1f1f1 !important;
+            border: 1px solid #333333 !important;
+            border-radius: 6px !important;
+            padding: 10px 14px !important;
+            margin: 6px 0 !important;
+            cursor: pointer !important;
+            min-height: 38px !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: space-between !important;
+            user-select: none !important;
+            font-family: "Roboto", Arial, sans-serif !important;
+            font-size: 12px !important;
+            box-sizing: border-box !important;
+            transition: background 0.15s ease, border-color 0.15s ease;
         }
-        /* Audit mode: show the filtered comments, marked, so false positives
-           are inspectable instead of invisible. */
-        html.wg-cf-on.wg-cf-audit ytd-comment-thread-renderer.wg-comment-filtered {
-            display: block !important;
-            opacity: 0.6;
-            outline: 1px dashed rgba(255, 138, 128, 0.7);
-            border-radius: 8px;
-            padding: 6px 8px;
-            margin: 4px 0;
+        .wg-cf-blackbox:hover {
+            background: #0d0d0d !important;
+            border-color: #555555 !important;
         }
-        html.wg-cf-on.wg-cf-audit ytd-comment-thread-renderer.wg-comment-filtered:hover {
-            opacity: 1;
-        }
-        .wg-cf-tag {
-            display: none;
+        .wg-cf-bb-left {
+            display: flex;
             align-items: center;
             gap: 8px;
-            margin-bottom: 4px;
-            font-family: "Roboto", Arial, sans-serif;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .wg-cf-bb-icon { font-size: 14px; }
+        .wg-cf-bb-title { font-weight: 500; color: #ffffff; }
+        .wg-cf-badge {
+            background: rgba(255, 255, 255, 0.12);
+            color: #d0d0d0;
+            border-radius: 999px;
+            padding: 2px 8px;
             font-size: 11px;
-            color: rgba(255, 138, 128, 0.95);
+            font-weight: 400;
         }
-        html.wg-cf-on.wg-cf-audit ytd-comment-thread-renderer.wg-comment-filtered .wg-cf-tag {
+        .wg-cf-badge-threat { background: rgba(255, 82, 82, 0.25) !important; color: #ff8a80 !important; }
+        .wg-cf-badge-depth { background: rgba(64, 196, 255, 0.25) !important; color: #80d8ff !important; }
+        .wg-cf-bb-right {
+            color: #888888;
+            font-size: 11px;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+        .wg-cf-blackbox:hover .wg-cf-bb-right { color: #ffffff; }
+
+        /* Revealed Audit Card */
+        .wg-cf-revealed-card {
+            background: rgba(255, 255, 255, 0.03) !important;
+            border: 1px dashed rgba(255, 255, 255, 0.25) !important;
+            border-radius: 8px !important;
+            padding: 8px 12px !important;
+            margin: 6px 0 !important;
+            font-family: "Roboto", Arial, sans-serif !important;
+            font-size: 11px !important;
+            color: var(--yt-spec-text-primary, #f1f1f1) !important;
+        }
+        .wg-cf-audit-meta {
             display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 6px;
+            opacity: 0.85;
+            font-size: 11px;
         }
-        .wg-cf-tag button {
-            background: rgba(255,255,255,0.1);
+        .wg-cf-audit-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 6px;
+        }
+        .wg-cf-feedback-btn {
+            background: rgba(255,255,255,0.08);
             border: 1px solid rgba(255,255,255,0.2);
             color: var(--yt-spec-text-primary, #f1f1f1);
             border-radius: 999px;
-            padding: 2px 10px;
+            padding: 3px 10px;
             font-size: 11px;
             cursor: pointer;
+            transition: background 0.15s ease;
         }
-        .wg-cf-tag button:hover { background: rgba(255,255,255,0.2); }
+        .wg-cf-feedback-btn:hover { background: rgba(255,255,255,0.2); }
+        .wg-cf-btn-fp { border-color: rgba(255, 138, 128, 0.5); color: #ff8a80; }
+        .wg-cf-btn-fp:hover { background: rgba(255, 138, 128, 0.2); }
+
+        /* Review / Uncertain score chip */
+        .wg-cf-review-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(255, 171, 0, 0.15);
+            border: 1px solid rgba(255, 171, 0, 0.4);
+            color: #ffd740;
+            border-radius: 4px;
+            padding: 3px 8px;
+            margin-bottom: 4px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+
+        /* Subtree collapse badge */
+        .wg-cf-subtree-badge {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 6px;
+            padding: 4px 10px;
+            margin: 4px 0 8px 0;
+            font-size: 11px;
+            color: #aaaaaa;
+        }
+        .wg-cf-subtree-badge button {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: #ffffff;
+            border-radius: 999px;
+            padding: 2px 8px;
+            font-size: 10px;
+            cursor: pointer;
+        }
+
+        /* Summary Bar */
         .wg-cf-bar {
             display: flex;
             align-items: center;
@@ -1304,71 +1504,318 @@ function syncCommentFilterClasses() {
     document.documentElement.classList.toggle('wg-cf-audit', !!settings.commentAuditMode);
 }
 
-/** Mark the "not spam" affordance onto a filtered comment. */
-function tagFilteredComment(threadEl, info, rule) {
-    let tag = threadEl.querySelector(':scope > .wg-cf-tag');
-    if (!tag) {
-        tag = document.createElement('div');
-        tag.className = 'wg-cf-tag';
-        threadEl.prepend(tag);
+/** Render Black Box Overlay over comment body without deleting original DOM content */
+function renderBlackBoxOverlay(threadEl, info, verdict) {
+    let overlay = threadEl.querySelector('.wg-cf-overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.className = 'wg-cf-overlay';
+        const textEl = threadEl.querySelector('#content-text, yt-attributed-string#content-text, #comment-content #content-text');
+        if (textEl) {
+            textEl.after(overlay);
+        } else {
+            threadEl.prepend(overlay);
+        }
     }
-    tag.innerHTML = '';
-    const label = document.createElement('span');
-    label.textContent = `⚑ hidden — ${rule.label}`;
-    const btn = document.createElement('button');
-    btn.textContent = 'Not spam';
-    btn.title = 'Restore this comment and remember the decision';
-    btn.addEventListener('click', e => {
-        e.preventDefault();
-        e.stopPropagation();
-        clearFilteredComment(threadEl, info);
-    });
-    tag.append(label, btn);
+
+    const textEl = threadEl.querySelector('#content-text, yt-attributed-string#content-text, #comment-content #content-text');
+    let isRevealed = threadEl.classList.contains('wg-cf-revealed');
+
+    const updateDisplay = () => {
+        overlay.innerHTML = '';
+        if (textEl) textEl.style.display = isRevealed ? 'block' : 'none';
+
+        if (!isRevealed) {
+            threadEl.classList.remove('wg-cf-revealed');
+            const blackbox = document.createElement('div');
+            blackbox.className = 'wg-cf-blackbox';
+
+            const left = document.createElement('div');
+            left.className = 'wg-cf-bb-left';
+
+            const icon = document.createElement('span');
+            icon.className = 'wg-cf-bb-icon';
+            icon.textContent = verdict.state === COMMENT_STATES.BLOCKED_DEPTH ? '💬' : '🛡️';
+
+            const title = document.createElement('span');
+            title.className = 'wg-cf-bb-title';
+            title.textContent = verdict.state === COMMENT_STATES.BLOCKED_DEPTH
+                ? `Deep thread — depth ${info.depth}`
+                : 'Filtered comment';
+
+            const badge = document.createElement('span');
+            badge.className = `wg-cf-badge ${verdict.state === COMMENT_STATES.BLOCKED_DEPTH ? 'wg-cf-badge-depth' : 'wg-cf-badge-threat'}`;
+            if (verdict.state === COMMENT_STATES.BLOCKED_DEPTH) {
+                badge.textContent = `Depth ${info.depth}`;
+            } else if (verdict.triggered && verdict.triggered.length) {
+                badge.textContent = verdict.triggered.map(t => `${t.category} ${Math.round(t.score * 100)}%`).join(' · ');
+            } else {
+                badge.textContent = verdict.rule?.label || verdict.reason || 'Filtered';
+            }
+
+            left.append(icon, title, badge);
+
+            const right = document.createElement('div');
+            right.className = 'wg-cf-bb-right';
+            right.textContent = 'Click to reveal 👁';
+
+            blackbox.append(left, right);
+            blackbox.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                isRevealed = true;
+                threadEl.classList.add('wg-cf-revealed');
+                commentFilterStats.revealed = (commentFilterStats.revealed || 0) + 1;
+                updateDisplay();
+                renderCommentFilterBar();
+            });
+
+            overlay.append(blackbox);
+        } else {
+            // Revealed state card with full audit details and 1-click feedback actions
+            const card = document.createElement('div');
+            card.className = 'wg-cf-revealed-card';
+
+            const meta = document.createElement('div');
+            meta.className = 'wg-cf-audit-meta';
+
+            const infoText = document.createElement('span');
+            infoText.textContent = `Audit: ${verdict.state === COMMENT_STATES.BLOCKED_DEPTH ? `Deep thread (depth ${info.depth})` : (verdict.rule?.label || verdict.reason)} · Model: toxic-bert-v1`;
+
+            meta.append(infoText);
+
+            const actions = document.createElement('div');
+            actions.className = 'wg-cf-audit-actions';
+
+            const btnCorrect = document.createElement('button');
+            btnCorrect.className = 'wg-cf-feedback-btn';
+            btnCorrect.textContent = '✓ Correctly filtered';
+            btnCorrect.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                btnCorrect.textContent = '✓ Saved';
+                btnCorrect.disabled = true;
+                logModerationFeedback(info, verdict, 'correct');
+            });
+
+            const btnFalsePos = document.createElement('button');
+            btnFalsePos.className = 'wg-cf-feedback-btn wg-cf-btn-fp';
+            btnFalsePos.textContent = '⚠ False positive';
+            btnFalsePos.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                commentAllowlist.add(info.key);
+                if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+                    chrome.storage.local.set({ commentAllowlist: [...commentAllowlist] });
+                }
+                commentFilterStats.falsePositives = (commentFilterStats.falsePositives || 0) + 1;
+                logModerationFeedback(info, verdict, 'false_positive');
+                clearCommentOverlay(threadEl);
+                if (textEl) textEl.style.display = 'block';
+                renderCommentFilterBar();
+            });
+
+            const btnAllowAuthor = document.createElement('button');
+            btnAllowAuthor.className = 'wg-cf-feedback-btn';
+            btnAllowAuthor.textContent = `⊘ Always allow ${info.author || 'author'}`;
+            btnAllowAuthor.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (info.author) {
+                    commentAllowlist.add(`author:${info.author}`);
+                    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+                        chrome.storage.local.set({ commentAllowlist: [...commentAllowlist] });
+                    }
+                }
+                logModerationFeedback(info, verdict, 'allow_author');
+                clearCommentOverlay(threadEl);
+                if (textEl) textEl.style.display = 'block';
+                renderCommentFilterBar();
+            });
+
+            const btnHide = document.createElement('button');
+            btnHide.className = 'wg-cf-feedback-btn';
+            btnHide.textContent = 'Hide again ✕';
+            btnHide.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                isRevealed = false;
+                threadEl.classList.remove('wg-cf-revealed');
+                updateDisplay();
+            });
+
+            actions.append(btnCorrect, btnFalsePos, btnAllowAuthor, btnHide);
+            card.append(meta, actions);
+            overlay.append(card);
+        }
+    };
+
+    updateDisplay();
 }
 
-/** User says we got it wrong: restore it and remember, across pages and sessions. */
-function clearFilteredComment(threadEl, info) {
-    commentAllowlist.add(info.key);
-    chrome.storage.local.set({ commentAllowlist: [...commentAllowlist] });
-    threadEl.classList.remove('wg-comment-filtered');
-    threadEl.querySelector(':scope > .wg-cf-tag')?.remove();
-    const rule = threadEl.dataset.wgCfRule;
-    if (rule && commentFilterStats[rule]) {
-        commentFilterStats[rule] -= 1;
-        if (!commentFilterStats[rule]) delete commentFilterStats[rule];
+function renderReviewBadge(threadEl, info, verdict) {
+    const textEl = threadEl.querySelector('#content-text, yt-attributed-string#content-text, #comment-content #content-text');
+    if (textEl) textEl.style.display = 'block';
+
+    let chip = threadEl.querySelector('.wg-cf-review-chip');
+    if (!chip) {
+        chip = document.createElement('div');
+        chip.className = 'wg-cf-review-chip';
+        if (textEl) textEl.before(chip); else threadEl.prepend(chip);
     }
-    delete threadEl.dataset.wgCfRule;
-    renderCommentFilterBar();
+    const catInfo = (verdict.reviewCategories || []).map(c => `${c.category}: ${Math.round(c.score * 100)}%`).join(', ');
+    chip.textContent = `⚠ Review / uncertain score: ${catInfo || 'Near threshold'}`;
+}
+
+function clearCommentOverlay(threadEl) {
+    const textEl = threadEl.querySelector('#content-text, yt-attributed-string#content-text, #comment-content #content-text');
+    if (textEl) textEl.style.display = 'block';
+    threadEl.querySelector('.wg-cf-overlay')?.remove();
+    threadEl.querySelector('.wg-cf-review-chip')?.remove();
+    threadEl.classList.remove('wg-cf-revealed');
+}
+
+function logModerationFeedback(info, verdict, feedbackType) {
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        chrome.runtime.sendMessage({
+            type: 'LOG_MODERATION_EVENT',
+            event: {
+                commentKey: info.key,
+                text: info.text,
+                author: info.author,
+                depth: info.depth,
+                scores: verdict.scores || null,
+                state: verdict.state,
+                rule: verdict.rule?.id || null,
+                userFeedback: feedbackType,
+                timestamp: Date.now()
+            }
+        }).catch(() => {});
+    }
+}
+
+function applyCommentVerdict(threadEl, info, verdict) {
+    commentFilterStats.scanned = (commentFilterStats.scanned || 0) + 1;
+    threadEl.dataset.wgCfState = verdict.state;
+
+    if (verdict.state === COMMENT_STATES.VISIBLE) {
+        commentFilterStats.visible = (commentFilterStats.visible || 0) + 1;
+        clearCommentOverlay(threadEl);
+        return;
+    }
+
+    if (verdict.state === COMMENT_STATES.REVIEW) {
+        commentFilterStats.visible = (commentFilterStats.visible || 0) + 1;
+        renderReviewBadge(threadEl, info, verdict);
+        return;
+    }
+
+    if (verdict.state === COMMENT_STATES.BLOCKED_TOXICITY) {
+        commentFilterStats.toxicityFiltered = (commentFilterStats.toxicityFiltered || 0) + 1;
+        const ruleId = verdict.rule?.id || 'toxicity';
+        commentFilterStats[ruleId] = (commentFilterStats[ruleId] || 0) + 1;
+        renderBlackBoxOverlay(threadEl, info, verdict);
+        return;
+    }
+
+    if (verdict.state === COMMENT_STATES.BLOCKED_DEPTH) {
+        commentFilterStats.deepThreadFiltered = (commentFilterStats.deepThreadFiltered || 0) + 1;
+        commentFilterStats['deepThread'] = (commentFilterStats['deepThread'] || 0) + 1;
+        renderBlackBoxOverlay(threadEl, info, verdict);
+        return;
+    }
+}
+
+function syncDeepThreadSubtreeCounters() {
+    const threadRenderers = document.querySelectorAll('ytd-comment-thread-renderer');
+    threadRenderers.forEach(thread => {
+        const filteredReplies = thread.querySelectorAll('.wg-cf-overlay');
+        const repliesHost = thread.querySelector('#replies, ytd-comment-replies-renderer');
+        if (!repliesHost) return;
+
+        let badge = repliesHost.querySelector(':scope > .wg-cf-subtree-badge');
+        if (filteredReplies.length > 0) {
+            if (!badge) {
+                badge = document.createElement('div');
+                badge.className = 'wg-cf-subtree-badge';
+                repliesHost.prepend(badge);
+            }
+            badge.innerHTML = '';
+            const textSpan = document.createElement('span');
+            textSpan.textContent = `💬 ${filteredReplies.length} filtered reply thread${filteredReplies.length === 1 ? '' : 's'}`;
+
+            const toggleBtn = document.createElement('button');
+            const allRevealed = Array.from(filteredReplies).every(el => el.parentElement.classList.contains('wg-cf-revealed'));
+            toggleBtn.textContent = allRevealed ? 'Hide all replies' : 'Reveal all replies';
+            toggleBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const targetState = !allRevealed;
+                filteredReplies.forEach(overlay => {
+                    const parent = overlay.parentElement;
+                    if (targetState) {
+                        parent.classList.add('wg-cf-revealed');
+                    } else {
+                        parent.classList.remove('wg-cf-revealed');
+                    }
+                    const info = parent._wgInfo || scrapeComment(parent);
+                    const verdict = classifyComment(info);
+                    renderBlackBoxOverlay(parent, info, verdict);
+                });
+                syncDeepThreadSubtreeCounters();
+            });
+
+            badge.append(textSpan, toggleBtn);
+        } else {
+            badge?.remove();
+        }
+    });
 }
 
 /**
  * Classify every comment thread not yet seen on this page.
- * Idempotent: threads carry data-wg-cf once processed. Cheap enough to run on
- * every mutation batch as YouTube lazy-loads more comments.
  */
 function filterComments() {
-    if (!settings.filterComments) return;
-    const threads = document.querySelectorAll('ytd-comment-thread-renderer:not([data-wg-cf])');
+    if (typeof settings !== 'undefined' && !settings.filterComments) return;
+    const threads = document.querySelectorAll('ytd-comment-thread-renderer:not([data-wg-cf]), ytd-comment-view-model:not([data-wg-cf]), ytd-comment-renderer:not([data-wg-cf])');
     if (!threads.length) return;
 
+    const scrapeBatch = [];
     threads.forEach(threadEl => {
         const info = scrapeComment(threadEl);
-        // No text yet means the thread is still rendering — leave it unmarked
-        // so the next mutation batch picks it up rather than passing it
-        // permanently on an empty read.
         if (!info.text) return;
         threadEl.dataset.wgCf = '1';
-
-        const verdict = classifyComment(info);
-        if (!verdict.filtered) return;
-
-        threadEl.classList.add('wg-comment-filtered');
-        threadEl.dataset.wgCfRule = verdict.rule.id;
-        commentFilterStats[verdict.rule.id] = (commentFilterStats[verdict.rule.id] || 0) + 1;
-        tagFilteredComment(threadEl, info, verdict.rule);
+        threadEl._wgInfo = info;
+        scrapeBatch.push({ threadEl, info });
     });
 
-    renderCommentFilterBar();
+    if (!scrapeBatch.length) return;
+
+    // Check async classification via background worker if runtime exists
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage && (typeof settings === 'undefined' || settings.enableModelInference !== false)) {
+        chrome.runtime.sendMessage({
+            type: 'CLASSIFY_COMMENTS',
+            items: scrapeBatch.map(b => ({ id: b.info.id || b.info.key, text: b.info.text }))
+        }, (res) => {
+            const batchScores = (res && res.success && res.results) ? res.results : {};
+            scrapeBatch.forEach(({ threadEl, info }) => {
+                const key = info.id || info.key;
+                const modelRecord = batchScores[key] || batchScores[info.text];
+                const scores = modelRecord ? modelRecord.scores : null;
+                const verdict = classifyComment(info, scores);
+                applyCommentVerdict(threadEl, info, verdict);
+            });
+            syncDeepThreadSubtreeCounters();
+            renderCommentFilterBar();
+        });
+    } else {
+        scrapeBatch.forEach(({ threadEl, info }) => {
+            const verdict = classifyComment(info);
+            applyCommentVerdict(threadEl, info, verdict);
+        });
+        syncDeepThreadSubtreeCounters();
+        renderCommentFilterBar();
+    }
 }
 
 /** Summary + audit toggle, injected at the top of the comments section. */
@@ -1376,41 +1823,42 @@ function renderCommentFilterBar() {
     const host = document.querySelector('ytd-comments#comments');
     if (!host) return;
 
-    const total = Object.values(commentFilterStats).reduce((a, b) => a + b, 0);
+    const scanned = commentFilterStats.scanned || 0;
+    const toxicityFiltered = commentFilterStats.toxicityFiltered || 0;
+    const deepThreadFiltered = commentFilterStats.deepThreadFiltered || 0;
+    const totalFiltered = toxicityFiltered + deepThreadFiltered;
+
     let bar = host.querySelector(':scope > .wg-cf-bar');
-    if (!total) {
+    if (scanned === 0 && totalFiltered === 0) {
         bar?.remove();
         return;
     }
     if (!bar) {
         bar = document.createElement('div');
         bar.className = 'wg-cf-bar';
-        // Below the collapse bar, which prepends itself to the same host.
         const collapseBar = host.querySelector(':scope > .wg-collapse-bar');
         if (collapseBar) collapseBar.after(bar); else host.prepend(bar);
     }
 
-    const auditing = !!settings.commentAuditMode;
+    const auditing = (typeof settings !== 'undefined') && !!settings.commentAuditMode;
     bar.innerHTML = '';
 
     const summary = document.createElement('span');
-    summary.textContent = `🌿 ${total} comment${total === 1 ? '' : 's'} filtered`;
+    summary.textContent = `🌿 Moderation Summary: ${totalFiltered} filtered (${toxicityFiltered} toxicity, ${deepThreadFiltered} deep thread)`;
 
     const breakdown = document.createElement('span');
     breakdown.className = 'wg-cf-breakdown';
-    breakdown.textContent = Object.entries(commentFilterStats)
-        .sort((a, b) => b[1] - a[1])
-        .map(([id, n]) => `${WG_COMMENT_RULES.find(r => r.id === id)?.label || id} ${n}`)
-        .join(' · ');
+    breakdown.textContent = `Scanned: ${scanned} · Visible: ${commentFilterStats.visible || 0} · Revealed: ${commentFilterStats.revealed || 0} · False Positives: ${commentFilterStats.falsePositives || 0}`;
 
     const btn = document.createElement('button');
-    btn.textContent = auditing ? 'Hide them' : 'Review what was filtered';
-    btn.title = auditing
-        ? 'Hide filtered comments again'
-        : 'Show every filtered comment with the rule that caught it';
+    btn.textContent = auditing ? 'Hide audit details' : 'Review audit bar';
     btn.addEventListener('click', () => {
-        settings.commentAuditMode = !settings.commentAuditMode;
-        chrome.storage.local.set({ commentAuditMode: settings.commentAuditMode });
+        if (typeof settings !== 'undefined') {
+            settings.commentAuditMode = !settings.commentAuditMode;
+            if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+                chrome.storage.local.set({ commentAuditMode: settings.commentAuditMode });
+            }
+        }
         syncCommentFilterClasses();
         renderCommentFilterBar();
     });
@@ -1422,7 +1870,7 @@ function renderCommentFilterBar() {
 function startCommentFilterWatcher() {
     let pending = null;
     const observer = new MutationObserver(() => {
-        if (!settings.filterComments) return;
+        if (typeof settings !== 'undefined' && !settings.filterComments) return;
         if (pending) return;
         pending = setTimeout(() => {
             pending = null;
@@ -1439,8 +1887,9 @@ function resetCommentFilterState() {
     document.querySelectorAll('[data-wg-cf]').forEach(el => {
         delete el.dataset.wgCf;
         delete el.dataset.wgCfRule;
-        el.classList.remove('wg-comment-filtered');
-        el.querySelector(':scope > .wg-cf-tag')?.remove();
+        delete el.dataset.wgCfState;
+        el.classList.remove('wg-comment-filtered', 'wg-cf-revealed');
+        clearCommentOverlay(el);
     });
     document.querySelector('.wg-cf-bar')?.remove();
 }
