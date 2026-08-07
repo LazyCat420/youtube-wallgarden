@@ -278,25 +278,31 @@ function localFallbackScorer(text) {
         insult = 0.90;
     }
 
-    // 3. Insults & Hostility
-    if (/\b(stfu|fuck off|idiot|moron|dumbass|bitch|bastard|shut up|piece of shit|clown|loser|ugly|nasty|garbage|trash|pathetic|liar|copium|brainrot|dumb|fool|ratio|uneducated|ignorant|scumbag|jackass|dipshit|crap|fake)\b/i.test(lower)) {
-        insult = Math.max(insult, 0.82);
-        toxicity = Math.max(toxicity, 0.85);
+    // 3. Flame-War, Bickering & Hostile Arguments
+    if (/\b(stfu|fuck off|idiot|moron|dumbass|bitch|bastard|shut up|piece of shit|clown|loser|ugly|nasty|garbage|trash|pathetic|liar|copium|brainrot|dumb|fool|ratio|uneducated|ignorant|scumbag|jackass|dipshit|crap|fake|stay mad|cope|seethe|mald|cry about it|delusional|npc|braindead|brain dead|dumbest|worst take|trash take|you'?re wrong|wrong info|shut the fuck up|fake news)\b/i.test(lower)) {
+        insult = Math.max(insult, 0.75);
+        toxicity = Math.max(toxicity, 0.78);
     }
 
-    // 4. Profanity & Obscene
+    // 4. Argumentative Back-and-Forth / Mention Bickering
+    if (/@\w+/.test(text) && /\b(wrong|disagree|false|nonsense|no u|no you|lmao|lol|bro|dude)\b/i.test(lower)) {
+        toxicity = Math.max(toxicity, 0.60);
+        insult = Math.max(insult, 0.55);
+    }
+
+    // 5. Profanity & Obscene
     if (/\b(fuck|shit|cunt|dick|asshole|motherfucker|bullshit|pussy|cock)\b/i.test(lower)) {
         obscene = Math.max(obscene, 0.75);
-        toxicity = Math.max(toxicity, 0.70);
+        toxicity = Math.max(toxicity, 0.65);
     }
 
-    // 5. Scam & Bot Spam Patterns
+    // 6. Scam & Bot Spam Patterns
     if (/\b(telegram|whatsapp|t\.me\/|wa\.me\/|crypto|forex|invest|profit|recovery expert|dm me|contact me|check out my channel|sub4sub|subscribe to|link in bio)\b/i.test(lower)) {
         toxicity = Math.max(toxicity, 0.88);
         insult = Math.max(insult, 0.50);
     }
 
-    // 6. Excessive Caps / Shouting
+    // 7. Excessive Caps / Shouting
     const letters = text.replace(/[^a-zA-Z]/g, '');
     const caps = text.replace(/[^A-Z]/g, '');
     if (letters.length >= 12 && (caps.length / letters.length) >= 0.70) {
