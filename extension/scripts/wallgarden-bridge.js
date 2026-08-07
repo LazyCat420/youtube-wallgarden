@@ -19,13 +19,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 window.addEventListener('message', (event) => {
     if (event.source !== window || !event.data || event.data.type !== 'WG_APP_STATE') return;
     try {
-        chrome.runtime.sendMessage({ type: 'WG_APP_STATE', data: event.data.data }, () => {
-            if (chrome.runtime.lastError) {
-                // Background worker may be asleep — harmless, next broadcast retries
-            }
-        });
+        if (typeof chrome !== 'undefined' && chrome.runtime?.id && typeof chrome.runtime.sendMessage === 'function') {
+            chrome.runtime.sendMessage({ type: 'WG_APP_STATE', data: event.data.data }, () => {
+                const err = typeof chrome !== 'undefined' && chrome.runtime?.lastError;
+                if (err) { /* Background worker asleep or context invalidated */ }
+            });
+        }
     } catch (e) {
-        console.warn("[Wallgarden Bridge] Failed to relay app state:", e.message);
+        // Silently swallow context invalidation exceptions on extension reload
     }
 });
 
@@ -33,20 +34,20 @@ window.addEventListener('message', (event) => {
 // Wait past window load so the app's message listener (deferred script) exists.
 function flushPendingSyncEvents() {
     try {
-        chrome.runtime.sendMessage({ type: 'WALLGARDEN_APP_READY' }, (resp) => {
-            if (chrome.runtime.lastError) {
-                console.warn("[Wallgarden Bridge] Pending flush failed:", chrome.runtime.lastError.message);
-                return;
-            }
-            const pending = (resp && resp.pending) || [];
-            if (pending.length === 0) return;
-            console.log(`[Wallgarden Bridge] Replaying ${pending.length} queued sync events`);
-            pending.forEach(ev => {
-                window.postMessage({ type: 'WG_EXT_SYNC', data: ev }, "*");
+        if (typeof chrome !== 'undefined' && chrome.runtime?.id && typeof chrome.runtime.sendMessage === 'function') {
+            chrome.runtime.sendMessage({ type: 'WALLGARDEN_APP_READY' }, (resp) => {
+                const err = typeof chrome !== 'undefined' && chrome.runtime?.lastError;
+                if (err) return;
+                const pending = (resp && resp.pending) || [];
+                if (pending.length === 0) return;
+                console.log(`[Wallgarden Bridge] Replaying ${pending.length} queued sync events`);
+                pending.forEach(ev => {
+                    window.postMessage({ type: 'WG_EXT_SYNC', data: ev }, "*");
+                });
             });
-        });
+        }
     } catch (e) {
-        console.warn("[Wallgarden Bridge] Pending flush exception:", e.message);
+        // Silently swallow context invalidation exceptions on extension reload
     }
 }
 
