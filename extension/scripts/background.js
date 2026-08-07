@@ -260,27 +260,47 @@ const INFERENCE_TIMEOUT_MS = 2500;
  * Provides basic raw category probability outputs for testing & graceful offline operation.
  */
 function localFallbackScorer(text) {
+    if (!text) return { toxicity: 0, severe_toxicity: 0, obscene: 0, threat: 0, insult: 0, identity_hate: 0 };
     const lower = text.toLowerCase();
     let threat = 0.0, identity_hate = 0.0, severe_toxicity = 0.0, insult = 0.0, obscene = 0.0, toxicity = 0.0;
 
-    if (/\b(kill|murder|stab|die|threat|hang|gun down)\s+(you|yourself|them|him|her)\b/i.test(lower)) {
+    // 1. Violent Threats
+    if (/\b(kill|murder|stab|shoot|die|threat|hang|gun down|dox|slash|beat up)\b.{0,30}\b(you|yourself|them|him|her)\b/i.test(lower) || /\b(i will|gonna) (kill|murder|stab|shoot|destroy|dox) (you|u)\b/i.test(lower)) {
         threat = 0.88;
         toxicity = 0.92;
         severe_toxicity = 0.75;
     }
-    if (/\b(nigger|faggot|retard|chink|spic|kike|tranny)\b/i.test(lower)) {
+
+    // 2. Identity Hate & Slurs
+    if (/\b(nigger|faggot|retard|chink|spic|kike|tranny|subhuman)\b/i.test(lower)) {
         identity_hate = 0.95;
         toxicity = 0.96;
         insult = 0.90;
     }
-    if (/\b(stfu|fuck off|idiot|moron|dumbass|bitch|bastard|shut up|piece of shit)\b/i.test(lower)) {
-        insult = 0.82;
-        obscene = 0.78;
-        toxicity = 0.85;
+
+    // 3. Insults & Hostility
+    if (/\b(stfu|fuck off|idiot|moron|dumbass|bitch|bastard|shut up|piece of shit|clown|loser|ugly|nasty|garbage|trash|pathetic|liar|copium|brainrot|dumb|fool|ratio|uneducated|ignorant|scumbag|jackass|dipshit|crap|fake)\b/i.test(lower)) {
+        insult = Math.max(insult, 0.82);
+        toxicity = Math.max(toxicity, 0.85);
     }
-    if (/\b(fuck|shit|cunt|dick|asshole)\b/i.test(lower) && !insult) {
-        obscene = 0.70;
-        toxicity = 0.65;
+
+    // 4. Profanity & Obscene
+    if (/\b(fuck|shit|cunt|dick|asshole|motherfucker|bullshit|pussy|cock)\b/i.test(lower)) {
+        obscene = Math.max(obscene, 0.75);
+        toxicity = Math.max(toxicity, 0.70);
+    }
+
+    // 5. Scam & Bot Spam Patterns
+    if (/\b(telegram|whatsapp|t\.me\/|wa\.me\/|crypto|forex|invest|profit|recovery expert|dm me|contact me|check out my channel|sub4sub|subscribe to|link in bio)\b/i.test(lower)) {
+        toxicity = Math.max(toxicity, 0.88);
+        insult = Math.max(insult, 0.50);
+    }
+
+    // 6. Excessive Caps / Shouting
+    const letters = text.replace(/[^a-zA-Z]/g, '');
+    const caps = text.replace(/[^A-Z]/g, '');
+    if (letters.length >= 12 && (caps.length / letters.length) >= 0.70) {
+        toxicity = Math.max(toxicity, 0.82);
     }
 
     return { toxicity, severe_toxicity, obscene, threat, insult, identity_hate };
