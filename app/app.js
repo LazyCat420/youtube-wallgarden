@@ -115,6 +115,10 @@ let state = {
     smartFeedPreloadLoading: false,
     smartFeedSuggestionPool: [],
     burnedQueries: [], // Rolling list of nuked topic queries the LLM should avoid re-suggesting
+    // Mined / defined topic retrieval policies (intent, positive facets, negative exclusions).
+    topicPolicies: {},
+    // Cached semantic candidate classifications (videoId -> { classification, reason, t }).
+    candidateClassificationCache: {},
     profiles: ["default"],
     currentProfile: "default"
 };
@@ -759,6 +763,10 @@ function loadState() {
     state.minedVideos = rawMined ? JSON.parse(rawMined) : {};
     const rawTasteProfile = getStoredItem("taste_profile");
     state.tasteProfile = rawTasteProfile ? JSON.parse(rawTasteProfile) : null;
+    const rawPolicies = getStoredItem("topic_policies");
+    state.topicPolicies = rawPolicies ? JSON.parse(rawPolicies) : {};
+    const rawClassifications = getStoredItem("candidate_classifications");
+    state.candidateClassificationCache = rawClassifications ? JSON.parse(rawClassifications) : {};
     const rawVerdicts = getStoredItem("grounding_verdicts");
     state.groundingVerdicts = rawVerdicts ? JSON.parse(rawVerdicts) : {};
     // Expire grounding verdicts after 30 days — YouTube results move.
@@ -929,6 +937,8 @@ function saveMinedVideos()    { persistField("mined_videos", state.minedVideos);
 function saveTasteProfile()   { persistField("taste_profile", state.tasteProfile); schedulePushRemoteState(); }
 function saveGroundingVerdicts() { persistField("grounding_verdicts", state.groundingVerdicts); }
 function saveDislikedTopics() { persistField("disliked_topics", state.dislikedTopics); }
+function saveTopicPolicies()  { persistField("topic_policies", state.topicPolicies); schedulePushRemoteState(); }
+function saveCandidateClassificationCache() { persistField("candidate_classifications", state.candidateClassificationCache); }
 function saveCache()          { persistField("cache", state.cache); }
 function saveVideoRatings()   { persistField("video_ratings", state.videoRatings); schedulePushRemoteState(); }
 function saveNewsRatings()    { persistField("news_ratings", state.newsSourceRatings); }
@@ -2799,34 +2809,119 @@ function getLikedChannelAffinity() {
 }
 function invalidateLikedChannelCache() { _likedChannelCache = null; }
 
-// 4-axis discovery scorer, ported from the benchmarked heuristic in
-// HTML-Notes/app/youtube_search.py (A=9.20/10 vs 9.68 for an LLM rerank).
+// Built-in starter policies for common / polysemous topics.
+const BUILTIN_TOPIC_POLICIES = {
+    "fish tanks": {
+        intent: "aquarium keeping, planted tanks, aquascaping, freshwater and marine fish husbandry",
+        includeFacets: ["aquascaping", "planted tank", "reef tank", "fishkeeping", "aquarium setup"],
+        excludeFacets: ["lego", "minecraft", "toy", "diorama", "prank", "challenge", "gummy"],
+        scope: "broad"
+    },
+    "aquariums": {
+        intent: "aquarium keeping, planted tanks, aquascaping, marine and freshwater care",
+        includeFacets: ["aquascaping", "planted aquarium", "freshwater setup", "reef husbandry"],
+        excludeFacets: ["lego", "minecraft", "toy", "diorama", "prank"],
+        scope: "broad"
+    },
+    "synthesis": {
+        intent: "audio synthesis, modular synthesizers, sound design, analog synths",
+        includeFacets: ["modular synth", "sound design", "analog synthesizer", "eurorack", "patch design"],
+        excludeFacets: ["organic chemistry", "chemical synthesis", "protein synthesis", "corporate merger", "summary"],
+        scope: "broad"
+    },
+    "restoration": {
+        intent: "antique tool, machinery, vintage electronics and furniture restoration",
+        includeFacets: ["tool restoration", "antique rescue", "machinery restoration", "woodworking rescue"],
+        excludeFacets: ["car crash", "minecraft", "roblox", "speed restoration"],
+        scope: "broad"
+    }
+};
+
+function getTopicPolicy(topic) {
+    if (!topic || typeof topic !== "string") return { phrase: "", intent: "", includeFacets: [], excludeFacets: [] };
+    const norm = normalizeTopic(topic);
+    if (state.topicPolicies && state.topicPolicies[norm]) {
+        return { phrase: topic, ...state.topicPolicies[norm] };
+    }
+    if (BUILTIN_TOPIC_POLICIES[norm]) {
+        return { phrase: topic, ...BUILTIN_TOPIC_POLICIES[norm] };
+    }
+    return {
+        phrase: topic,
+        intent: topic,
+        includeFacets: [],
+        excludeFacets: []
+    };
+}
+
+// 4-axis discovery scorer with semantic intent gating and novelty rejection.
 // Pure: reads only its arguments, so it's unit-testable in the VM harness.
-// Freshness is deliberately INVERTED vs the benchmark: this feed prizes
-// proven/vintage content, so 90d–8y scores highest and week-old uploads
-// (the slop tier that date-sorted fetching used to surface) score lowest.
 const DISCOVERY_WEIGHTS = { intent: 1.0, authority: 0.6, maturity: 0.4, watchability: 0.5 };
 const WG_CLICKBAIT_RE = /\b(you won'?t believe|gone wrong|shocking|insane|must (?:see|watch)|top \d+|life hacks?|exposed|destroyed|1 in a million)\b/i;
+const WG_NOVELTY_RE = /\b(entirely (?:from|out of) lego|made (?:of|from|out of) lego|lego build|in minecraft|minecraft (?:build|working)|roblox|giant gummy|100 layers|prank|challenge|toy diorama)\b/i;
 
 function scoreDiscoveryVideo(video, ctx) {
     const w = (ctx && ctx.weights) || DISCOVERY_WEIGHTS;
     const rawTitle = video.title || "";
     const title = rawTitle.toLowerCase();
+    const topic = (ctx && ctx.topic) || "";
+    const policy = (ctx && ctx.topicPolicy) || getTopicPolicy(topic);
 
-    // intent: token overlap with the topic + rank prior from the fetch
-    const topicTokens = ((ctx && ctx.topic) || "").toLowerCase().split(/\s+/).filter(t => t.length > 2);
-    const overlap = topicTokens.length
-        ? topicTokens.filter(t => title.includes(t)).length / topicTokens.length
-        : 0;
-    const rankPrior = Math.max(0, 1 - (video._fetchRank || 0) * 0.08);
-    const intent = 0.7 * overlap + 0.3 * rankPrior;
+    // Intent & Semantic Classification:
+    let intent = 0.5;
+    let classificationPenalty = 0;
+    const classification = video._classification || (state.candidateClassificationCache && state.candidateClassificationCache[video.id]?.classification);
 
-    // authority: log-scale views + liked-channel flag (no verified badge via yt-dlp;
-    // personal affinity is the better signal anyway)
+    if (classification === "ON_TOPIC") {
+        intent = 1.0;
+    } else if (classification === "ADJACENT") {
+        intent = 0.75;
+    } else if (classification === "NOVELTY") {
+        intent = 0.05;
+        classificationPenalty = 0.6;
+    } else if (classification === "OFF_TOPIC") {
+        intent = 0.0;
+        classificationPenalty = 0.8;
+    } else {
+        const topicTokens = topic.toLowerCase().split(/\s+/).filter(t => t.length > 2);
+        let overlap = topicTokens.length
+            ? topicTokens.filter(t => title.includes(t)).length / topicTokens.length
+            : 0;
+
+        // Boost overlap if title hits an intended positive facet
+        if (policy && Array.isArray(policy.includeFacets) && policy.includeFacets.length > 0) {
+            const hasFacet = policy.includeFacets.some(f => title.includes(f.toLowerCase()));
+            if (hasFacet) overlap = Math.min(1.0, overlap + 0.3);
+        }
+
+        // Hard negative match against excluded facets
+        if (policy && Array.isArray(policy.excludeFacets) && policy.excludeFacets.length > 0) {
+            const hasExcluded = policy.excludeFacets.some(f => title.includes(f.toLowerCase()));
+            if (hasExcluded) {
+                overlap = 0;
+                classificationPenalty += 0.7;
+            }
+        }
+
+        // Novelty pattern match for non-toy topics
+        if (WG_NOVELTY_RE.test(rawTitle)) {
+            const isToyTopic = /\b(lego|minecraft|roblox|toy|brick)\b/i.test(topic);
+            if (!isToyTopic) {
+                overlap = Math.min(overlap, 0.1);
+                classificationPenalty += 0.5;
+            }
+        }
+
+        const rankPrior = Math.max(0, 1 - (video._fetchRank || 0) * 0.08);
+        intent = Math.max(0, 0.7 * overlap + 0.3 * rankPrior - classificationPenalty * 0.5);
+    }
+
+    // authority: log-scale views (capped at 0.5) + liked-channel affinity (0.5)
+    // Views are clamped so 10M-view novelty videos cannot overcome relevance.
     const views = Math.max(10, video.viewCount || 10);
     const likedChannel = ctx && ctx.likedChannels &&
         ctx.likedChannels.has((video.channelName || "").toLowerCase()) ? 1 : 0;
-    const authority = 0.7 * Math.min(1, Math.log10(views) / 7) + 0.3 * likedChannel;
+    const authority = 0.5 * Math.min(1, Math.log10(views) / 6.5) + 0.5 * likedChannel;
 
     // maturity: proven beats brand-new
     let maturity = 0.5;
@@ -2838,7 +2933,7 @@ function scoreDiscoveryVideo(video, ctx) {
         else maturity = 0.85;
     }
 
-    // watchability: duration fit minus clickbait styling
+    // watchability: duration fit minus clickbait styling & classification penalty
     let durFit = 0.6;
     const d = video.duration;
     if (typeof d === "number" && d > 0) {
@@ -2848,7 +2943,7 @@ function scoreDiscoveryVideo(video, ctx) {
         else if (d <= 90 * 60) durFit = 0.7;
         else durFit = 0.4;
     }
-    let penalty = 0;
+    let penalty = classificationPenalty;
     const letters = rawTitle.replace(/[^a-zA-Z]/g, "");
     const caps = rawTitle.replace(/[^A-Z]/g, "");
     if (letters.length > 5 && caps.length / letters.length > 0.6) penalty += 0.2;
@@ -2857,7 +2952,7 @@ function scoreDiscoveryVideo(video, ctx) {
 
     const score = w.intent * intent + w.authority * authority +
         w.maturity * maturity + w.watchability * watchability;
-    return { score, breakdown: { intent, authority, maturity, watchability } };
+    return { score, breakdown: { intent, authority, maturity, watchability, classification: classification || "heuristic" } };
 }
 
 function getScoreAndMatches(video) {
@@ -3309,6 +3404,16 @@ function wireCardActionMenu(card, video, isSubscribed) {
                 <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
                 Remove Topic${videoTopic ? ': ' + capitalizePhrase(videoTopic) : ''}
             </button>
+            ${videoTopic ? `
+            <button data-action="exclude-niche">
+                <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
+                Exclude Niche Keywords
+            </button>
+            ` : ''}
+            <button data-action="why-seeing">
+                <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                Why Am I Seeing This?
+            </button>
             <button data-action="hide">
                 <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
                 Hide Video
@@ -3382,6 +3487,52 @@ function wireCardActionMenu(card, video, isSubscribed) {
             dropdown.remove();
             nukeDiscoverTopic(videoTopic);
         });
+
+        const btnExcludeNiche = dropdown.querySelector('[data-action="exclude-niche"]');
+        if (btnExcludeNiche) {
+            btnExcludeNiche.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                dropdown.remove();
+                if (!videoTopic) return;
+                const normTopic = normalizeTopic(videoTopic);
+                if (!state.topicPolicies) state.topicPolicies = {};
+                if (!state.topicPolicies[normTopic]) {
+                    state.topicPolicies[normTopic] = { ...getTopicPolicy(videoTopic) };
+                }
+                const policy = state.topicPolicies[normTopic];
+                if (!Array.isArray(policy.excludeFacets)) policy.excludeFacets = [];
+                
+                const topicWords = new Set(normTopic.split(/\s+/));
+                const titleWords = (video.title || "").toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(w => w.length > 2 && !TOPIC_STOPWORDS.has(w) && !topicWords.has(w));
+                const added = [];
+                titleWords.slice(0, 3).forEach(w => {
+                    if (!policy.excludeFacets.includes(w)) {
+                        policy.excludeFacets.push(w);
+                        added.push(w);
+                    }
+                });
+                saveTopicPolicies();
+                card.classList.add("fade-out-remove");
+                setTimeout(() => card.remove(), 350);
+                showToast(`Excluded niche keywords [${added.join(", ")}] for "${videoTopic}"`, "info");
+            });
+        }
+
+        const btnWhy = dropdown.querySelector('[data-action="why-seeing"]');
+        if (btnWhy) {
+            btnWhy.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                dropdown.remove();
+                const rb = video._rankBreakdown || {};
+                const sem = rb.classification || (video._classification ? video._classification : "heuristic");
+                const intent = typeof rb.intent === "number" ? rb.intent.toFixed(2) : "N/A";
+                const auth = typeof rb.authority === "number" ? rb.authority.toFixed(2) : "N/A";
+                const mat = typeof rb.maturity === "number" ? rb.maturity.toFixed(2) : "N/A";
+                const watch = typeof rb.watchability === "number" ? rb.watchability.toFixed(2) : "N/A";
+                const whyMsg = `Topic: "${videoTopic || 'feed'}" | Semantic Fit: ${sem} | Intent: ${intent}, Authority: ${auth}, Maturity: ${mat}, Watchability: ${watch}`;
+                showToast(whyMsg, "info");
+            });
+        }
         
         dropdown.querySelector('[data-action="hide"]').addEventListener("click", (ev) => {
             ev.stopPropagation();
@@ -6443,7 +6594,7 @@ async function generateSimilarTopicsFromSearch(searchQuery, isHighSignal = false
     }
 }
 
-// Qualifiers for the "depth" query form — bias toward long-form/craft content.
+// Qualifiers for the "depth" query form when topic policy has no specific facets.
 const DEPTH_QUALIFIERS = ["documentary", "deep dive", "explained", "full process", "start to finish"];
 
 function getRandomDepthQualifier() {
@@ -6462,25 +6613,97 @@ function interleaveArrays(...arrays) {
     return result;
 }
 
+/**
+ * Batched semantic classification of candidate videos via lazy-agent-service.
+ * Classifies top candidate videos as ON_TOPIC, ADJACENT, NOVELTY, or OFF_TOPIC.
+ */
+async function classifyCandidatesWithLLM(topic, candidates) {
+    if (!candidates || candidates.length === 0) return candidates;
+    if (state.settings && state.settings.semanticFilterEnabled === false) return candidates;
+
+    const policy = getTopicPolicy(topic);
+    if (!state.candidateClassificationCache) state.candidateClassificationCache = {};
+
+    const unclassified = candidates.filter(v => 
+        !v._classification && 
+        !(state.candidateClassificationCache && state.candidateClassificationCache[v.id])
+    );
+
+    if (unclassified.length > 0) {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 6000);
+            const resp = await fetch("/api/wallgarden/classify-candidates", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    topic: topic,
+                    intent: policy.intent || topic,
+                    includeFacets: policy.includeFacets || [],
+                    excludeFacets: policy.excludeFacets || [],
+                    candidates: unclassified.slice(0, 15).map(v => ({
+                        id: v.id,
+                        title: v.title,
+                        channel: v.channelName,
+                        durationSecs: v.duration
+                    }))
+                }),
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+
+            if (resp.ok) {
+                const data = await resp.json();
+                if (data && Array.isArray(data.classifications)) {
+                    data.classifications.forEach(c => {
+                        state.candidateClassificationCache[c.id] = {
+                            classification: c.classification,
+                            reason: c.reason,
+                            t: Date.now()
+                        };
+                    });
+                    saveCandidateClassificationCache();
+                }
+            }
+        } catch (err) {
+            debug(`[Semantic Classifier] /classify-candidates failed or timed out for "${topic}":`, err.message);
+        }
+    }
+
+    // Hydrate all candidates from cache
+    candidates.forEach(v => {
+        if (!v._classification && state.candidateClassificationCache && state.candidateClassificationCache[v.id]) {
+            v._classification = state.candidateClassificationCache[v.id].classification;
+            v._classificationReason = state.candidateClassificationCache[v.id].reason;
+        }
+    });
+
+    return candidates;
+}
+
 async function fetchVideosForTopic(topic) {
     let videos = [];
     let success = false;
-    const fetchCountPerRequest = 10; // 10 per form x 3 forms = 30 total
+    const fetchCountPerRequest = 10;
+    const policy = getTopicPolicy(topic);
     
     if (state.settings.useYtdlp) {
         try {
-            // 3-way parallel fetch, three REAL query forms. (The old "era"
-            // variants used before:/after: — Google web-search operators that
-            // YouTube search ignores, so all three were the same date-sorted
-            // query with junk tokens appended.)
-            //   broad:  YouTube's own relevance ranking for the raw topic
-            //   depth:  long-form/craft slant via a qualifier word
-            //   proven: view-count sort — the enduring classics of the niche
-            const qualifier = getRandomDepthQualifier();
+            // Intent-aware 3-way parallel fetch:
+            //   broad:  YouTube relevance for raw topic
+            //   facet:  positive facet query from topic policy if available, else depth qualifier
+            //   proven: view-count sort (capped at limit 5 to avoid popularity spam)
+            let depthQuery = "";
+            if (policy && Array.isArray(policy.includeFacets) && policy.includeFacets.length > 0) {
+                const facet = policy.includeFacets[Math.floor(Math.random() * policy.includeFacets.length)];
+                depthQuery = `${topic} ${facet}`;
+            } else {
+                depthQuery = `${topic} ${getRandomDepthQualifier()}`;
+            }
 
-            debug(`[Smart Feed Fetch] 3-way parallel for "${topic}" — broad(relevance) + depth(${qualifier}) + proven(views)`);
+            debug(`[Smart Feed Fetch] 3-way parallel for "${topic}" — broad(relevance) + depth(${depthQuery}) + proven(views:capped)`);
 
-            const fetchOne = async (query, sort, label) => {
+            const fetchOne = async (query, sort, label, limit = fetchCountPerRequest) => {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 15000);
                 try {
@@ -6490,7 +6713,7 @@ async function fetchVideosForTopic(topic) {
                         body: JSON.stringify({
                             source: "youtube",
                             query: query,
-                            limit: fetchCountPerRequest,
+                            limit: limit,
                             days_back: 0,
                             require_transcript: false,
                             sort: sort
@@ -6514,9 +6737,9 @@ async function fetchVideosForTopic(topic) {
 
             // Fire all 3 in parallel
             const [broadItems, depthItems, provenItems] = await Promise.all([
-                fetchOne(topic, "relevance", "broad(relevance)"),
-                fetchOne(`${topic} ${qualifier}`, "relevance", `depth(${qualifier})`),
-                fetchOne(topic, "views", "proven(views)")
+                fetchOne(topic, "relevance", "broad(relevance)", 10),
+                fetchOne(depthQuery, "relevance", `depth(${depthQuery})`, 10),
+                fetchOne(topic, "views", "proven(views:capped)", 5)
             ]);
 
             // Map items to video objects, tagging form + in-form rank for the scorer
@@ -6659,21 +6882,45 @@ async function fetchVideosForTopic(topic) {
             const isWatched = state.watchedHistory && state.watchedHistory[v.id];
             const isDisliked = state.videoRatings && state.videoRatings[v.id] < 0;
 
+            // Deterministic hard exclusion: if title matches topic's excludeFacets or novelty pattern
+            const titleLower = (v.title || "").toLowerCase();
+            const isExcludedFacet = policy.excludeFacets && policy.excludeFacets.some(f => titleLower.includes(f.toLowerCase()));
+            const isHardNovelty = WG_NOVELTY_RE.test(v.title || "") && !/\b(lego|minecraft|roblox|toy|brick)\b/i.test(topic);
+
+            if (isExcludedFacet || isHardNovelty) {
+                v._classification = "NOVELTY";
+                v._classificationReason = isExcludedFacet ? "excluded facet match" : "novelty pattern match";
+            }
+
             return !isBlockedId && !isBlockedName && !isWatched && !isDisliked && v.score > -10;
         });
 
+        // Run batched semantic classifier on top unclassified candidates (up to 15)
+        await classifyCandidatesWithLLM(topic, kept.slice(0, 15));
+
         // Rank best-first so the downstream per-topic cap keeps the top
-        // candidates instead of whatever arrived first. The personal keyword
-        // score contributes, clamped so one hot topic word can't drown the
-        // quality axes.
+        // candidates instead of whatever arrived first.
         const likedChannels = new Set(getLikedChannelAffinity().keys());
         kept.forEach(v => {
-            const axis = scoreDiscoveryVideo(v, { topic, likedChannels });
-            v._rankScore = axis.score * 10 + Math.max(-15, Math.min(15, v.score)) * 0.4;
-            v._rankBreakdown = axis.breakdown;
+            const axis = scoreDiscoveryVideo(v, { topic, topicPolicy: policy, likedChannels });
+            let semanticBonus = 0;
+            if (v._classification === "ON_TOPIC") semanticBonus = 8;
+            else if (v._classification === "ADJACENT") semanticBonus = 2;
+            else if (v._classification === "NOVELTY") semanticBonus = -30;
+            else if (v._classification === "OFF_TOPIC") semanticBonus = -40;
+
+            v._rankScore = axis.score * 10 + semanticBonus + Math.max(-15, Math.min(15, v.score)) * 0.4;
+            v._rankBreakdown = { ...axis.breakdown, classification: v._classification || "heuristic", reason: v._classificationReason };
         });
-        kept.sort((a, b) => b._rankScore - a._rankScore);
-        return kept;
+
+        // Filter out outright NOVELTY and OFF_TOPIC candidates before feed cap
+        const filteredKept = kept.filter(v => {
+            if (v._classification === "NOVELTY" || v._classification === "OFF_TOPIC") return false;
+            return v._rankScore > -5;
+        });
+
+        filteredKept.sort((a, b) => b._rankScore - a._rankScore);
+        return filteredKept;
     }
 
     return [];
