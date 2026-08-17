@@ -1328,6 +1328,20 @@ function _wgApplyRemoteFields(fields) {
             });
             persistField("rating_states", state.ratingStates);
             _wgRebuildFromRatingStates(changed);
+
+            // In-place UI update for rating buttons on already-rendered cards
+            if (changed && changed.size > 0 && typeof document !== "undefined") {
+                changed.forEach(vidId => {
+                    const rating = state.videoRatings ? state.videoRatings[vidId] : undefined;
+                    const card = document.querySelector(`.video-card[data-video-id="${vidId}"]`);
+                    if (card) {
+                        const upBtn = card.querySelector(".thumb-up");
+                        const downBtn = card.querySelector(".thumb-down");
+                        if (upBtn) upBtn.classList.toggle("active", rating === 5);
+                        if (downBtn) downBtn.classList.toggle("active", rating === -5);
+                    }
+                });
+            }
         }
         if (fields.queue) {
             if (!state.queueStates) state.queueStates = {};
@@ -1384,8 +1398,10 @@ function _wgApplyRemoteFields(fields) {
     } finally {
         _syncApplying = false;
     }
-    // Refresh whatever's on screen so merged changes appear without a reload
-    try { renderFeed(); } catch (e) { /* view may not be ready */ }
+    // Refresh views only when not in smart-feed (smart-feed reconciles in-place)
+    if (state.currentView !== "smart-feed") {
+        try { renderFeed(); } catch (e) { /* view may not be ready */ }
+    }
     try { if (typeof renderQueueUI === "function") renderQueueUI(); } catch (e) {}
     try { if (state.currentView === "liked-videos" && typeof renderLikedVideosView === "function") renderLikedVideosView(); } catch (e) {}
     try { if (state.currentView === "playlists" && typeof renderPlaylistsView === "function") renderPlaylistsView(); } catch (e) {}
@@ -3678,6 +3694,93 @@ function renderFeed() {
         return;
     }
     
+    // Handle Smart Feed (Discovery) — Reconcile non-destructively to avoid DOM thrashing & thumbnail flashes
+    if (state.currentView === "smart-feed") {
+        if (shortsGrid) shortsGrid.innerHTML = "";
+        if (shortsShelf) shortsShelf.classList.add("hidden");
+        if (redditGrid) redditGrid.innerHTML = "";
+        if (redditShelf) redditShelf.classList.add("hidden");
+
+        if (state.topics.filter(t => t.weight > 0).length === 0) {
+            grid.innerHTML = "";
+            // Show new profile CTA
+            emptyState.classList.remove("hidden");
+            const emptyIcon = emptyState.querySelector(".empty-icon");
+            const emptyH3 = emptyState.querySelector("h3");
+            const emptyP = emptyState.querySelector("p");
+            if (emptyIcon) emptyIcon.innerHTML = icon("sprout", 48);
+            if (emptyH3) emptyH3.textContent = "Welcome to your new profile!";
+            if (emptyP) emptyP.textContent = "Add your first topic in Settings (Topics & Filters) to start discovering videos.";
+            return;
+        }
+
+        let suggestionsHeader = grid.querySelector(".suggestions-section-header");
+        let suggestionsGrid = document.getElementById("suggestions-grid");
+
+        if (!suggestionsHeader || !suggestionsGrid) {
+            grid.innerHTML = "";
+            suggestionsHeader = document.createElement("div");
+            suggestionsHeader.className = "suggestions-section-header";
+            suggestionsHeader.style.gridColumn = "1 / -1";
+            suggestionsHeader.innerHTML = `
+                <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <h2 class="discover-section-title" style="font-size: 1.15rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
+                            <span>Discovery Feed</span>
+                        </h2>
+                        <span class="suggestions-badge">AI Discovery</span>
+                    </div>
+                    <span style="font-size: 0.8rem; color: var(--text-muted);">Based on your topics & interests</span>
+                </div>
+            `;
+            grid.appendChild(suggestionsHeader);
+            
+            suggestionsGrid = document.createElement("div");
+            suggestionsGrid.id = "suggestions-grid";
+            suggestionsGrid.className = "video-grid";
+            grid.appendChild(suggestionsGrid);
+        }
+
+        if (state.smartFeedVideos.length > 0) {
+            // Find existing cards currently in the DOM
+            const renderedCardMap = new Map();
+            suggestionsGrid.querySelectorAll(".video-card[data-video-id]").forEach(card => {
+                const vidId = card.getAttribute("data-video-id");
+                if (vidId) renderedCardMap.set(vidId, card);
+            });
+
+            // Target video set in state
+            const targetVideoIds = new Set(state.smartFeedVideos.map(v => v.id));
+
+            // Remove any cards that were removed from state
+            renderedCardMap.forEach((cardEl, vidId) => {
+                if (!targetVideoIds.has(vidId)) {
+                    cardEl.remove();
+                }
+            });
+
+            // Append only videos that are not yet rendered in the DOM
+            const fragment = document.createDocumentFragment();
+            state.smartFeedVideos.forEach(video => {
+                if (!renderedCardMap.has(video.id)) {
+                    renderCard(video, fragment);
+                }
+            });
+            if (fragment.childNodes && fragment.childNodes.length > 0) {
+                suggestionsGrid.appendChild(fragment);
+            }
+        } else {
+            loadNextSmartFeedBatch();
+        }
+        
+        if (state.smartFeedVideos.length === 0 && !state.smartFeedLoading) {
+            emptyState.classList.remove("hidden");
+        } else {
+            emptyState.classList.add("hidden");
+        }
+        return;
+    }
+
     grid.innerHTML = "";
     shortsGrid.innerHTML = "";
     shortsShelf.classList.add("hidden");
@@ -3993,74 +4096,6 @@ function renderFeed() {
         return;
     }
     
-
-
-    // Handle Smart Feed (Discovery)
-    if (state.currentView === "smart-feed") {
-        if (state.topics.filter(t => t.weight > 0).length === 0) {
-            // Show new profile CTA
-            emptyState.classList.remove("hidden");
-            const emptyIcon = emptyState.querySelector(".empty-icon");
-            const emptyH3 = emptyState.querySelector("h3");
-            const emptyP = emptyState.querySelector("p");
-            if (emptyIcon) emptyIcon.innerHTML = icon("sprout", 48);
-            if (emptyH3) emptyH3.textContent = "Welcome to your new profile!";
-            if (emptyP) emptyP.textContent = "Add your first topic in Settings (Topics & Filters) to start discovering videos.";
-            
-            // Hide shelves
-            if (shortsShelf) shortsShelf.classList.add("hidden");
-            if (redditShelf) redditShelf.classList.add("hidden");
-            return;
-        }
-
-        const suggestionsHeader = document.createElement("div");
-        suggestionsHeader.className = "suggestions-section-header";
-        suggestionsHeader.style.gridColumn = "1 / -1";
-        suggestionsHeader.innerHTML = `
-            <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
-                <div style="display: flex; align-items: center; gap: 0.5rem;">
-                    <h2 class="discover-section-title" style="font-size: 1.15rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 0.5rem;">
-                        <span>Discovery Feed</span>
-                    </h2>
-                    <span class="suggestions-badge">AI Discovery</span>
-                </div>
-                <span style="font-size: 0.8rem; color: var(--text-muted);">Based on your topics & interests</span>
-            </div>
-        `;
-        grid.appendChild(suggestionsHeader);
-        
-        const suggestionsGrid = document.createElement("div");
-        suggestionsGrid.id = "suggestions-grid";
-        suggestionsGrid.className = "video-grid";
-        grid.appendChild(suggestionsGrid);
-        
-        if (state.smartFeedVideos.length > 0) {
-            state.smartFeedVideos.sort((a, b) => {
-                if (state.settings.discoverySortOrder === "date") {
-                    return (b.published || 0) - (a.published || 0);
-                } else {
-                    const scoreA = a.score !== undefined ? a.score : getScoreAndMatches(a).score;
-                    const scoreB = b.score !== undefined ? b.score : getScoreAndMatches(b).score;
-                    return scoreB - scoreA;
-                }
-            });
-            
-            const fragment = document.createDocumentFragment();
-            state.smartFeedVideos.forEach(video => {
-                renderCard(video, fragment);
-            });
-            suggestionsGrid.appendChild(fragment);
-        } else {
-            loadNextSmartFeedBatch();
-        }
-        
-        if (state.smartFeedVideos.length === 0 && !state.smartFeedLoading) {
-            emptyState.classList.remove("hidden");
-        } else {
-            emptyState.classList.add("hidden");
-        }
-        return;
-    }
     
     // Handle Search View (when state.currentView starts with "search_")
     if (state.currentView.startsWith("search_")) {
@@ -7304,23 +7339,40 @@ async function loadNextSmartFeedBatch() {
     
     // Fallback if buffer is empty
     let skeletonsAdded = false;
-    if (suggestionsGrid.querySelectorAll(".skeleton-card").length === 0) {
-        const fragment = document.createDocumentFragment();
-        for (let i = 0; i < 12; i++) {
-            const skeleton = document.createElement("div");
-            skeleton.className = "video-card skeleton-card";
-            skeleton.innerHTML = `
-                <div class="skeleton-thumbnail"></div>
-                <div class="skeleton-details">
-                    <div class="skeleton-text title" style="width: 90%;"></div>
-                    <div class="skeleton-text title" style="width: 70%;"></div>
-                    <div class="skeleton-text meta" style="width: 40%; margin-top: 1rem;"></div>
-                </div>
-            `;
-            fragment.appendChild(skeleton);
+    let scrollLoader = null;
+    if (state.smartFeedVideos.length === 0) {
+        if (suggestionsGrid.querySelectorAll(".skeleton-card").length === 0) {
+            const fragment = document.createDocumentFragment();
+            for (let i = 0; i < 12; i++) {
+                const skeleton = document.createElement("div");
+                skeleton.className = "video-card skeleton-card";
+                skeleton.innerHTML = `
+                    <div class="skeleton-thumbnail"></div>
+                    <div class="skeleton-details">
+                        <div class="skeleton-text title" style="width: 90%;"></div>
+                        <div class="skeleton-text title" style="width: 70%;"></div>
+                        <div class="skeleton-text meta" style="width: 40%; margin-top: 1rem;"></div>
+                    </div>
+                `;
+                fragment.appendChild(skeleton);
+            }
+            suggestionsGrid.appendChild(fragment);
+            skeletonsAdded = true;
         }
-        suggestionsGrid.appendChild(fragment);
-        skeletonsAdded = true;
+    } else {
+        const parentContainer = suggestionsGrid.parentNode || suggestionsGrid;
+        scrollLoader = document.getElementById("smart-feed-scroll-loader");
+        if (!scrollLoader) {
+            scrollLoader = document.createElement("div");
+            scrollLoader.id = "smart-feed-scroll-loader";
+            scrollLoader.className = "infinite-scroll-loader";
+            scrollLoader.innerHTML = `<div class="loader-spinner"></div><p>Discovering more videos...</p>`;
+            if (suggestionsGrid.nextSibling) {
+                parentContainer.insertBefore(scrollLoader, suggestionsGrid.nextSibling);
+            } else {
+                parentContainer.appendChild(scrollLoader);
+            }
+        }
     }
     
     if (state.smartFeedTopicsQueue.length === 0) {
@@ -7336,6 +7388,9 @@ async function loadNextSmartFeedBatch() {
     const topic = state.smartFeedTopicsQueue.shift();
     if (!topic) {
         suggestionsGrid.querySelectorAll(".skeleton-card").forEach(el => el.remove());
+        if (scrollLoader) scrollLoader.remove();
+        const existingLoader = document.getElementById("smart-feed-scroll-loader");
+        if (existingLoader) existingLoader.remove();
         state.smartFeedLoading = false;
         return;
     }
@@ -7378,6 +7433,9 @@ async function loadNextSmartFeedBatch() {
         console.error(`[Smart Feed] Fallback fetch failed for "${topic}":`, err);
     } finally {
         suggestionsGrid.querySelectorAll(".skeleton-card").forEach(el => el.remove());
+        if (scrollLoader) scrollLoader.remove();
+        const existingLoader = document.getElementById("smart-feed-scroll-loader");
+        if (existingLoader) existingLoader.remove();
         
         state.smartFeedLoading = false;
         updateStatusText("Ready");
