@@ -314,8 +314,8 @@
     </style>
 
     <!-- Non-blocking full CSS via preload pattern -->
-    <link rel="preload" href="app.min.css?v=20260816-v59" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="app.min.css?v=20260816-v59"></noscript>
+    <link rel="preload" href="app.min.css?v=20260822-v60" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="app.min.css?v=20260822-v60"></noscript>
 </head>
 <body>
     <div class="app-layout">
@@ -739,7 +739,7 @@
 
                     <div class="topic-editor-container" style="margin-bottom: 2rem;">
                         <h3>LLM Configuration</h3>
-                        <p class="form-hint form-hint-block">Select which vLLM box and model to use for brainstorming topics. Models are auto-discovered from your local vLLM instances.</p>
+                        <p class="form-hint form-hint-block">Wallgarden is pinned to the Jetson (10.0.0.30) &mdash; the model below is auto-discovered from that box and is the only one offered. Topic work deliberately stays off the shared Gold Spark.</p>
                         <div class="form-group">
                             <label for="select-llm-model" style="display: block; margin-bottom: 0.25rem;">vLLM Box / Model <button id="btn-refresh-models" class="btn btn-secondary btn-sm" style="margin-left: 0.5rem; padding: 0.1rem 0.4rem; font-size: 0.7rem;">Refresh</button></label>
                             <select id="select-llm-model" class="input-field input-field-full">
@@ -900,8 +900,8 @@
         </div>
     </div>
 
-    <script src="ontology.js?v=20260816-v59" defer></script>
-    <script src="ontologyRenderer.js?v=20260816-v59" defer></script>
-    <script src="app.min.js?v=20260816-v59" defer></script>
+    <script src="ontology.js?v=20260822-v60" defer></script>
+    <script src="ontologyRenderer.js?v=20260822-v60" defer></script>
+    <script src="app.min.js?v=20260822-v60" defer></script>
 </body>
 </html>

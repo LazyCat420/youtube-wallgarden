@@ -6119,6 +6119,25 @@ async function fetchWallgardenModels() {
 // Keep backward-compatible alias
 const fetchPrismModels = fetchWallgardenModels;
 
+// ── Jetson pin ───────────────────────────────────────────────
+// Every wallgarden LLM call runs on the Jetson (10.0.0.30:8000). Gold Spark is
+// deliberately not used. The backend enforces this and ignores any client hint
+// to the contrary; this constant exists for the one path that bypasses the
+// backend (the direct /prism/chat channel recommendation below).
+//
+// Kept in sync with EXPECTED_JETSON_MODEL in lazy-agent-service
+// src/services/wallgarden/WallgardenService.ts.
+const JETSON_PIN = { provider: "vllm", model: "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit" };
+
+// Prefer whatever the backend actually reports for the Jetson (it discovers the
+// live model from /v1/models, so a re-provisioned box heals itself); fall back
+// to the pinned constant before the model list has loaded.
+function getPinnedModel() {
+    const { provider, model } = parseModelSetting(state.settings.llmModel);
+    if (provider === JETSON_PIN.provider && model) return { provider, model };
+    return { ...JETSON_PIN };
+}
+
 // Parse provider::model from settings value
 function parseModelSetting(val) {
     if (!val || !val.includes("::")) return { provider: null, model: null };
@@ -7840,17 +7859,27 @@ async function generateDiscoverChannels(force = false) {
                 { role: "user", content: `I like these channels: [${subscribedNames}]. Suggest 5 other high-quality YouTube channels.` }
             ];
             
-            const { provider, model } = parseModelSetting(state.settings.llmModel);
+            // This is the ONE call that skips the wallgarden backend and hits
+            // prism directly, so the Jetson pin has to be repeated here.
+            // Sending the saved dropdown value would resurrect the old bug on
+            // any tab whose localStorage still holds a Gold Spark selection.
+            const { provider, model } = getPinnedModel();
 
             const resp = await fetch("/prism/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    model: model || "default-model",
-                    provider: provider || undefined,
+                    model: model,
+                    provider: provider,
                     messages: messages,
                     temperature: 0.2,
-                    max_tokens: 1000
+                    // camelCase — prism /chat silently DROPS snake_case
+                    // max_tokens, so the old cap here was never applied.
+                    maxTokens: 1000,
+                    // Qwen3.6 reasons by default and puts everything in a
+                    // separate `reasoning` field, leaving content empty.
+                    thinkingEnabled: false,
+                    skipConversation: true
                 })
             });
             
