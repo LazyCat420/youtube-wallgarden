@@ -115,6 +115,12 @@ let state = {
     smartFeedPreloadLoading: false,
     smartFeedSuggestionPool: [],
     burnedQueries: [], // Rolling list of nuked topic queries the LLM should avoid re-suggesting
+    // ── Signal ledger + agent work queue (see plan/signal_gated_topics.md) ──
+    // Browsing no longer generates topics. Interest is COUNTED here, and only a
+    // count crossing its threshold enqueues work for the agent.
+    topicSignals: {},   // { [topic]: { t, c: { [clientId]: {imp,open,play} }, f: {imp,open,play} } }
+    agentQueue: [],     // [{ type, key, payload, addedAt }] — the "checklist"
+    llmCallStats: {},   // { [endpoint]: { n, lastAt } } — the before/after number
     // Mined / defined topic retrieval policies (intent, positive facets, negative exclusions).
     topicPolicies: {},
     // Cached semantic candidate classifications (videoId -> { classification, reason, t }).
@@ -230,18 +236,29 @@ document.addEventListener("DOMContentLoaded", () => {
     // Unconditionally auto-sync feeds when the page is loaded/refreshed
     syncFeeds();
 
-    // Run background brainstorm topics on load to populate the feed and hit vLLM (if positive topics exist)
-    setTimeout(() => {
-        if (state.topics.filter(t => t.weight > 0).length > 0) {
-            debug("[Smart Feed] Launch brainstorm started...");
-            generateBrainstormTopics(true, 1); // Appends new topics with 1 request
-        }
-    }, 1000);
+    // One-time cleanup of the pool the old runaway loop filled. Runs before
+    // anything reads state.topics for a request.
+    purgeUnearnedTopics();
+
+    // NO launch brainstorm. Opening the dashboard is not a request for 100 new
+    // topics; the pool that exists is served, and the queue refills it only
+    // when a signal earns it.
 
     // Mine any not-yet-extracted likes into topics. 8s puts this after the
     // first cross-browser sync pull has merged remote likes in; idempotent
-    // via state.minedVideos, so running on every load is fine.
-    setTimeout(() => mineLikedVideosIntoTopics(), 8000);
+    // via state.minedVideos, so running on every load is fine. This is the one
+    // load-time LLM call that survives: it converts likes the user already gave
+    // us, rather than inventing new topics.
+    setTimeout(() => {
+        if (collectUnminedLikes().length) enqueueAgentJob("mine_likes", "likes", {});
+    }, 8000);
+
+    // The checklist drains only while the user is idle.
+    ["scroll", "click", "keydown", "mousemove", "touchstart"].forEach(evt =>
+        window.addEventListener(evt, markUserActivity, { passive: true })
+    );
+    setInterval(maybeFlushAgentQueue, 5000);
+    updateAgentQueueBadge();
 
     // Regenerate the taste profile if likes moved enough since the last one.
     setTimeout(() => refreshTasteProfile(), 12000);
@@ -738,6 +755,9 @@ function loadState() {
         state.settings.llmModel = "";
     }
     state.searchHistory = rawSearchHistory ? JSON.parse(rawSearchHistory) : [];
+    state.topicSignals = JSON.parse(getStoredItem("topic_signals") || "{}");
+    state.agentQueue = JSON.parse(getStoredItem("agent_queue") || "[]");
+    state.llmCallStats = JSON.parse(getStoredItem("llm_call_stats") || "{}");
     state.brainstormTopics = rawBrainstorm ? JSON.parse(rawBrainstorm) : [];
     state.videoRatings = rawVideoRatings ? JSON.parse(rawVideoRatings) : {};
     const rawRatingStates = getStoredItem("rating_states");
@@ -931,6 +951,273 @@ function saveChannels() {
     document.getElementById("subscribed-count").textContent = state.channels.length;
 }
 
+// ── One-time migration: drop what the runaway loop invented ─────────
+//
+// The old /similar path added its results at weight 2, and — called from
+// playVideo — added the raw video TITLE as a "topic" at weight 2 as well. Those
+// entries never represented a choice the user made. Anything the user actually
+// earned is kept: mined-from-a-like (10/6), hand-added, tier-A brainstormed (8),
+// and every negative weight (a burn is a decision too).
+const TOPIC_PURGE_VERSION = 1;
+
+function looksLikeVideoTitle(phrase) {
+    // Real topics are 1-4 words by prompt contract; video titles are longer and
+    // carry title-case punctuation the topic vocabulary never uses.
+    return phrase.split(/\s+/).length > 5 || /[|\[\]()!?"'#]/.test(phrase);
+}
+
+function purgeUnearnedTopics() {
+    // getStoredItem is scoped INSIDE loadState — read through the same profile
+    // key helper persistField uses instead.
+    const done = Number(JSON.parse(localStorage.getItem(getProfileKey("topic_purge_version")) || "0"));
+    if (done >= TOPIC_PURGE_VERSION) return;
+
+    const liked = new Set((state.likedTopics || []).map(normalizeTopic));
+    const mined = new Set();
+    Object.values(state.minedVideos || {}).forEach(m =>
+        (m.topics || []).forEach(t => mined.add(normalizeTopic(t)))
+    );
+
+    const before = (state.topics || []).length;
+    const dropped = [];
+    state.topics = (state.topics || []).filter(t => {
+        const phrase = normalizeTopic(t.phrase);
+        if (t.weight < 0) return true;                       // burns are decisions
+        if (liked.has(phrase) || mined.has(phrase)) return true; // earned via a like
+        if (looksLikeVideoTitle(phrase)) { dropped.push(t.phrase); return false; }
+        if (t.weight <= 2) { dropped.push(t.phrase); return false; } // /similar spam
+        return true;                                          // tier-A/B, hand-added
+    });
+
+    persistField("topic_purge_version", TOPIC_PURGE_VERSION);
+    // Keep the evidence: this is destructive and the user should be able to see
+    // exactly what went, rather than take "cleaned up" on faith.
+    persistField("topic_purge_log", { at: Date.now(), before, after: state.topics.length, dropped });
+    saveTopics();
+    console.log(`[Topics] Purged ${dropped.length} unearned topics (${before} -> ${state.topics.length}). ` +
+                `Inspect with JSON.parse(localStorage.getItem("${getProfileKey("topic_purge_log")}")).`);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// SIGNAL LEDGER — browsing counts, it does not generate
+// ══════════════════════════════════════════════════════════════════════
+//
+// Before this, playing a video fired /similar (10 topics) on a 3s timer with no
+// in-flight guard, the raw video TITLE was pushed into the pool as a weight-2
+// "topic", and the preload loop re-checked a brainstorm gate every 1.5s and
+// asked for 100 more topics every 15s. Browsing alone could add hundreds of
+// topics nobody asked for.
+//
+// Now: every browse action increments a COUNTER. Topics are generated only when
+// a counter crosses its threshold, or on an outright like. Thresholds differ by
+// how much intent the action carries — seeing something in the feed is weak,
+// choosing to play it is strong.
+const SIGNAL_THRESHOLDS = {
+    imp:  10,  // videos from this topic dwelled on 5s+ in the feed (weakest)
+    open:  4,  // searched it, or clicked its suggestion pill
+    play:  3   // actually played a video that came from it (strongest)
+};
+
+// Each browser owns its own counter namespace so the counts can be summed
+// across browsers without double-counting. See mergeTopicSignals + the
+// _merge_topic_signals docstring in sync-service/main.py for why per-key LWW
+// (what every other synced field uses) would silently DISCARD the other
+// browser's progress toward a threshold.
+function getClientId() {
+    let id = localStorage.getItem("wallgarden_client_id");
+    if (!id) {
+        id = "c" + Math.random().toString(36).slice(2, 10);
+        localStorage.setItem("wallgarden_client_id", id);
+    }
+    return id;
+}
+
+// ── Instrumentation: the before/after number ────────────────────────
+// There was no historical record of how many LLM calls a browsing session cost
+// (the container's logs reset on deploy and prism's stats need auth), so this
+// counter IS the measurement. Read it from the console with wgCallStats().
+function countedFetch(url, opts) {
+    const key = String(url).split("?")[0];
+    if (!state.llmCallStats) state.llmCallStats = {};
+    const rec = state.llmCallStats[key] || (state.llmCallStats[key] = { n: 0, lastAt: 0 });
+    rec.n += 1;
+    rec.lastAt = Date.now();
+    persistField("llm_call_stats", state.llmCallStats);
+    debug(`[LLM] ${key} (call #${rec.n} this browser)`);
+    return fetch(url, opts);
+}
+
+window.wgCallStats = function () {
+    const stats = state.llmCallStats || {};
+    const total = Object.values(stats).reduce((a, r) => a + r.n, 0);
+    console.table(stats);
+    console.log(`total LLM calls: ${total}`);
+    return { total, stats };
+};
+
+window.wgResetCallStats = function () {
+    state.llmCallStats = {};
+    persistField("llm_call_stats", {});
+    console.log("LLM call stats reset");
+};
+
+// Surfaced when the feed runs dry. Generation is now opt-in, so an empty queue
+// has to ASK rather than silently spending a brainstorm.
+let _emptyNoticeShownAt = 0;
+function notifyTopicQueueEmpty() {
+    if (Date.now() - _emptyNoticeShownAt < 120000) return;
+    _emptyNoticeShownAt = Date.now();
+    debug("[Smart Feed] Topic queue empty - waiting for a signal or a manual refill.");
+    showToast('Out of topics - like something, or press "Brainstorm more"', "warning");
+}
+
+function saveTopicSignals() { persistField("topic_signals", state.topicSignals); schedulePushRemoteState(); }
+
+/** Total for one signal kind across ALL browsers. */
+function topicSignalTotal(topic, kind) {
+    const rec = (state.topicSignals || {})[normalizeTopic(topic)];
+    if (!rec || !rec.c) return 0;
+    return Object.values(rec.c).reduce((sum, per) => sum + ((per && per[kind]) || 0), 0);
+}
+
+/**
+ * Record one unit of interest in a topic.
+ *
+ * `dedupeKey` (a video id, for impressions) makes the increment idempotent —
+ * without it, scrolling one topic's eight cards past the viewport would spend
+ * eight of the ten impressions a threshold is meant to represent.
+ * Returns true if this call crossed a threshold and enqueued work.
+ */
+function recordTopicSignal(topic, kind, dedupeKey) {
+    const phrase = normalizeTopic(topic);
+    if (!phrase || !SIGNAL_THRESHOLDS[kind]) return false;
+    // A topic the user already rejected must never climb back via browsing.
+    if (isBurned(phrase) || (state.dislikedTopics || []).includes(phrase)) return false;
+
+    if (!state.topicSignals) state.topicSignals = {};
+    const rec = state.topicSignals[phrase] || (state.topicSignals[phrase] = { t: 0, c: {}, f: {} });
+
+    if (dedupeKey) {
+        if (!rec.seen) rec.seen = {};
+        if (rec.seen[dedupeKey]) return false;
+        rec.seen[dedupeKey] = 1;
+        // Bound the dedupe set — it only has to cover one threshold's worth.
+        const keys = Object.keys(rec.seen);
+        if (keys.length > 40) delete rec.seen[keys[0]];
+    }
+
+    const cid = getClientId();
+    const per = rec.c[cid] || (rec.c[cid] = {});
+    per[kind] = (per[kind] || 0) + 1;
+    rec.t = Date.now();
+
+    const total = topicSignalTotal(phrase, kind);
+    const firedAt = (rec.f && rec.f[kind]) || 0;
+    const crossed = total >= firedAt + SIGNAL_THRESHOLDS[kind];
+
+    if (crossed) {
+        // Re-arm from the CURRENT total, so the next expansion needs another
+        // full threshold of fresh interest rather than firing on every
+        // subsequent increment.
+        rec.f[kind] = total;
+        enqueueAgentJob("expand_topic", phrase, { topic: phrase, reason: kind, count: total });
+    }
+    saveTopicSignals();
+    return crossed;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// AGENT WORK QUEUE — the checklist
+// ══════════════════════════════════════════════════════════════════════
+//
+// Work accumulates here and is spent in ONE batched request when the user goes
+// idle, instead of firing a call per action while they are still browsing.
+const AGENT_QUEUE_MAX = 30;
+const AGENT_IDLE_MS = 25000;      // quiet period before a flush is allowed
+const AGENT_MIN_GAP_MS = 60000;   // floor between flushes, whatever else happens
+const TOPICS_PER_TRIGGER = 2;     // adaptive budget…
+const TOPICS_PER_FLUSH_MAX = 15;  // …capped under the measured 25-output ceiling
+
+function saveAgentQueue() { persistField("agent_queue", state.agentQueue); }
+
+function enqueueAgentJob(type, key, payload) {
+    if (!state.agentQueue) state.agentQueue = [];
+    if (state.agentQueue.some(j => j.type === type && j.key === key)) return false;
+    state.agentQueue.push({ type, key, payload: payload || {}, addedAt: Date.now() });
+    // Drop the OLDEST on overflow: a queue this full means the user is far
+    // ahead of the agent, and the freshest interest is the most relevant.
+    if (state.agentQueue.length > AGENT_QUEUE_MAX) state.agentQueue.shift();
+    saveAgentQueue();
+    updateAgentQueueBadge();
+    debug(`[Agent Queue] +${type}:${key} (${state.agentQueue.length} pending)`);
+    return true;
+}
+
+let _lastUserActivity = Date.now();
+let _lastAgentFlush = 0;
+let _agentFlushInProgress = false;
+
+function markUserActivity() { _lastUserActivity = Date.now(); }
+
+function updateAgentQueueBadge() {
+    const el = document.getElementById("agent-queue-count");
+    if (el) el.textContent = String((state.agentQueue || []).length);
+}
+
+/** Fires on a timer, but only ACTS when the user has gone quiet. */
+function maybeFlushAgentQueue() {
+    const q = state.agentQueue || [];
+    if (!q.length || _agentFlushInProgress) return;
+    const now = Date.now();
+    if (now - _lastUserActivity < AGENT_IDLE_MS) return;
+    if (now - _lastAgentFlush < AGENT_MIN_GAP_MS) return;
+    flushAgentQueue();
+}
+
+/**
+ * Spend the whole checklist in one pass.
+ *
+ * Budget scales with accumulated evidence rather than with elapsed time, so one
+ * like costs one small call and a long session's worth of signals costs one
+ * larger call — never the 8-calls-per-15-seconds the old refill loop spent.
+ */
+async function flushAgentQueue(force) {
+    const q = state.agentQueue || [];
+    if (!q.length || _agentFlushInProgress) return;
+    _agentFlushInProgress = true;
+    _lastAgentFlush = Date.now();
+
+    const jobs = q.slice();
+    state.agentQueue = [];
+    saveAgentQueue();
+    updateAgentQueueBadge();
+
+    const expands = jobs.filter(j => j.type === "expand_topic");
+    const budget = Math.min(TOPICS_PER_FLUSH_MAX, Math.max(2, jobs.length * TOPICS_PER_TRIGGER));
+
+    try {
+        debug(`[Agent Queue] flushing ${jobs.length} job(s), budget ${budget} topics${force ? " (manual)" : ""}`);
+        if (jobs.some(j => j.type === "mine_likes")) {
+            await mineLikedVideosIntoTopics();
+        }
+        if (expands.length) {
+            // Seed from the strongest signal in the batch; the rest of the
+            // batch still shapes the request through buildLlmContext.
+            const seeds = expands.map(j => j.payload.topic).filter(Boolean);
+            await generateTopicsForSeeds(seeds, budget);
+        }
+    } catch (err) {
+        console.error("[Agent Queue] flush failed:", err);
+        showToast("Topic update failed - will retry later", "error");
+        // Put the work back so a failed flush doesn't silently lose the signal.
+        state.agentQueue = jobs.concat(state.agentQueue || []).slice(-AGENT_QUEUE_MAX);
+        saveAgentQueue();
+        updateAgentQueueBadge();
+    } finally {
+        _agentFlushInProgress = false;
+    }
+}
+
 function saveTopics()         { persistField("topics", state.topics); }
 function saveLikedTopics()    { persistField("liked_topics", state.likedTopics); }
 function saveMinedVideos()    { persistField("mined_videos", state.minedVideos); schedulePushRemoteState(); }
@@ -948,8 +1235,12 @@ function saveLikedVideos()    {
     scheduleAppStateBroadcast();
     schedulePushRemoteState();
     // Every path that changes likes ends here (card buttons, sidebar, sync
-    // rebuild) — debounce a mining pass so new likes become topics.
-    scheduleMining(30000);
+    // rebuild). A like is the one unambiguous "yes" the user gives us, so it
+    // enqueues work rather than firing immediately — the flush picks it up once
+    // they stop browsing, and carries it alongside everything else pending.
+    if (!_syncApplying && collectUnminedLikes().length) {
+        enqueueAgentJob("mine_likes", "likes", { pending: collectUnminedLikes().length });
+    }
 }
 function saveSearchHistory()  { persistField("search_history", state.searchHistory); }
 
@@ -1260,7 +1551,8 @@ function _wgSyncSnapshot() {
         queue: state.queueStates || {},
         playlists: state.playlistStates || {},
         watched: state.watchedHistory || {},
-        mined: state.minedVideos || {}
+        mined: state.minedVideos || {},
+        topicSignals: state.topicSignals || {}
     };
     // Only ship a profile that exists — an empty object would fight the
     // server's LWW merge for no reason.
@@ -1310,10 +1602,49 @@ function _wgRebuildFromRatingStates(changedIds) {
 }
 
 // Apply a remote field bundle into local state (LWW ratings + additive rest).
+/**
+ * Merge remote topic signals into the local ledger.
+ *
+ * Per-CLIENT max, never a sum: the client re-pushes its whole map every 1.5s,
+ * so summing would inflate counts on every push. Each browser only ever writes
+ * its own sub-counter, and that sub-counter is monotonic, so max is both
+ * lossless and idempotent. The effective total is the sum ACROSS clients, taken
+ * at read time in topicSignalTotal().
+ *
+ * This is why topicSignals cannot use _merge_lww_map like every other synced
+ * field: whole-record LWW would throw away the other browser's progress toward
+ * a threshold every time this browser wrote.
+ */
+function mergeTopicSignals(local, remote) {
+    const out = local && typeof local === "object" ? local : {};
+    Object.entries(remote || {}).forEach(([topic, rec]) => {
+        if (!rec || typeof rec !== "object") return;
+        const cur = out[topic] || (out[topic] = { t: 0, c: {}, f: {} });
+        Object.entries(rec.c || {}).forEach(([cid, per]) => {
+            if (!per || typeof per !== "object") return;
+            const mine = cur.c[cid] || (cur.c[cid] = {});
+            Object.entries(per).forEach(([kind, n]) => {
+                if (typeof n === "number") mine[kind] = Math.max(mine[kind] || 0, n);
+            });
+        });
+        // Fired-at marks are high-water marks too — take the larger so a
+        // threshold already spent elsewhere is not spent a second time here.
+        Object.entries(rec.f || {}).forEach(([kind, n]) => {
+            if (typeof n === "number") cur.f[kind] = Math.max(cur.f[kind] || 0, n);
+        });
+        cur.t = Math.max(cur.t || 0, rec.t || 0);
+    });
+    return out;
+}
+
 function _wgApplyRemoteFields(fields) {
     if (!fields) return;
     _syncApplying = true;
     try {
+        if (fields.topicSignals) {
+            state.topicSignals = mergeTopicSignals(state.topicSignals, fields.topicSignals);
+            persistField("topic_signals", state.topicSignals);
+        }
         if (fields.ratings) {
             if (!state.ratingStates) state.ratingStates = {};
             const changed = new Set();
@@ -2010,7 +2341,13 @@ function setupSearchListeners() {
     // Brainstorm More button
     const btnBrainstormMore = document.getElementById("btn-brainstorm-more");
     if (btnBrainstormMore) {
-        btnBrainstormMore.addEventListener("click", () => generateBrainstormTopics());
+        // The explicit escape hatch. Spends anything pending in the checklist
+        // first (that work is backed by real signal), and only falls back to a
+        // cold brainstorm when there is nothing earned to spend.
+        btnBrainstormMore.addEventListener("click", () => {
+            if ((state.agentQueue || []).length) return flushAgentQueue(true);
+            return generateBrainstormTopics();
+        });
     }
 
     // Topic Search in Settings (LLM Preferences)
@@ -3599,6 +3936,11 @@ function getWatchSignalObserver() {
                         graphProcessWatch(state.ontologyGraph, video);
                         saveOntologyGraph();
                     }
+                    // Weakest signal: a card from this topic held the viewport
+                    // for 5s. Deduped on the VIDEO id, so ten impressions means
+                    // ten different videos — not one topic's grid scrolling by.
+                    const impTopic = video.discoveryTopic || video._topic || video.topic;
+                    if (impTopic) recordTopicSignal(impTopic, "imp", video.id);
                     watchSignalVideos.delete(entry.target);
                     watchSignalObserver.unobserve(entry.target);
                 }, 5000);
@@ -4458,13 +4800,12 @@ function playVideo(video) {
         }
     }
 
-    // Trigger background similar topic generation (deferred)
-    if (video.title) {
-        setTimeout(() => {
-            debug(`[Smart Feed] Watching video, triggering background similar topics generation for: "${video.title}"`);
-            generateSimilarTopicsFromSearch(video.title);
-        }, 3000);
-    }
+    // Playing a video is the STRONGEST browse signal, but it is still browsing:
+    // it counts, it does not generate. The old code fired /similar here on a 3s
+    // timer that was never cleared — clicking through five videos queued five
+    // concurrent calls and pushed five raw video TITLES into the topic pool.
+    const playedTopic = video.discoveryTopic || video._topic || video.topic;
+    if (playedTopic) recordTopicSignal(playedTopic, "play");
 
     renderQueueUI();
 }
@@ -4998,8 +5339,10 @@ function triggerGlobalSearch(query) {
     // Trigger rendering (which will show loading spinner and fetch discovery)
     renderFeed();
     
-    // Trigger background similar topic generation using LLM
-    generateSimilarTopicsFromSearch(query);
+    // Searching counts as intent, but one search is not a mandate to generate.
+    // The topic expands once the user has come back to it SIGNAL_THRESHOLDS.open
+    // times — see recordTopicSignal.
+    recordTopicSignal(query, "open");
 
     // Auto-sync feeds on search
     syncFeeds();
@@ -6175,7 +6518,7 @@ async function refreshTasteProfile() {
             ? `${v.title} (${v.channelName})` : v.title).filter(Boolean);
         const interests = state.topics.filter(t => t.weight > 0)
             .sort((a, b) => b.weight - a.weight).slice(0, 20).map(t => t.phrase);
-        const resp = await fetch("/api/wallgarden/taste-profile", {
+        const resp = await countedFetch("/api/wallgarden/taste-profile", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ videos, interests }),
@@ -6416,7 +6759,7 @@ async function mineLikedVideosIntoTopics() {
                 ageDays: st.v.published ? Math.max(0, (Date.now() - st.v.published) / 86400e3) : undefined
             }));
 
-            const resp = await fetch("/api/wallgarden/extract-topics", {
+            const resp = await countedFetch("/api/wallgarden/extract-topics", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ videos: payload }),
@@ -6491,7 +6834,7 @@ async function generateBrainstormTopics(append, numRequests = 1) {
         const ctx = buildLlmContext();
         ctx.numTopics = 100;
         
-        const resp = await fetch("/api/wallgarden/brainstorm", {
+        const resp = await countedFetch("/api/wallgarden/brainstorm", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(ctx),
@@ -6571,80 +6914,89 @@ async function generateBrainstormTopics(append, numRequests = 1) {
     updateStatusText("Ready");
 }
 
-async function generateSimilarTopicsFromSearch(searchQuery, isHighSignal = false) {
-    if (!searchQuery) return;
-    debug(`[Smart Feed] Background similar topics generation via lazy-tool-service for: "${searchQuery}" (highSignal: ${isHighSignal})`);
-    
-    // Auto-add search query with appropriate weight based on signal strength
-    const searchNormalized = searchQuery.trim().toLowerCase();
-    const targetWeight = isHighSignal ? 5 : 2;
-    const existsAsPositive = state.topics.some(t => t.phrase.toLowerCase() === searchNormalized && t.weight > 0);
-    if (!existsAsPositive) {
-        const existingIdx = state.topics.findIndex(t => t.phrase.toLowerCase() === searchNormalized);
-        if (existingIdx !== -1) {
-            state.topics[existingIdx].weight = Math.max(state.topics[existingIdx].weight, targetWeight);
-        } else {
-            state.topics.push({ phrase: searchNormalized, weight: targetWeight });
-        }
-        if (!state.smartFeedTopicsQueue.includes(searchNormalized)) {
-            state.smartFeedTopicsQueue.push(searchNormalized);
-        }
-        saveTopics();
-        debug(`[Smart Feed] Auto-added query "${searchNormalized}" with weight ${targetWeight} as positive topic.`);
-    }
+/**
+ * Expand earned seed topics into new ones. The ONLY path that grows the pool
+ * from browsing-derived signal, and it runs from the queue flush — never
+ * directly from a user action.
+ *
+ * Replaces generateSimilarTopicsFromSearch, which fired on every video play and
+ * every pill click with no in-flight guard, and which pushed the raw search
+ * query (a full video TITLE, when called from playVideo) into the pool as a
+ * weight-2 topic before it had earned anything.
+ */
+async function generateTopicsForSeeds(seeds, budget) {
+    const cleanSeeds = (seeds || []).map(normalizeTopic).filter(Boolean);
+    if (!cleanSeeds.length) return [];
 
+    // The seed itself has now earned its place in the pool — it crossed a
+    // threshold, which is exactly the evidence the old auto-add lacked.
+    cleanSeeds.forEach(seed => {
+        if (isBurned(seed)) return;
+        const idx = state.topics.findIndex(t => normalizeTopic(t.phrase) === seed);
+        if (idx === -1) state.topics.push({ phrase: seed, weight: 5, addedAt: Date.now() });
+        else state.topics[idx].weight = Math.max(state.topics[idx].weight, 5);
+        if (!state.smartFeedTopicsQueue.includes(seed)) state.smartFeedTopicsQueue.push(seed);
+    });
+    saveTopics();
+
+    const query = cleanSeeds[0];
     try {
         const ctx = buildLlmContext();
-        ctx.numTopics = isHighSignal ? 100 : 10;
-        
-        const resp = await fetch("/api/wallgarden/similar", {
+        // Capped well under the measured ~25-item output ceiling. /similar is a
+        // SINGLE un-batched call on the backend, so unlike brainstorm it has no
+        // fan-out to rescue an over-long request that bails mid-array.
+        ctx.numTopics = Math.min(TOPICS_PER_FLUSH_MAX, Math.max(2, budget || 2));
+        ctx.seeds = cleanSeeds.slice(0, 8);
+
+        const resp = await countedFetch("/api/wallgarden/similar", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...ctx, query: searchQuery }),
+            body: JSON.stringify({ ...ctx, query }),
             signal: AbortSignal.timeout(60000)
         });
-        
+
         if (!resp.ok) {
             const errBody = await resp.text().catch(() => "");
             throw new Error(`Backend returned ${resp.status}: ${errBody.substring(0, 200)}`);
         }
-        
+
         const data = await resp.json();
-        const topicsArray = data.topics || [];
-        let addedPhrases = [];
-        
-        topicsArray.forEach(phrase => {
+        const addedPhrases = [];
+
+        (data.topics || []).forEach(raw => {
+            const phrase = normalizeTopic(raw);
             if (!phrase) return;
-            
-            if (state.burnedQueries.includes(phrase)) {
-                debug(`[Smart Feed] Skipping burned query "${phrase}" from similar topics results.`);
+            // isBurned(), not burnedQueries.includes() — the old path used a raw
+            // substring test, so a burn never generalised on this route.
+            if (isBurned(phrase)) {
+                debug(`[Topics] Skipping burned "${phrase}" from seed expansion.`);
                 return;
             }
-            
-            const existsInTopics = state.topics.some(t => t.phrase.toLowerCase() === phrase);
-            if (!existsInTopics) {
-                state.topics.push({ phrase, weight: targetWeight });
+            // normalizeTopic on BOTH sides — the old comparison lowercased only
+            // the stored phrase, so a Title-Case reply duplicated the entry.
+            if (!state.topics.some(t => normalizeTopic(t.phrase) === phrase)) {
+                state.topics.push({ phrase, weight: 4, addedAt: Date.now() });
             }
-            
-            const inQueue = state.smartFeedTopicsQueue.includes(phrase);
-            const inUsed = state.smartFeedUsedTopics.includes(phrase);
-            if (!inQueue && !inUsed) {
+            if (!state.smartFeedTopicsQueue.includes(phrase) && !state.smartFeedUsedTopics.includes(phrase)) {
                 state.smartFeedTopicsQueue.push(phrase);
                 addedPhrases.push(phrase);
             }
         });
-        
-        if (addedPhrases.length > 0) {
+
+        if (addedPhrases.length) {
             saveTopics();
-            debug(`[Smart Feed] Successfully queued ${addedPhrases.length} similar topics for "${searchQuery}":`, addedPhrases);
-            showToast(`Queued ${addedPhrases.length} topics similar to "${searchQuery}"`, "success");
+            pruneTopicPool();
+            debug(`[Topics] Seeds [${cleanSeeds.join(", ")}] -> ${addedPhrases.length} new topics`);
+            showToast(`Added ${addedPhrases.length} topics from "${query}"`, "success");
             fillSmartFeedPreloadBuffer();
         } else {
-            console.warn(`[Smart Feed] Similar brainstorm returned no new usable topics.`);
+            debug("[Topics] Seed expansion returned nothing new.");
         }
+        return addedPhrases;
     } catch (err) {
-        console.error(`[Smart Feed] Similar topics generation failed:`, err);
-        showToast(`Couldn't expand "${searchQuery}" into topics`, "danger");
+        console.error("[Topics] Seed expansion failed:", err);
+        showToast(`Couldn't expand "${query}"`, "danger");
+        throw err;
     }
 }
 
@@ -6687,7 +7039,7 @@ async function classifyCandidatesWithLLM(topic, candidates) {
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 6000);
-            const resp = await fetch("/api/wallgarden/classify-candidates", {
+            const resp = await countedFetch("/api/wallgarden/classify-candidates", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -7071,7 +7423,7 @@ async function groundNextQueuedTopics() {
         }
 
         if (items.length > 0) {
-            const resp = await fetch("/api/wallgarden/judge-topics", {
+            const resp = await countedFetch("/api/wallgarden/judge-topics", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ items }),
@@ -7174,21 +7526,17 @@ async function fillSmartFeedPreloadBuffer() {
     
     // Check if we need to brainstorm more topics using LLM
     const totalUpcoming = state.smartFeedTopicsQueue.length;
-    const now = Date.now();
-    // 15s base cooldown, doubling per consecutive brainstorm failure (capped
-    // at 5min) so a broken backend gets a backing-off trickle, not a hammer.
-    const streak = state.brainstormFailureStreak || 0;
-    const cooldownMs = Math.min(15000 * Math.pow(2, streak), 300000);
-    // lastBrainstormAttempt covers early-return paths where lastBrainstormTime
-    // is never written; take the later of the two.
-    const lastRef = Math.max(state.lastBrainstormTime || 0, state.lastBrainstormAttempt || 0);
-    const isCooldownActive = lastRef && (now - lastRef < cooldownMs);
 
-    if (totalUpcoming < 150 && !state.brainstormLoading && !isCooldownActive) {
-        debug("[Smart Feed] Total upcoming topics low, triggering background LLM brainstorm...");
-        generateBrainstormTopics(true, 1).then(() => {
-            fillSmartFeedPreloadBuffer();
-        });
+    // DELIBERATELY NO BRAINSTORM HERE.
+    //
+    // This function re-invokes itself every 1.5s while the video pool is under
+    // 1000, and this gate used to ask for 100 fresh topics every 15s — roughly
+    // 400 topics/min produced against ~40/min consumed, at 8 LLM calls a pop.
+    // That single line was the bulk of the "it spawns topics while I browse"
+    // problem. The preloader now only fetches VIDEOS for topics that already
+    // earned their place; growing the pool is the queue flush's job alone.
+    if (totalUpcoming === 0 && !state.brainstormLoading) {
+        notifyTopicQueueEmpty();
     }
     
     if (state.smartFeedTopicsQueue.length === 0) {

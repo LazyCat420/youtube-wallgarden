@@ -66,7 +66,10 @@ app.add_middleware(
 #   instead of re-paying the LLM call.
 # * `profile`: { text, clusters, generatedAt, likeCount } — the LLM-written
 #   taste profile. Whole-value LWW on `generatedAt`.
-SYNC_FIELDS = ["ratings", "queue", "playlists", "watched", "mined", "profile"]
+# * `topicSignals`: { topic: { t, c: {clientId: {imp,open,play}}, f: {...} } } —
+#   how much interest each topic has accumulated. NOT last-write-wins; see
+#   _merge_topic_signals.
+SYNC_FIELDS = ["ratings", "queue", "playlists", "watched", "mined", "profile", "topicSignals"]
 
 
 def _merge_lww_map(base, incoming):
@@ -130,12 +133,58 @@ def _merge_profile(base, incoming):
     return incoming if inc_t >= base_t else base
 
 
+def _merge_topic_signals(base, incoming):
+    """Per-CLIENT high-water merge of the topic interest counters.
+
+    Every other field here is last-write-wins, and LWW is WRONG for this one.
+    Two browsers each hold their own progress toward a threshold; whole-record
+    LWW would discard one of them on every push, so a topic could be viewed
+    five times in Chrome and five in Vivaldi and never reach a threshold of ten.
+
+    Summing is equally wrong in the other direction: the client re-pushes its
+    entire map on a 1.5s debounce, so `sum` would inflate the counts on every
+    push. Each browser writes only its own sub-counter, which is monotonic, so
+    taking the max per (topic, clientId, kind) is both lossless and idempotent.
+    The effective total is the sum ACROSS clients, computed by the reader.
+
+    `f` (fired-at high-water marks) merges by max for the same reason: a
+    threshold already spent on one browser must not be spent again on another.
+    """
+    out = dict(base) if isinstance(base, dict) else {}
+    for topic, rec in (incoming or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        cur = out.get(topic)
+        if not isinstance(cur, dict):
+            cur = {"t": 0, "c": {}, "f": {}}
+        merged_c = dict(cur.get("c") or {})
+        for cid, per in (rec.get("c") or {}).items():
+            if not isinstance(per, dict):
+                continue
+            mine = dict(merged_c.get(cid) or {})
+            for kind, n in per.items():
+                if isinstance(n, (int, float)):
+                    mine[kind] = max(mine.get(kind, 0) or 0, n)
+            merged_c[cid] = mine
+        merged_f = dict(cur.get("f") or {})
+        for kind, n in (rec.get("f") or {}).items():
+            if isinstance(n, (int, float)):
+                merged_f[kind] = max(merged_f.get(kind, 0) or 0, n)
+        out[topic] = {
+            "t": max(cur.get("t", 0) or 0, rec.get("t", 0) or 0),
+            "c": merged_c,
+            "f": merged_f,
+        }
+    return out
+
+
 _MERGERS = {
     "ratings": _merge_lww_map,
     "queue": _merge_lww_map,
     "playlists": _merge_playlists,
     "watched": _merge_watched,
     "mined": _merge_lww_map,
+    "topicSignals": _merge_topic_signals,
     "profile": _merge_profile,
 }
 

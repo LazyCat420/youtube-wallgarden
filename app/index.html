@@ -314,8 +314,8 @@
     </style>
 
     <!-- Non-blocking full CSS via preload pattern -->
-    <link rel="preload" href="app.min.css?v=20260822-v61" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="app.min.css?v=20260822-v61"></noscript>
+    <link rel="preload" href="app.min.css?v=20260822-v62" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="app.min.css?v=20260822-v62"></noscript>
 </head>
 <body>
     <div class="app-layout">
@@ -522,6 +522,7 @@
                 <div id="ai-brainstorm-container" class="ai-brainstorm-container hidden">
                     <div class="brainstorm-intro">
                         <p>Generate fresh content ideas tailored to your preferences. The AI learns from your upvotes/downvotes and search history.</p>
+                        <p class="form-hint form-hint-block">Topics are no longer generated while you browse. Interest is counted instead &mdash; liking a video, or returning to a topic, earns new ones. <strong><span id="agent-queue-count">0</span></strong> signal(s) waiting to be spent.</p>
                         <button id="btn-brainstorm-more" class="btn btn-primary">
                             <span class="btn-text">Brainstorm More</span>
                             <svg class="icon-svg brainstorm-spinner hidden icon-14 icon-14-l" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
@@ -900,8 +901,8 @@
         </div>
     </div>
 
-    <script src="ontology.js?v=20260822-v61" defer></script>
-    <script src="ontologyRenderer.js?v=20260822-v61" defer></script>
-    <script src="app.min.js?v=20260822-v61" defer></script>
+    <script src="ontology.js?v=20260822-v62" defer></script>
+    <script src="ontologyRenderer.js?v=20260822-v62" defer></script>
+    <script src="app.min.js?v=20260822-v62" defer></script>
 </body>
 </html>
