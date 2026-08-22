@@ -14,7 +14,12 @@ import os
 # does not connect here), so hand it a dummy so we can import the pure mergers.
 os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017/?serverSelectionTimeoutMS=1")
 
-from main import _merge_lww_map, _merge_playlists, _merge_watched  # noqa: E402
+from main import (  # noqa: E402
+    _merge_lww_map,
+    _merge_playlists,
+    _merge_topic_signals,
+    _merge_watched,
+)
 
 
 # ── ratings / queue: per-key last-write-wins ────────────────────────────────
@@ -118,6 +123,59 @@ def test_playlist_new_playlist_added():
     base = {"p1": {"name": "A", "t": 1, "videos": {}}}
     inc = {"p2": {"name": "B", "t": 1, "videos": {}}}
     assert set(_merge_playlists(base, inc)) == {"p1", "p2"}
+
+
+# ── topicSignals: per-client high-water, NOT last-write-wins ────────────────
+#
+# These are the counters that decide when a topic has earned expansion. The
+# whole point of the custom merger is that the two obvious implementations are
+# both wrong: LWW loses a browser's progress, and sum inflates it on every
+# 1.5s re-push of the same map.
+
+def _total(merged, topic, kind="imp"):
+    return sum(per.get(kind, 0) for per in merged[topic]["c"].values())
+
+
+def test_signals_sum_across_browsers():
+    """Chrome saw it 5x and Vivaldi 5x — the threshold of 10 must be reached."""
+    chrome = {"kiln": {"t": 1, "c": {"cA": {"imp": 5}}, "f": {}}}
+    vivaldi = {"kiln": {"t": 2, "c": {"cB": {"imp": 5}}, "f": {}}}
+    merged = _merge_topic_signals(_merge_topic_signals({}, chrome), vivaldi)
+    assert _total(merged, "kiln") == 10  # LWW would give 5
+
+
+def test_signals_idempotent_under_republish():
+    """The client re-pushes its whole map every 1.5s; sum() would inflate."""
+    vivaldi = {"kiln": {"t": 2, "c": {"cB": {"imp": 5}}, "f": {}}}
+    merged = _merge_topic_signals({}, vivaldi)
+    for _ in range(5):
+        merged = _merge_topic_signals(merged, vivaldi)
+    assert _total(merged, "kiln") == 5  # sum would give 30
+
+
+def test_signals_growth_lands():
+    merged = _merge_topic_signals({}, {"k": {"t": 1, "c": {"cB": {"imp": 5}}, "f": {}}})
+    merged = _merge_topic_signals(merged, {"k": {"t": 2, "c": {"cB": {"imp": 9}}, "f": {}}})
+    assert _total(merged, "k") == 9
+
+
+def test_signals_stale_lower_payload_cannot_reduce():
+    """An out-of-order push from a browser that was behind must not roll back."""
+    merged = _merge_topic_signals({}, {"k": {"t": 2, "c": {"cB": {"imp": 9}}, "f": {}}})
+    merged = _merge_topic_signals(merged, {"k": {"t": 3, "c": {"cB": {"imp": 2}}, "f": {}}})
+    assert _total(merged, "k") == 9
+
+
+def test_signals_fired_marks_take_max():
+    """A threshold already spent on one browser must not be spent again."""
+    merged = _merge_topic_signals({}, {"k": {"t": 1, "c": {}, "f": {"imp": 10}}})
+    merged = _merge_topic_signals(merged, {"k": {"t": 2, "c": {}, "f": {"imp": 3}}})
+    assert merged["k"]["f"]["imp"] == 10
+
+
+def test_signals_tolerate_garbage():
+    assert _merge_topic_signals({}, {"x": "not a dict"}) == {}
+    assert _merge_topic_signals({}, {"x": {"c": {"cA": "nope"}}})["x"]["c"] == {}
 
 
 def _run_all():
