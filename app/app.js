@@ -158,7 +158,12 @@ function clearRenderTimeouts() {
 }
 
 function getWeightedRandomTopics(topics) {
-    const positiveTopics = topics.filter(t => t.weight > 0);
+    // Soft retire: a topic the user was shown 8+ times and never once touched
+    // does not get picked again. It stays in the pool at its weight — one
+    // deliberate open/play/like flips the predicate and it is instantly back.
+    // Never auto-burned; only the user burns.
+    const likeCounts = buildTopicLikeCounts();
+    const positiveTopics = topics.filter(t => t.weight > 0 && !isIgnoredTopic(t.phrase, likeCounts));
     // Sort using weighted random sampling without replacement (A-Res algorithm)
     return positiveTopics
         .map(t => ({
@@ -263,8 +268,11 @@ document.addEventListener("DOMContentLoaded", () => {
     // Regenerate the taste profile if likes moved enough since the last one.
     setTimeout(() => refreshTasteProfile(), 12000);
 
-    // Grounding gate over the upcoming topic queue (fail-open, cached 30d).
-    scheduleGrounding(20000);
+    // Grounding gate over the upcoming topic queue (fail-open). Runs on a real
+    // 90s interval — the old one-shot scheduleGrounding(20000) here was
+    // cancelled within ~1.5s by the preload loop's own (now deleted) re-arm,
+    // so in practice the gate only fired by accident.
+    startGroundingInterval();
 });
 
 // Update subscription count badge in sidebar
@@ -332,21 +340,52 @@ function topicSignature(phrase) {
         .filter(w => w.length > 2 && !TOPIC_STOPWORDS.has(w));
 }
 
+// ── Burn parole ──────────────────────────────────────────────────────
+// Burns are sentences, not death: taste changes over months. An entry serves
+// 6 months × 2^(strikes-1); after that it becomes ELIGIBLE again — it is not
+// deleted, so a re-burn finds the record, increments strikes and doubles the
+// next sentence. Entries are {q, t, strikes}; readers tolerate the legacy
+// bare-string shape (old localStorage, old backups, test fixtures) and the
+// load path canonicalises.
+const BURN_PAROLE_BASE_MS = 6 * 30 * 86400e3;
+
+function burnRecord(b) {
+    if (typeof b === "string") return { q: normalizeTopic(b), t: Date.now(), strikes: 1 };
+    return { q: normalizeTopic(b.q), t: b.t || Date.now(), strikes: b.strikes || 1 };
+}
+
+function isBurnServing(rec, now) {
+    return (now - rec.t) < BURN_PAROLE_BASE_MS * Math.pow(2, (rec.strikes || 1) - 1);
+}
+
+/** Phrases currently serving a burn sentence — the only ones filters honour. */
+function activeBurnedPhrases() {
+    const now = Date.now();
+    return (state.burnedQueries || [])
+        .map(burnRecord)
+        .filter(r => r.q && isBurnServing(r, now))
+        .map(r => r.q);
+}
+
 // isBurned runs once per topic across the whole pool (suggestions, prune,
 // brainstorm). Recomputing every burned query's signature on each call was
 // O(topics × burned × words); cache them and rebuild only when the burned list
 // changes (new identity or length), plus an explicit bust in burnTopic for the
-// at-cap push+shift case that leaves the length unchanged.
+// at-cap push+shift case that leaves the length unchanged. The cache also
+// self-expires hourly so a sentence ending mid-session is eventually honoured.
 let _burnedSigCache = null;
 function invalidateBurnedSignatures() { _burnedSigCache = null; }
 function getBurnedSignatures() {
     const burned = state.burnedQueries || [];
-    if (!_burnedSigCache || _burnedSigCache.ref !== burned || _burnedSigCache.n !== burned.length) {
+    const stale = _burnedSigCache && (Date.now() - _burnedSigCache.builtAt > 3600e3);
+    if (!_burnedSigCache || stale || _burnedSigCache.ref !== burned || _burnedSigCache.n !== burned.length) {
+        const active = activeBurnedPhrases();
         _burnedSigCache = {
             ref: burned,
             n: burned.length,
-            exact: new Set(burned.map(normalizeTopic)),
-            sigs: burned.map(topicSignature).filter(s => s.length > 0),
+            builtAt: Date.now(),
+            exact: new Set(active),
+            sigs: active.map(topicSignature).filter(s => s.length > 0),
         };
     }
     return _burnedSigCache;
@@ -386,19 +425,32 @@ function burnTopic(phrase) {
     if (!Array.isArray(state.dislikedTopics)) state.dislikedTopics = [];
     if (!Array.isArray(state.topics)) state.topics = [];
 
-    // 1. Remember it — permanently. The old 50-entry cap meant an old burn
-    //    silently expired and the LLM was free to suggest it all over again.
-    if (!state.burnedQueries.some(b => b.toLowerCase() === normalized)) {
-        state.burnedQueries.push(normalized);
+    // 1. Remember it — as a sentence, not forever. A fresh burn serves 6
+    //    months; re-burning after parole doubles the next sentence. Re-burning
+    //    while still serving just restarts the clock (same strikes) so a
+    //    grounding SLOP verdict can't stack strikes on one bad week.
+    const existingIdx = state.burnedQueries.findIndex(b => burnRecord(b).q === normalized);
+    if (existingIdx !== -1) {
+        const rec = burnRecord(state.burnedQueries[existingIdx]);
+        if (!isBurnServing(rec, Date.now())) rec.strikes += 1;
+        rec.t = Date.now();
+        state.burnedQueries[existingIdx] = rec;
+    } else {
+        state.burnedQueries.push({ q: normalized, t: Date.now(), strikes: 1 });
         if (state.burnedQueries.length > 500) state.burnedQueries.shift();
-        invalidateBurnedSignatures();
-        saveBurnedQueries();
     }
+    invalidateBurnedSignatures();
+    saveBurnedQueries();
 
     // 2. Make it an actual negative signal. Without this the topic kept its
-    //    positive weight everywhere except the suggestion list.
+    //    positive weight everywhere except the suggestion list. Entries added
+    //    HERE are tagged so they parole with the burn; hand-typed dislikes
+    //    (settings input / toggle) carry no tag and stay permanent.
     if (!state.dislikedTopics.some(t => t.toLowerCase() === normalized)) {
         state.dislikedTopics.push(normalized);
+        if (!state.dislikedTopicsMeta) state.dislikedTopicsMeta = {};
+        state.dislikedTopicsMeta[normalized] = { t: Date.now(), viaBurn: true };
+        persistField("disliked_topics_meta", state.dislikedTopicsMeta);
         saveDislikedTopics();
     }
 
@@ -440,6 +492,33 @@ function burnTopic(phrase) {
     saveTopics();
     invalidateScoreCache();
 
+    // 6. Evict its videos and its bookkeeping. Every AUTOMATIC burn used to
+    //    leave up to 8 videos of the burned topic in the persisted suggestion
+    //    pool (only the manual nuke path open-coded this cleanup), plus a
+    //    ledger record and a grounding verdict for a topic that no longer
+    //    exists.
+    const matchesBurned = v => ((v.discoveryTopic || v._topic || v.topic || "").trim().toLowerCase() === normalized);
+    if (Array.isArray(state.smartFeedSuggestionPool)) {
+        const beforePool = state.smartFeedSuggestionPool.length;
+        state.smartFeedSuggestionPool = state.smartFeedSuggestionPool.filter(v => !matchesBurned(v));
+        if (state.smartFeedSuggestionPool.length !== beforePool) saveSmartFeedSuggestionPool();
+    }
+    if (Array.isArray(state.smartFeedVideos)) {
+        state.smartFeedVideos = state.smartFeedVideos.filter(v => !matchesBurned(v));
+    }
+    state.smartFeedUsedTopics = (state.smartFeedUsedTopics || []).filter(t => normalizeTopic(t) !== normalized);
+    if (state.topicSignals && state.topicSignals[normalized]) {
+        delete state.topicSignals[normalized];
+        saveTopicSignals();
+    }
+    if (state.groundingVerdicts && state.groundingVerdicts[normalized]) {
+        delete state.groundingVerdicts[normalized];
+        saveGroundingVerdicts();
+    }
+    // Sweep the weight-0 siblings step 4 just created, instead of leaving them
+    // for whichever unrelated growth event next triggers a prune.
+    pruneTopicPool();
+
     debug(`[Learn] Burned "${normalized}"`
         + (demoted.length ? `; demoted ${demoted.length} sibling(s): ${demoted.join(", ")}` : ""));
     return demoted;
@@ -454,39 +533,82 @@ function burnTopic(phrase) {
 const TOPIC_POOL_MAX = 400;
 const TOPIC_DECAY_PER_PRUNE = 0.5;
 
+// Wall-clock staleness thresholds. The old decay keyed on the session-only
+// smartFeedUsedTopics list, which is reset on every nav and never persisted —
+// so the one prune guaranteed to run (page load) decayed NOTHING, the 0.5
+// floor made weight-eviction unreachable, and the 400 cap ended up evicting
+// the topics the feed had actually served (the only ones decay ever touched)
+// while never-served silt kept its birth weight forever.
+const TOPIC_STALE_DECAY_MS = 7 * 86400e3;   // no signal for a week -> start decaying
+const TOPIC_STALE_EVICT_MS = 21 * 86400e3;  // decayed to the floor AND dead 3 weeks -> evict
+
+/** Most recent moment anything happened to this topic: added, or any signal. */
+function topicFreshness(t) {
+    const rec = (state.topicSignals || {})[normalizeTopic(t.phrase)];
+    return Math.max(t.addedAt || 0, (rec && rec.t) || 0);
+}
+
 function pruneTopicPool() {
     if (!Array.isArray(state.topics)) return;
     const before = state.topics.length;
+    const now = Date.now();
 
-    // Normalize once so the comparison survives legacy mixed-case data: used
-    // topics and liked topics were historically stored in whatever case the
-    // backend produced, so a raw === would silently never match and no topic
-    // would ever decay.
-    const usedSet = new Set((state.smartFeedUsedTopics || []).map(normalizeTopic));
     const likedSet = new Set((state.likedTopics || []).map(normalizeTopic));
+    const likeCounts = buildTopicLikeCounts();
 
+    // Age-based decay. Exempt: negatives (user decisions), liked topics, and
+    // PROVEN topics (the ledger says they earn engagement — staleness there
+    // means the feed under-served them, not that they failed).
     state.topics.forEach(t => {
-        // Never decay the user's own negative weights or their hand-added
-        // topics — only the AI-generated bulk, which is what silts up.
-        if (t.weight > 0 && !likedSet.has(normalizeTopic(t.phrase))) {
-            if (usedSet.has(normalizeTopic(t.phrase))) {
-                t.weight = Math.max(0.5, t.weight - TOPIC_DECAY_PER_PRUNE);
-            }
+        if (t.weight <= 0) return;
+        // Unknown age is NOT infinite age: a topic that reaches here without a
+        // stamp (legacy data, direct insertion) starts its clock now instead
+        // of decaying on sight.
+        if (!t.addedAt) { t.addedAt = now; return; }
+        const phrase = normalizeTopic(t.phrase);
+        if (likedSet.has(phrase) || isProvenTopic(phrase, likeCounts)) return;
+        if (now - topicFreshness(t) > TOPIC_STALE_DECAY_MS) {
+            t.weight = Math.max(0.5, t.weight - TOPIC_DECAY_PER_PRUNE);
         }
     });
 
-    // Drop topics that decayed to nothing, plus anything a burn has since
-    // caught up with.
-    state.topics = state.topics.filter(t => t.weight !== 0 && !isBurned(t.phrase));
+    // Eviction: sat at the floor with three signal-free weeks behind it. Log
+    // what went — this is destructive and should be inspectable, not trusted.
+    const evicted = [];
+    state.topics = state.topics.filter(t => {
+        if (t.weight > 0 && t.weight <= 0.5 && t.addedAt &&
+            now - topicFreshness(t) > TOPIC_STALE_EVICT_MS &&
+            !likedSet.has(normalizeTopic(t.phrase))) {
+            evicted.push(t.phrase);
+            return false;
+        }
+        // Exact burns only. isBurned() generalises to supersets — using it
+        // here would DELETE the siblings step 4 of burnTopic deliberately
+        // demoted-but-kept (the two mechanisms were in silent disagreement;
+        // the sibling policy is demote, and the generalising check guards the
+        // ADD paths). The weight-0 case is burn-sibling demotion hitting zero.
+        return t.weight !== 0 && !getBurnedSignatures().exact.has(normalizeTopic(t.phrase));
+    });
+    if (evicted.length) {
+        let log = [];
+        try { log = JSON.parse(localStorage.getItem(getProfileKey("topic_evict_log")) || "[]"); } catch (e) { /* fresh */ }
+        log.push({ at: now, evicted });
+        persistField("topic_evict_log", log.slice(-50));
+        debug(`[Learn] Evicted ${evicted.length} stale topic(s): ${evicted.join(", ")}`);
+    }
 
-    // Hard cap: keep the strongest, drop the tail.
+    // Hard cap: negatives and PROVEN topics keep their seats (engaged evidence
+    // must not lose the cap fight to freshly-minted weight-5 guesses); the
+    // rest compete on weight.
     if (state.topics.length > TOPIC_POOL_MAX) {
-        const negatives = state.topics.filter(t => t.weight < 0);
-        const positives = state.topics
-            .filter(t => t.weight >= 0)
-            .sort((a, b) => b.weight - a.weight)
-            .slice(0, Math.max(0, TOPIC_POOL_MAX - negatives.length));
-        state.topics = [...negatives, ...positives];
+        const keep = [];
+        const contenders = [];
+        state.topics.forEach(t => {
+            if (t.weight < 0 || isProvenTopic(t.phrase, likeCounts)) keep.push(t);
+            else contenders.push(t);
+        });
+        contenders.sort((a, b) => b.weight - a.weight);
+        state.topics = [...keep, ...contenders.slice(0, Math.max(0, TOPIC_POOL_MAX - keep.length))];
     }
 
     if (state.topics.length !== before) {
@@ -738,6 +860,9 @@ function loadState() {
     // Standard profile initialization - a fresh profile has NO topics and NO channels!
     state.channels = rawChannels ? JSON.parse(rawChannels) : (state.currentProfile === "default" ? [...DEFAULT_CHANNELS] : []);
     state.topics = rawTopics ? JSON.parse(rawTopics) : (state.currentProfile === "default" ? [...DEFAULT_TOPICS] : []);
+    // Topics from before addedAt existed (and hand-added ones, which never set
+    // it) must not read as instantly stale — their clock starts now.
+    state.topics.forEach(t => { if (!t.addedAt) t.addedAt = Date.now(); });
     state.blockedChannels = rawBlocked ? JSON.parse(rawBlocked) : [];
     state.likedTopics = rawLiked ? JSON.parse(rawLiked) : [];
     state.dislikedTopics = rawDisliked ? JSON.parse(rawDisliked) : [];
@@ -755,6 +880,14 @@ function loadState() {
         state.settings.llmModel = "";
     }
     state.searchHistory = rawSearchHistory ? JSON.parse(rawSearchHistory) : [];
+    // watchedHistory was WRITE-ONLY: three writers, zero readers of the
+    // stored key, so the anti-resurface guard in fetchVideosForTopic was dead
+    // on every cold load until the sync pull happened to rehydrate it. Note
+    // the key is deliberately unprefixed (shared across profiles), matching
+    // its writers.
+    try {
+        state.watchedHistory = JSON.parse(localStorage.getItem("wallgarden_watched") || "{}");
+    } catch (e) { state.watchedHistory = {}; }
     state.topicSignals = JSON.parse(getStoredItem("topic_signals") || "{}");
     state.agentQueue = JSON.parse(getStoredItem("agent_queue") || "[]");
     state.llmCallStats = JSON.parse(getStoredItem("llm_call_stats") || "{}");
@@ -768,7 +901,26 @@ function loadState() {
     state.playlistStates = rawPlaylistStates ? JSON.parse(rawPlaylistStates) : {};
     state.discoveredChannels = rawDiscovered ? JSON.parse(rawDiscovered) : [];
     state.smartFeedSuggestionPool = rawPool ? JSON.parse(rawPool) : [];
-    state.burnedQueries = rawBurned ? JSON.parse(rawBurned) : [];
+    // Canonicalise legacy bare-string burns into {q,t,strikes} records. The
+    // conservative choice for an undated legacy burn is "sentence starts now".
+    state.burnedQueries = (rawBurned ? JSON.parse(rawBurned) : []).map(burnRecord);
+    state.dislikedTopicsMeta = JSON.parse(getStoredItem("disliked_topics_meta") || "{}");
+    // Parole sweep for dislikes that came in via a burn: they expire with the
+    // burn's base sentence. Hand-typed dislikes have no meta and never expire.
+    {
+        const now = Date.now();
+        const expired = Object.entries(state.dislikedTopicsMeta)
+            .filter(([, m]) => m && m.viaBurn && (now - (m.t || 0)) >= BURN_PAROLE_BASE_MS)
+            .map(([ph]) => ph);
+        if (expired.length) {
+            const gone = new Set(expired);
+            state.dislikedTopics = (state.dislikedTopics || []).filter(t => !gone.has(normalizeTopic(t)));
+            expired.forEach(ph => delete state.dislikedTopicsMeta[ph]);
+            persistField("disliked_topics_meta", state.dislikedTopicsMeta);
+            saveDislikedTopics();
+            debug(`[Learn] Paroled ${expired.length} burn-added disliked topic(s): ${expired.join(", ")}`);
+        }
+    }
     state.playlists = rawPlaylists ? JSON.parse(rawPlaylists) : {};
     if (state.playlists) {
         Object.values(state.playlists).forEach(pl => {
@@ -787,13 +939,25 @@ function loadState() {
     state.topicPolicies = rawPolicies ? JSON.parse(rawPolicies) : {};
     const rawClassifications = getStoredItem("candidate_classifications");
     state.candidateClassificationCache = rawClassifications ? JSON.parse(rawClassifications) : {};
+    // 30-day TTL, mirroring the grounding-verdict sweep below. This cache had
+    // NO expiry: verdicts accumulated in localStorage forever, and the `t`
+    // stamp was written but never read.
+    {
+        const classCutoff = Date.now() - 30 * 86400e3;
+        let swept = 0;
+        Object.keys(state.candidateClassificationCache).forEach(k => {
+            if ((state.candidateClassificationCache[k].t || 0) < classCutoff) {
+                delete state.candidateClassificationCache[k]; swept++;
+            }
+        });
+        if (swept) saveCandidateClassificationCache();
+    }
     const rawVerdicts = getStoredItem("grounding_verdicts");
     state.groundingVerdicts = rawVerdicts ? JSON.parse(rawVerdicts) : {};
-    // Expire grounding verdicts after 30 days — YouTube results move.
-    const verdictCutoff = Date.now() - 30 * 86400e3;
-    Object.keys(state.groundingVerdicts).forEach(k => {
-        if ((state.groundingVerdicts[k].t || 0) < verdictCutoff) delete state.groundingVerdicts[k];
-    });
+    // Expire verdicts on their per-verdict TTLs (REAL 30d, others 7d) — the
+    // same sweep the grounding interval runs, so expiry no longer waits for a
+    // page load.
+    sweepGroundingVerdicts();
     if (state.settings.statsPromptEnabled === undefined) {
         state.settings.statsPromptEnabled = true;
     }
@@ -819,6 +983,9 @@ function loadState() {
     persistField("pool_version", WG_POOL_VERSION);
 
     // Discard expired cached suggestions older than 14 days
+    // Pools saved by the old code carry frozen _score values — strip them so
+    // every entry re-scores against CURRENT preferences at render time.
+    (state.smartFeedSuggestionPool || []).forEach(v => { delete v._score; delete v._matchedTopics; });
     const fourteenDaysAgo = Date.now() - (14 * 24 * 60 * 60 * 1000);
     const initialPoolSize = state.smartFeedSuggestionPool.length;
     state.smartFeedSuggestionPool = state.smartFeedSuggestionPool.filter(v =>
@@ -1261,7 +1428,16 @@ function saveSmartFeedSuggestionPool() {
 function flushSmartFeedSuggestionPoolSave() {
     clearTimeout(_poolSaveTimer);
     _poolSaveTimer = null;
-    persistField("smart_feed_pool", state.smartFeedSuggestionPool);
+    // Strip the memoized score before persisting. Entries used to serialize
+    // with `_score` baked in, and getScoreAndMatches returns the cached value
+    // — so a dislike's -15 dislikedTopics penalty and the -50 user-disliked
+    // penalty never applied to anything already in the pool: up to 1000
+    // videos frozen at fetch-time scores for 14 days.
+    const clean = (state.smartFeedSuggestionPool || []).map(v => {
+        const { _score, _matchedTopics, ...rest } = v;
+        return rest;
+    });
+    persistField("smart_feed_pool", clean);
 }
 
 function saveBurnedQueries() { persistField("burned_queries", state.burnedQueries); }
@@ -2134,7 +2310,7 @@ function setupTopicPrefListeners() {
         if (existingIdx !== -1) {
             state.topics[existingIdx].weight = weight;
         } else {
-            state.topics.push({ phrase, weight });
+            state.topics.push({ phrase, weight, addedAt: Date.now() });
         }
         
         saveTopics();
@@ -3083,9 +3259,17 @@ async function syncFeeds() {
         if (state.ontologyGraph) {
             const graphBlocked = graphGetDislikedChannels(state.ontologyGraph, -6);
             graphBlocked.forEach(gc => {
-                if (!state.blockedChannels.some(bc => bc.id === gc.id)) {
+                // gc.id is the channel NAME: graphGetDislikedChannels returns
+                // n.label, and every label is overwritten with the human name
+                // at upsert. Writing it into `id` as well made auto-blocks
+                // match NOTHING — the id compare failed against real UC… ids
+                // and the truthy id disabled the old name path. Name-only,
+                // matched by equality in isChannelBlocked.
+                const already = state.blockedChannels.some(bc =>
+                    (bc.name || "").toLowerCase() === String(gc.id).toLowerCase());
+                if (!already) {
                     debug(`[Ontology] Auto-suppressing channel ${gc.id} (graph weight: ${gc.weight})`);
-                    state.blockedChannels.push({ name: gc.id, id: gc.id, autoBlocked: true });
+                    state.blockedChannels.push({ name: gc.id, id: "", autoBlocked: true });
                 }
             });
             saveBlocked();
@@ -3109,6 +3293,40 @@ async function syncFeeds() {
 }
 
 // Compute custom interest score for a video
+/**
+ * A dislike now reaches the pool it used to bounce off.
+ *
+ * Pool entries persisted with a memoized `_score`, and getScoreAndMatches
+ * returns the cached value — so the -15 dislikedTopics penalty and the -50
+ * user-disliked penalty never applied to anything already queued: up to 1000
+ * videos frozen at fetch-time scores for as long as 14 days. Evicting the
+ * disliked video's topic- and channel-mates is the direct fix; dropping the
+ * frozen scores is the one that makes every remaining entry re-judge itself.
+ *
+ * Returns the number of evicted entries.
+ */
+function evictPoolForDislike(topic, channelName) {
+    const dislikedTopic = (topic || "").trim().toLowerCase();
+    const dislikedChannel = (channelName || "").toLowerCase();
+    if (!dislikedTopic && !dislikedChannel) return 0;
+
+    const before = (state.smartFeedSuggestionPool || []).length;
+    state.smartFeedSuggestionPool = (state.smartFeedSuggestionPool || []).filter(pv => {
+        const pvTopic = (pv.discoveryTopic || pv._topic || pv.topic || "").trim().toLowerCase();
+        const pvChannel = (pv.channelName || "").toLowerCase();
+        if (dislikedTopic && pvTopic === dislikedTopic) return false;
+        if (dislikedChannel && pvChannel === dislikedChannel) return false;
+        return true;
+    });
+    const evicted = before - state.smartFeedSuggestionPool.length;
+    if (evicted) {
+        debug(`[Learn] Dislike evicted ${evicted} pool entr(ies) sharing topic/channel`);
+        saveSmartFeedSuggestionPool();
+    }
+    invalidateScoreCache();
+    return evicted;
+}
+
 function invalidateScoreCache() {
     debug("[Performance] Invalidating video score cache...");
     Object.values(state.cache.videos).forEach(channelVideos => {
@@ -3119,6 +3337,14 @@ function invalidateScoreCache() {
     });
     if (state.smartFeedVideos) {
         state.smartFeedVideos.forEach(v => {
+            delete v._score;
+            delete v._matchedTopics;
+        });
+    }
+    // The pool was the blind spot: the one collection that OUTLIVES the
+    // session kept its stale scores through every invalidation.
+    if (state.smartFeedSuggestionPool) {
+        state.smartFeedSuggestionPool.forEach(v => {
             delete v._score;
             delete v._matchedTopics;
         });
@@ -3162,6 +3388,27 @@ function parseYtAgeText(text) {
 
 // Map of channelName(lower) -> like count, from the timestamped rating log.
 // Discovery videos carry an empty channelId, so name is the only join key.
+/**
+ * Is this channel blocked? One predicate for all seven former copy-paste
+ * sites. Two deliberate changes from the old inline idiom:
+ * - Name matching is EQUALITY, not includes(): a blocked channel called
+ *   "Tech" used to hide every channel with "tech" anywhere in its name.
+ * - A block that has an id also matches by NAME when the video carries no id
+ *   (HTML-fallback discovery) — the old `!bc.id` guard silently disabled the
+ *   name path the moment an id was recorded, which is what made auto-blocked
+ *   entries (written with id === name) match nothing at all.
+ */
+function isChannelBlocked(channelId, channelName) {
+    const nameLower = (channelName || "").toLowerCase();
+    return (state.blockedChannels || []).some(bc => {
+        if (bc.id && channelId && bc.id === channelId) return true;
+        if (bc.name && nameLower && (!bc.id || !channelId)) {
+            return nameLower === bc.name.toLowerCase();
+        }
+        return false;
+    });
+}
+
 let _likedChannelCache = null;
 function getLikedChannelAffinity() {
     if (_likedChannelCache) return _likedChannelCache;
@@ -3238,7 +3485,10 @@ function scoreDiscoveryVideo(video, ctx) {
     // Intent & Semantic Classification:
     let intent = 0.5;
     let classificationPenalty = 0;
-    const classification = video._classification || (state.candidateClassificationCache && state.candidateClassificationCache[video.id]?.classification);
+    // Same-topic verdicts only — a cross-topic verdict is about a different
+    // question (see cachedClassificationFor).
+    const cachedRec = video._classification ? null : cachedClassificationFor(video.id, topic);
+    const classification = video._classification || (cachedRec && cachedRec.classification);
 
     if (classification === "ON_TOPIC") {
         intent = 1.0;
@@ -3298,7 +3548,10 @@ function scoreDiscoveryVideo(video, ctx) {
         if (ageDays < 7) maturity = 0.3;
         else if (ageDays < 90) maturity = 0.7;
         else if (ageDays < 8 * 365) maturity = 1.0;
-        else maturity = 0.85;
+        else if (ageDays < 12 * 365) maturity = 0.85;
+        // Past ~12 years, age stops being "proven" and starts being "stale
+        // thumbnails and dead scenes" — taper below the 90-day tier.
+        else maturity = 0.6;
     }
 
     // watchability: duration fit minus clickbait styling & classification penalty
@@ -3373,10 +3626,15 @@ function getScoreAndMatches(video) {
         });
     }
     
-    // Vintage bonus: pre-2023 videos are more likely to be genuine quality content
+    // Vintage bonus: pre-AI-slop videos are more likely to be genuine quality
+    // content. Bounded to the 2008-2023 window and worth +1, not +3 — combined
+    // with the discovery scorer's maturity curve, the old +3 meant a 20-year-
+    // old video was rewarded twice over and outranked everything under 90
+    // days regardless of relevance.
     const JAN_2023 = 1672531200000; // new Date("2023-01-01").getTime()
-    if (video.published && video.published < JAN_2023 && video.published > 946684800000) {
-        score += 3;
+    const JAN_2008 = 1199145600000; // new Date("2008-01-01").getTime()
+    if (video.published && video.published < JAN_2023 && video.published > JAN_2008) {
+        score += 1;
         matches.push("vintage");
     }
     
@@ -3685,6 +3943,9 @@ function wireCardRatingButtons(card, video, videoTopicForRating) {
                     }
                     state.topics = state.topics.filter(t => t.phrase.toLowerCase() !== normalized);
                     saveTopics();
+                }
+                if (rating === -5) {
+                    evictPoolForDislike(videoTopicForRating, video.channelName);
                 }
                 
                 card.querySelectorAll(".title-rating-btn").forEach(b => b.classList.remove("active"));
@@ -4404,9 +4665,8 @@ function renderFeed() {
         });
         
         subVideos = subVideos.filter(video => {
-            const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === video.channelId);
-            const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && video.channelName && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
-            return !isBlockedId && !isBlockedName && video.score > -10;
+            const isBlockedChannel = isChannelBlocked(video.channelId, video.channelName);
+            return !isBlockedChannel && video.score > -10;
         });
         
         let subShorts = [];
@@ -4473,9 +4733,8 @@ function renderFeed() {
         });
         
         allVideos = allVideos.filter(video => {
-            const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === video.channelId);
-            const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && video.channelName && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
-            return !isBlockedId && !isBlockedName && video.score > -10;
+            const isBlockedChannel = isChannelBlocked(video.channelId, video.channelName);
+            return !isBlockedChannel && video.score > -10;
         });
         
         allVideos = allVideos.filter(v => 
@@ -4509,9 +4768,8 @@ function renderFeed() {
             });
             
             discoverVideos = discoverVideos.filter(video => {
-                const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === video.channelId);
-                const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && video.channelName && video.channelName.toLowerCase().includes(bc.name.toLowerCase()));
-                return !isBlockedId && !isBlockedName && video.score > -10;
+                const isBlockedChannel = isChannelBlocked(video.channelId, video.channelName);
+                return !isBlockedChannel && video.score > -10;
             });
             
             discoverVideos = discoverVideos.filter(dv => !allVideos.some(sv => sv.id === dv.id));
@@ -4743,6 +5001,12 @@ function playVideo(video) {
                 state.videoRatings[video.id] = -5;
                 state.likedVideos = state.likedVideos.filter(v => v.id !== video.id);
                 graphRating = -1; // Apply dislike
+                // Same eviction the card button performs — otherwise the
+                // behaviour would depend on WHICH dislike button was pressed.
+                evictPoolForDislike(
+                    video.discoveryTopic || video._topic || video.topic,
+                    video.channelName
+                );
             }
             graphProcessRating(state.ontologyGraph, {
                 ...video,
@@ -5469,7 +5733,13 @@ function renderPreferencesLists(filterQuery) {
     };
 
     renderList("liked-topics-list", state.likedTopics, (phrase) => {
-        nukeDiscoverTopic(phrase);
+        // "Remove from my liked list" is NOT "never show me this again" — this
+        // used to call nukeDiscoverTopic, which burned the topic and demoted
+        // every sibling sharing its identity. Now it just stops protecting the
+        // topic from decay; burning stays available on the suggestion pills.
+        state.likedTopics = state.likedTopics.filter(t => normalizeTopic(t) !== normalizeTopic(phrase));
+        saveLikedTopics();
+        renderPreferencesLists(q);
     });
 
     renderList("disliked-topics-list", state.dislikedTopics, (phrase) => {
@@ -5478,11 +5748,17 @@ function renderPreferencesLists(filterQuery) {
         renderPreferencesLists(q);
     });
 
-    renderList("burned-queries-list", state.burnedQueries, (phrase) => {
-        state.burnedQueries = state.burnedQueries.filter(t => t !== phrase);
-        saveBurnedQueries();
-        renderPreferencesLists(q);
-    });
+    // Burns render as their phrase (with a strike count when > 1); deleting
+    // removes the RECORD, which is a full pardon rather than a parole.
+    renderList("burned-queries-list",
+        state.burnedQueries.map(b => { const r = burnRecord(b); return r.strikes > 1 ? `${r.q} (x${r.strikes})` : r.q; }),
+        (label) => {
+            const phrase = label.replace(/ \(x\d+\)$/, "");
+            state.burnedQueries = state.burnedQueries.filter(b => burnRecord(b).q !== phrase);
+            invalidateBurnedSignatures();
+            saveBurnedQueries();
+            renderPreferencesLists(q);
+        });
 }
 
 function renderTopicsList(filterQuery) {
@@ -5594,7 +5870,7 @@ function importSettings(file) {
                 state.blockedChannels = Array.isArray(backup.blockedChannels) ? backup.blockedChannels : [];
                 if (Array.isArray(backup.likedTopics)) { state.likedTopics = backup.likedTopics; saveLikedTopics(); }
                 if (Array.isArray(backup.dislikedTopics)) { state.dislikedTopics = backup.dislikedTopics; saveDislikedTopics(); }
-                if (Array.isArray(backup.burnedQueries)) { state.burnedQueries = backup.burnedQueries; saveBurnedQueries(); }
+                if (Array.isArray(backup.burnedQueries)) { state.burnedQueries = backup.burnedQueries.map(burnRecord); invalidateBurnedSignatures(); saveBurnedQueries(); }
                 saveChannels();
                 saveTopics();
                 saveBlocked();
@@ -5944,7 +6220,8 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
                                     id: item.video_id,
                                     title: item.title,
                                     channelName: item.channel,
-                                    channelId: "",
+                                    // UC… id from the scraper (added 2026-08-22).
+                                    channelId: item.channel_id || "",
                                     published: item.published_at ? Date.parse(item.published_at) : null,
                                     duration: item.duration_secs,
                                     viewCount: item.view_count,
@@ -6166,9 +6443,8 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
     };
     
     // Blocked channel/nuke checks
-    const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === enrichedVideo.channelId);
-    const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && enrichedVideo.channelName && enrichedVideo.channelName.toLowerCase().includes(bc.name.toLowerCase()));
-    if (isBlockedId || isBlockedName || enrichedVideo.score <= -10) {
+    const isBlockedChannel = isChannelBlocked(enrichedVideo.channelId, enrichedVideo.channelName);
+    if (isBlockedChannel || enrichedVideo.score <= -10) {
         return; // Filtered out
     }
     
@@ -6231,6 +6507,41 @@ function formatDuration(secs) {
     }
     parts.push(seconds.toString().padStart(2, '0'));
     return parts.join(':');
+}
+
+/**
+ * Binary spam-shape gate for discovery candidates, applied BEFORE scoring and
+ * before the LLM classifier spends a call. Every previous filter here was a
+ * soft penalty on a scale where only -10 total mattered — a 45-second
+ * ALL-CAPS 0-view short passed every gate. Thresholds for the title rules are
+ * the extension's proven ones (content.js failsHeuristics), which until now
+ * only protected youtube.com, not the dashboard's own feed.
+ *
+ * Returns the reason string (for debug counts) or null to keep.
+ */
+function isSpamShapedVideo(v, likedChannels) {
+    // Shorts: muteShorts finally applies to the smart feed — it was enforced
+    // at four render sites and none of them was the main discovery surface.
+    if (state.settings.muteShorts && isShortVideo(v)) return "short";
+
+    const title = v.title || "";
+    const letters = title.replace(/[^a-zA-Z]/g, "");
+    if (letters.length > 5) {
+        const caps = title.replace(/[^A-Z]/g, "");
+        if (caps.length / letters.length > 0.8) return "all-caps";
+    }
+    if (/[!?]{3,}/.test(title)) return "punctuation";
+
+    // Near-zero views is the spam floor. The scorer used to round 0 views UP
+    // to 10 and score on. Liked channels are exempt so a followed creator's
+    // day-old upload is not punished for being new. Tunable; flagged in the
+    // commit for retuning if it costs genuinely new niche videos.
+    const views = Number(v.viewCount);
+    if (Number.isFinite(views) && views >= 0 && views < 100 && v.viewCount !== undefined && v.viewCount !== null) {
+        const lc = (v.channelName || "").toLowerCase();
+        if (!(likedChannels && likedChannels.has(lc))) return "low-views";
+    }
+    return null;
 }
 
 function isShortVideo(video) {
@@ -6671,6 +6982,29 @@ function buildTopicLikeCounts() {
  * Turn the ledger into labelled evidence for the prompt.
  * Pure — takes no arguments, reads state, returns a plain object. Unit-tested.
  */
+/**
+ * The IGNORED verdict, shared by the prompt (buildTopicOutcomes) and by feed
+ * selection (getWeightedRandomTopics) so the two can never drift: shown
+ * repeatedly, never once acted on. One open, play or like makes this false —
+ * that IS the revival path, no separate mechanism needed.
+ */
+function isIgnoredTopic(phrase, likeCounts) {
+    const t = normalizeTopic(phrase);
+    if (!t) return false;
+    if (likeCounts && (likeCounts[t] || 0) > 0) return false;
+    return topicSignalTotal(t, "imp") >= OUTCOME_IGNORED_MIN_IMPRESSIONS &&
+        topicSignalTotal(t, "play") === 0 &&
+        topicSignalTotal(t, "open") === 0;
+}
+
+/** The PROVEN verdict — liked, or deliberately played enough to trust. */
+function isProvenTopic(phrase, likeCounts) {
+    const t = normalizeTopic(phrase);
+    if (!t) return false;
+    if (likeCounts && (likeCounts[t] || 0) > 0) return true;
+    return topicSignalTotal(t, "play") >= OUTCOME_PROVEN_MIN_PLAYS;
+}
+
 function buildTopicOutcomes() {
     const likeCounts = buildTopicLikeCounts();
     const signals = state.topicSignals || {};
@@ -6684,9 +7018,9 @@ function buildTopicOutcomes() {
         const open = topicSignalTotal(topic, "open");
         const likes = likeCounts[topic] || 0;
 
-        if (likes > 0 || play >= OUTCOME_PROVEN_MIN_PLAYS) {
+        if (isProvenTopic(topic, likeCounts)) {
             proven.push({ t: topic, likes, plays: play, opens: open });
-        } else if (imp >= OUTCOME_IGNORED_MIN_IMPRESSIONS && play === 0 && open === 0 && likes === 0) {
+        } else if (isIgnoredTopic(topic, likeCounts)) {
             // …and never acted on. This is the measured failure.
             ignored.push({ t: topic, shown: imp });
         }
@@ -6759,7 +7093,7 @@ function buildLlmContext() {
         interests: combinedInterests,
         disliked: state.topics.filter(t => t.weight < 0).slice(0, 10).map(t => t.phrase),
         recentUsed: state.smartFeedUsedTopics.slice(-20),
-        burnedQueries: state.burnedQueries.slice(-30),
+        burnedQueries: activeBurnedPhrases().slice(-30),
         searches: state.searchHistory.slice(-10),
         likedVideos: likedVideos,
         watchlist: watchlist,
@@ -6787,7 +7121,7 @@ function buildOutcomeContext() {
     // can be compared later on real outcomes instead of on impressions.
     _lastContextVariant = useStats ? "stats" : "flat";
     if (!useStats) {
-        return { failedExamples: state.burnedQueries.slice(-10), promptVariant: "flat" };
+        return { failedExamples: activeBurnedPhrases().slice(-10), promptVariant: "flat" };
     }
     return {
         topicOutcomes: outcomes,
@@ -7244,6 +7578,20 @@ function interleaveArrays(...arrays) {
  * Batched semantic classification of candidate videos via lazy-agent-service.
  * Classifies top candidate videos as ON_TOPIC, ADJACENT, NOVELTY, or OFF_TOPIC.
  */
+/**
+ * A cached classification is only trusted for the topic it was judged
+ * against. The cache used to be keyed on video id alone, so one OFF_TOPIC
+ * verdict for topic A permanently poisoned that video for topics B, C, D —
+ * "military tank battle" is OFF_TOPIC for "fish tanks" and dead-on for
+ * "tank museum restorations". A mismatched topic means re-classify.
+ */
+function cachedClassificationFor(videoId, topic) {
+    const rec = state.candidateClassificationCache && state.candidateClassificationCache[videoId];
+    if (!rec) return null;
+    if (rec.topic && normalizeTopic(rec.topic) !== normalizeTopic(topic)) return null;
+    return rec;
+}
+
 async function classifyCandidatesWithLLM(topic, candidates) {
     if (!candidates || candidates.length === 0) return candidates;
     if (state.settings && state.settings.semanticFilterEnabled === false) return candidates;
@@ -7251,15 +7599,16 @@ async function classifyCandidatesWithLLM(topic, candidates) {
     const policy = getTopicPolicy(topic);
     if (!state.candidateClassificationCache) state.candidateClassificationCache = {};
 
-    const unclassified = candidates.filter(v => 
-        !v._classification && 
-        !(state.candidateClassificationCache && state.candidateClassificationCache[v.id])
+    const unclassified = candidates.filter(v =>
+        !v._classification && !cachedClassificationFor(v.id, topic)
     );
 
     if (unclassified.length > 0) {
         try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 6000);
+            // 12s: the slice below can now span two backend batches of 15;
+            // the old 6s budget was sized for one.
+            const timeoutId = setTimeout(() => controller.abort(), 12000);
             const resp = await countedFetch("/api/wallgarden/classify-candidates", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -7268,7 +7617,7 @@ async function classifyCandidatesWithLLM(topic, candidates) {
                     intent: policy.intent || topic,
                     includeFacets: policy.includeFacets || [],
                     excludeFacets: policy.excludeFacets || [],
-                    candidates: unclassified.slice(0, 15).map(v => ({
+                    candidates: unclassified.slice(0, 30).map(v => ({
                         id: v.id,
                         title: v.title,
                         channel: v.channelName,
@@ -7286,6 +7635,7 @@ async function classifyCandidatesWithLLM(topic, candidates) {
                         state.candidateClassificationCache[c.id] = {
                             classification: c.classification,
                             reason: c.reason,
+                            topic: normalizeTopic(topic),
                             t: Date.now()
                         };
                     });
@@ -7297,11 +7647,12 @@ async function classifyCandidatesWithLLM(topic, candidates) {
         }
     }
 
-    // Hydrate all candidates from cache
+    // Hydrate all candidates from cache — same-topic verdicts only.
     candidates.forEach(v => {
-        if (!v._classification && state.candidateClassificationCache && state.candidateClassificationCache[v.id]) {
-            v._classification = state.candidateClassificationCache[v.id].classification;
-            v._classificationReason = state.candidateClassificationCache[v.id].reason;
+        const rec = v._classification ? null : cachedClassificationFor(v.id, topic);
+        if (rec) {
+            v._classification = rec.classification;
+            v._classificationReason = rec.reason;
         }
     });
 
@@ -7378,7 +7729,10 @@ async function fetchVideosForTopic(topic) {
                             id: item.video_id,
                             title: item.title,
                             channelName: item.channel,
-                            channelId: "",
+                            // UC… id from the scraper (added 2026-08-22) — empty only on
+                            // its DuckDuckGo fallback. Real ids make id-based channel
+                            // blocking and graph Channel nodes finally work on discovery.
+                            channelId: item.channel_id || "",
                             published: item.published_at ? Date.parse(item.published_at) : null,
                             duration: item.duration_secs,
                             viewCount: item.view_count,
@@ -7473,6 +7827,8 @@ async function fetchVideosForTopic(topic) {
                                         id: videoId,
                                         title: title,
                                         channelName: channelName,
+                                        // HTML-scrape fallback: the results page carries no
+                                        // stable UC… id worth trusting — name-only.
                                         channelId: "",
                                         published: parseYtAgeText(vr.publishedTimeText?.simpleText),
                                         duration: parseYtDurationText(vr.lengthText?.simpleText),
@@ -7497,13 +7853,22 @@ async function fetchVideosForTopic(topic) {
     }
     
     if (videos.length > 0) {
+        const spamLikedChannels = new Set(getLikedChannelAffinity().keys());
+        const spamDropped = {};
         const kept = videos.filter(v => {
+            // Hard spam-shape gate first — cheaper than scoring, far cheaper
+            // than the classifier call the survivors get.
+            const spamReason = isSpamShapedVideo(v, spamLikedChannels);
+            if (spamReason) {
+                spamDropped[spamReason] = (spamDropped[spamReason] || 0) + 1;
+                return false;
+            }
+
             const evaluation = getScoreAndMatches(v);
             v.score = evaluation.score;
             v.matchedTopics = evaluation.matches;
 
-            const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === v.channelId);
-            const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && v.channelName && v.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+            const isBlockedChannel = isChannelBlocked(v.channelId, v.channelName);
 
             // Never resurface videos already watched (incl. synced from YouTube) or disliked
             const isWatched = state.watchedHistory && state.watchedHistory[v.id];
@@ -7519,11 +7884,18 @@ async function fetchVideosForTopic(topic) {
                 v._classificationReason = isExcludedFacet ? "excluded facet match" : "novelty pattern match";
             }
 
-            return !isBlockedId && !isBlockedName && !isWatched && !isDisliked && v.score > -10;
+            return !isBlockedChannel && !isWatched && !isDisliked && v.score > -10;
         });
 
-        // Run batched semantic classifier on top unclassified candidates (up to 15)
-        await classifyCandidatesWithLLM(topic, kept.slice(0, 15));
+        if (Object.keys(spamDropped).length) {
+            debug(`[Discovery] "${topic}": dropped spam-shaped ${JSON.stringify(spamDropped)}`);
+        }
+
+        // Classify EVERY kept candidate. The old slice(0, 15) left candidates
+        // 16-25 unlabelled, and unlabelled videos sail past the NOVELTY/
+        // OFF_TOPIC drop below — the _rankScore floor cannot catch them.
+        // Backend fans out at CLASSIFY_BATCH_SIZE=15 with a route cap of 50.
+        await classifyCandidatesWithLLM(topic, kept.slice(0, 30));
 
         // Rank best-first so the downstream per-topic cap keeps the top
         // candidates instead of whatever arrived first.
@@ -7572,11 +7944,52 @@ function scheduleGrounding(delayMs) {
     }, delayMs);
 }
 
+// Per-verdict cache lifetimes. REAL is stable knowledge (30d). SLOP/DEAD are
+// short (7d) ON PURPOSE: the candidate filter skips any topic that holds a
+// verdict, so under the old flat 30d a first-strike topic could not be
+// re-judged — the burn-on-second-strike path was unreachable for a month.
+// MIXED also 7d: it takes no action, but it still occupies the filter slot.
+const GROUNDING_VERDICT_TTL_MS = {
+    REAL: 30 * 86400e3,
+    MIXED: 7 * 86400e3,
+    SLOP: 7 * 86400e3,
+    DEAD: 7 * 86400e3,
+};
+
+function sweepGroundingVerdicts() {
+    const now = Date.now();
+    let removed = 0;
+    Object.entries(state.groundingVerdicts || {}).forEach(([k, v]) => {
+        const ttl = GROUNDING_VERDICT_TTL_MS[v && v.verdict] || 7 * 86400e3;
+        if (now - ((v && v.t) || 0) > ttl) { delete state.groundingVerdicts[k]; removed++; }
+    });
+    if (removed) saveGroundingVerdicts();
+}
+
+let _groundingInterval = null;
+function startGroundingInterval() {
+    if (_groundingInterval) return;
+    _groundingInterval = setInterval(() => {
+        if (!state.settings.groundingEnabled) return;
+        if (_groundingInProgress) return;
+        if (!(state.smartFeedTopicsQueue || []).length) return;
+        sweepGroundingVerdicts();   // expiry must not wait for a page load
+        groundNextQueuedTopics();
+    }, 90_000);
+}
+
 function applyGroundingVerdict(topic, verdict) {
     const norm = normalizeTopic(topic);
     const prev = state.groundingVerdicts[norm];
     state.groundingVerdicts[norm] = { verdict, t: Date.now() };
 
+    if (verdict === "MIXED") {
+        // Some real signal amid filler: no demotion, no bonus. The verdict is
+        // stored (7d) so the lookahead moves on, then the topic gets re-judged
+        // once YouTube's results have had a week to shift.
+        debug(`[Grounding] "${norm}" judged MIXED — leaving weight untouched.`);
+        return;
+    }
     if (verdict === "REAL") {
         const entry = state.topics.find(t => normalizeTopic(t.phrase) === norm);
         if (entry && entry.weight > 0) entry.weight += 2; // evidence bonus
@@ -7762,7 +8175,9 @@ async function fillSmartFeedPreloadBuffer() {
     
     if (state.smartFeedTopicsQueue.length === 0) {
         debug("[Smart Feed] Queue is empty! Repopulating from positive topics...");
-        const randomizedTopics = getWeightedRandomTopics(state.topics);
+        // Same burn filter initSmartFeed applies — without it, a mid-session
+        // burn's reworded siblings walked straight back into the queue here.
+        const randomizedTopics = getWeightedRandomTopics(state.topics).filter(t => !isBurned(t));
         state.smartFeedTopicsQueue = [...randomizedTopics];
     }
     
@@ -7783,8 +8198,11 @@ async function fillSmartFeedPreloadBuffer() {
     state.smartFeedPreloadLoading = true;
     state.smartFeedUsedTopics.push(...topicsToFetch);
 
-    // Keep the grounding lookahead window full as the queue drains.
-    scheduleGrounding(5000);
+    // NO scheduleGrounding here. This loop re-enters every ~1.5s while the
+    // video pool is under 1000, and scheduleGrounding is a DEBOUNCE — each
+    // pass cancelled the previous 5s timer, so grounding only ever fired when
+    // a fetch round happened to take longer than ~3.5s. The gate now runs on
+    // its own interval (startGroundingInterval), immune to this loop's pace.
     
     if (isPoolEmpty) {
         debug(`[Smart Feed Preload] Cold start — parallel fetching ${topicsToFetch.length} topics: ${topicsToFetch.join(', ')}`);
@@ -7882,10 +8300,9 @@ async function loadNextSmartFeedBatch() {
             v.score = evaluation.score;
             v.matchedTopics = evaluation.matches;
             
-            const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === v.channelId);
-            const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && v.channelName && v.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+            const isBlockedChannel = isChannelBlocked(v.channelId, v.channelName);
             
-            return !isBlockedId && !isBlockedName && v.score > -10;
+            return !isBlockedChannel && v.score > -10;
         });
         
         const existingIds = new Set(state.smartFeedVideos.map(v => v.id));
@@ -7966,10 +8383,13 @@ async function loadNextSmartFeedBatch() {
     if (state.smartFeedTopicsQueue.length === 0) {
         const positiveTopics = state.topics.filter(t => t.weight > 0);
         if (positiveTopics.length > 0) {
-            debug("[Smart Feed] Queue is empty! Generating more topics first...");
-            const randomizedTopics = getWeightedRandomTopics(state.topics);
-            state.smartFeedTopicsQueue = [...randomizedTopics];
-            generateBrainstormTopics(true);
+            debug("[Smart Feed] Queue is empty! Repopulating from positive topics...");
+            // The generateBrainstormTopics(true) that used to sit here was the
+            // last surviving automatic 100-topic brainstorm — unreachable only
+            // because this branch requires an empty queue AND a non-empty
+            // positive pool, and the line above always refilled the queue
+            // first. Deleted rather than left one edit from resurrection.
+            state.smartFeedTopicsQueue = getWeightedRandomTopics(state.topics).filter(t => !isBurned(t));
         }
     }
     
@@ -8063,10 +8483,9 @@ async function replenishSmartFeed(count, appendToDom = true) {
             v.score = evaluation.score;
             v.matchedTopics = evaluation.matches;
             
-            const isBlockedId = state.blockedChannels.some(bc => bc.id && bc.id === v.channelId);
-            const isBlockedName = state.blockedChannels.some(bc => !bc.id && bc.name && v.channelName && v.channelName.toLowerCase().includes(bc.name.toLowerCase()));
+            const isBlockedChannel = isChannelBlocked(v.channelId, v.channelName);
             
-            return !isBlockedId && !isBlockedName && v.score > -10;
+            return !isBlockedChannel && v.score > -10;
         });
         
         const existingIds = new Set(state.smartFeedVideos.map(v => v.id));
@@ -8106,29 +8525,22 @@ function nukeDiscoverTopic(topic) {
     
     const normalizedTopic = topic.trim().toLowerCase();
 
-    // 1-2. Burn it: blacklist permanently, mark disliked, drive it negative in
-    // the graph so its neighbours cool off, and demote its siblings.
+    // Count the rendered cards BEFORE burning — burnTopic filters
+    // smartFeedVideos itself now, so counting afterwards always reads 0 and
+    // the replenish below would never fire.
+    const removedCount = (state.smartFeedVideos || []).filter(v =>
+        ((v.discoveryTopic || v._topic || v.topic || "").trim().toLowerCase()) === normalizedTopic
+    ).length;
+
+    // 1-2. Burn it: blacklist (with parole), mark disliked, drive it negative
+    // in the graph so its neighbours cool off, and demote its siblings. Also
+    // clears the queue, pool, rendered videos, ledger and verdict records.
     burnTopic(normalizedTopic);
 
-    // 3. Clear from queue/preload states
-    state.smartFeedUsedTopics = state.smartFeedUsedTopics.filter(t => t !== normalizedTopic);
-    state.smartFeedTopicsQueue = state.smartFeedTopicsQueue.filter(t => t !== normalizedTopic);
-    state.smartFeedSuggestionPool = state.smartFeedSuggestionPool.filter(item => 
-        (item.topic || "").toLowerCase() !== normalizedTopic && 
-        (item.discoveryTopic || "").toLowerCase() !== normalizedTopic &&
-        (item._topic || "").toLowerCase() !== normalizedTopic
-    );
-    saveSmartFeedSuggestionPool();
-    
-    // 4. Remove videos of this topic from active smartFeedVideos state
-    const initialVideosCount = state.smartFeedVideos.length;
-    state.smartFeedVideos = state.smartFeedVideos.filter(v => 
-        (v.topic || "").toLowerCase() !== normalizedTopic &&
-        (v.discoveryTopic || "").toLowerCase() !== normalizedTopic &&
-        (v._topic || "").toLowerCase() !== normalizedTopic
-    );
-    const removedCount = initialVideosCount - state.smartFeedVideos.length;
-    
+    // 3-4. Queue/pool/video cleanup now lives INSIDE burnTopic — it used to be
+    // open-coded here only, so every AUTOMATIC burn (grounding second strike,
+    // suggestion delete) left the burned topic's videos in the persisted pool.
+
     // 5. Locate and remove DOM elements
     const elements = [
         ...Array.from(document.querySelectorAll('.discover-section-header')),

@@ -132,13 +132,30 @@ const weights = S.topics.map(t => t.weight);
 assert.ok(Math.min(...weights) >= Math.max(...weights) - 8, "kept the strongest");
 console.log(`✅ pool capped 600 -> ${S.topics.length} (max ${TOPIC_POOL_MAX}), strongest kept`);
 
-// ── 6. used topics decay so duds die instead of accumulating ──────
+// ── 6. stale topics decay so duds die instead of accumulating ─────
+// CONTRACT CHANGE (wave 1): decay used to key on the session-only
+// smartFeedUsedTopics list, which was never persisted — so the one prune
+// guaranteed to run (page load) decayed nothing, ever. Decay now keys on
+// wall-clock staleness: no addedAt refresh and no ledger signal for 7 days.
 reset(fresh());
-S.smartFeedUsedTopics = ["kiln atmosphere control"];
+const WEEK = 7 * 86400e3;
+S.topics.forEach(t => { t.addedAt = Date.now() - (8 * 86400e3); }); // all 8 days old
+S.topicSignals = {};
 const before = w("kiln atmosphere control");
 pruneTopicPool();
-assert.ok(w("kiln atmosphere control") < before, "a used topic decays");
-console.log(`✅ used topic decays ${before} -> ${w("kiln atmosphere control")}`);
+assert.ok(w("kiln atmosphere control") < before, "a stale topic decays");
+// A fresh topic must NOT decay...
+reset(fresh());
+S.topics.forEach(t => { t.addedAt = Date.now(); });
+pruneTopicPool();
+assert.strictEqual(w("kiln atmosphere control"), 8, "a fresh topic does not decay");
+// ...and neither does a stale topic the ledger says the user engages with.
+reset(fresh());
+S.topics.forEach(t => { t.addedAt = Date.now() - (8 * 86400e3); });
+S.topicSignals = { "kiln atmosphere control": { t: Date.now() - (8 * 86400e3), c: { cA: { play: 3 } }, f: {} } };
+pruneTopicPool();
+assert.strictEqual(w("kiln atmosphere control"), 8, "a PROVEN topic is decay-exempt");
+console.log("✅ stale topics decay; fresh and PROVEN topics do not");
 
 // ── 7. a SPECIFIC burn spares the broader topic it specialises ────
 reset(fresh());
@@ -149,14 +166,16 @@ assert.ok(!isBurned("computing"), "the general topic 'computing' survives a spec
 assert.ok(!isBurned("quantum"), "the general topic 'quantum' survives a specific burn");
 console.log("✅ specific burn does not swallow the broader topic");
 
-// ── 8. used-topic decay survives mixed-case data ──────────────────
-// The queue historically stored topics in the backend's own casing, so the
-// used-list and the topic pool could both be Title-Case. Decay must still fire.
+// ── 8. staleness lookups survive mixed-case data ──────────────────
+// The pool historically stored topics in the backend's own casing while the
+// signal ledger keys are normalized. The freshness lookup must still match.
 reset(fresh());
-S.topics.push({ phrase: "Raku Firing", weight: 6 });
-S.smartFeedUsedTopics = ["Raku Firing"];   // mixed-case, as the queue stored it
+S.topics.push({ phrase: "Raku Firing", weight: 6, addedAt: Date.now() - (8 * 86400e3) });
+S.topics.forEach(t => { if (!t.addedAt) t.addedAt = Date.now(); });
+// A signal five minutes ago, recorded under the NORMALIZED key:
+S.topicSignals = { "raku firing": { t: Date.now() - 300e3, c: { cA: { imp: 1 } }, f: {} } };
 pruneTopicPool();
-assert.ok(w("Raku Firing") < 6, "a used topic decays even when case differs");
-console.log("✅ decay matches used topics case-insensitively");
+assert.strictEqual(w("Raku Firing"), 6, "a recent signal keeps a mixed-case topic fresh");
+console.log("✅ freshness lookup matches ledger keys case-insensitively");
 
 console.log("\nAll learning tests passed.");
