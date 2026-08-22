@@ -7865,7 +7865,13 @@ async function generateDiscoverChannels(force = false) {
             // any tab whose localStorage still holds a Gold Spark selection.
             const { provider, model } = getPinnedModel();
 
-            const resp = await fetch("/prism/chat", {
+            // ?stream=false is REQUIRED: prism's /chat streams SSE by
+            // default, and the resp.json() below cannot parse "data: {…}"
+            // frames. Without it this call threw on every run and the catch
+            // swallowed it, so the AI channel suggestion silently never
+            // appeared. Verified against the live gateway: the streaming body
+            // fails JSON.parse at char 0; ?stream=false returns {text:"OK"}.
+            const resp = await fetch("/prism/chat?stream=false", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
