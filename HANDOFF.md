@@ -1,3 +1,95 @@
+# Handoff — pinned to the Jetson, and the AI channel suggestion never ran (2026-08-22)
+
+Commit `b29bdf0` (this repo) + `lazy-agent-service@8456371`. Both containers
+deployed to synology and live-verified. Assets at `?v=20260822-v61`.
+
+## Why
+
+All wallgarden LLM work now runs on the **Jetson** (10.0.0.30:8000,
+`cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit`). Gold Spark is shared with the trading
+stack and is deliberately no longer used — not even as a fallback. The backend
+enforces the pin; see `lazy-agent-service/HANDOFF.md` for the resolver change
+and the GPU-counter evidence.
+
+The 07-28 note in this file said *"Provider resolution still prefers Gold Spark
+(`vllm-2`, gemma-4-26B) over Jetson's Qwen — unchanged behavior"*. That is now
+resolved, and Gold Spark has since been swapped to `deepseek-v4-flash-0731`.
+
+## The trap this repo contributed
+
+The dashboard persists its dropdown pick as `provider::model` in localStorage
+(`state.settings.llmModel`) and `buildLlmContext()` (`app.js`) sends it on
+**every** `/api/wallgarden/*` request. The old backend took that hint verbatim
+and skipped resolution entirely — so the browser, not the server, chose the box.
+
+**Changing only the server default would have looked fixed on a clean profile
+and changed nothing in an existing tab.** The backend now ignores non-Jetson
+hints. Existing tabs also self-heal: `/wallgarden/models` returns only the
+Jetson, so `fetchWallgardenModels()` finds the saved value missing and
+re-selects.
+
+## The bug that was hiding behind a `catch`
+
+The channel-recommendation call (`app.js`, the `vllmPromise` block) is the ONE
+path that skips the wallgarden backend and hits prism directly. It did:
+
+```js
+const resp = await fetch("/prism/chat", { … });
+const data = await resp.json();
+```
+
+**Prism's `/chat` streams SSE unless you pass `?stream=false`.** The body was
+`data: {…}` frames, `resp.json()` threw at character 0 on every single run, and
+the surrounding `catch` turned that into a `console.error`. The "AI Suggestion"
+source silently never appeared in the recommendations list — for as long as the
+call has existed.
+
+Measured through this container's own nginx proxy:
+
+```
+POST /prism/chat                  -> body starts 'data: {"type":"user_message"…'
+                                     JSONDecodeError at char 0
+POST /prism/chat?stream=false     -> {"text":"OK"}
+```
+
+Same call also sent snake_case `max_tokens`, which prism's `/chat` silently
+drops (already noted in the 07-28 handoff below) — so its 1000-token cap was
+never applied. Now `maxTokens`.
+
+## Qwen3.6 reasons by default
+
+The Jetson's model puts everything in a separate `reasoning` field and leaves
+`content: null`. Probed directly: a 16-token budget returned `content: null`,
+`finish_reason: "length"`, all tokens spent reasoning. Any direct call from this
+repo must send `thinkingEnabled: false` — it is mandatory, not a tuning knob.
+The backend's `callPrismChat` already sent it; the direct `/prism/chat` call did
+not, and now does.
+
+`getPinnedModel()` (next to `parseModelSetting`) is the single client-side
+identity helper: it prefers whatever the backend reports for the Jetson — so a
+re-provisioned box heals itself — and falls back to the pinned constant only
+before the model list has loaded.
+
+## Verified
+
+- `npm test` — 5 suites pass. `npm run build` — clean. `npm run test:smoke` — 12/12.
+- Live: `/api/wallgarden/models` returns only the Jetson; the minified bundle
+  serving from the container contains both the pin and `?stream=false`.
+- Every backend LLM route exercised live (brainstorm, similar, taste-profile,
+  extract-topics, judge-topics, classify-candidates) — all HTTP 200, and the
+  Jetson's `vllm:request_success_total` moved while Gold Spark's never did.
+
+## Traps for the next session
+
+- **Bump every `?v=` string** (now `20260822-v61`) or the change silently does
+  not ship — `app.min.js`/`.css` are gitignored and the Dockerfile re-minifies.
+- The settings "LLM Configuration" dropdown is now informational: only the
+  Jetson is ever offered, and the backend refuses anything else.
+- If you add another direct-to-prism call, it needs all three:
+  `?stream=false`, `maxTokens` (camelCase), and `thinkingEnabled: false`.
+
+---
+
 # Handoff — "Editorial Garden" UI retheme shipped (2026-07-28)
 
 Commit `8b87871`, deployed to synology, live-verified (v55 assets serving,
