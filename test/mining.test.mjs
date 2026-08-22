@@ -162,7 +162,8 @@ assert.strictEqual(S.groundingVerdicts["hazard analysis"].verdict, "SLOP");
 
 applyGroundingVerdict("hazard analysis", "SLOP");
 assert.ok(!S.topics.some(t => t.phrase === "hazard analysis"), "second strike burns");
-assert.ok(S.burnedQueries.includes("hazard analysis"), "burn recorded");
+// Burns are {q,t,strikes} records now (parole); readers tolerate both shapes.
+assert.ok(S.burnedQueries.some(b => (b.q || b) === "hazard analysis"), "burn recorded");
 console.log("✅ grounding SLOP: demote first, burn on second strike");
 
 // ── 5. grounding REAL: evidence bonus ─────────────────────────────
