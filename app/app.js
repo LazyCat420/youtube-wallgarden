@@ -794,6 +794,9 @@ function loadState() {
     Object.keys(state.groundingVerdicts).forEach(k => {
         if ((state.groundingVerdicts[k].t || 0) < verdictCutoff) delete state.groundingVerdicts[k];
     });
+    if (state.settings.statsPromptEnabled === undefined) {
+        state.settings.statsPromptEnabled = true;
+    }
     if (state.settings.groundingEnabled === undefined) {
         state.settings.groundingEnabled = true;
     }
@@ -865,6 +868,8 @@ function loadState() {
     document.getElementById("toggle-mute-shorts").checked = state.settings.muteShorts;
     const groundingToggle = document.getElementById("toggle-grounding");
     if (groundingToggle) groundingToggle.checked = state.settings.groundingEnabled !== false;
+    const statsToggle = document.getElementById("toggle-stats-prompt");
+    if (statsToggle) statsToggle.checked = state.settings.statsPromptEnabled !== false;
     const altPlayerInput = document.getElementById("input-alt-player-instance");
     if (altPlayerInput) {
         altPlayerInput.value = state.settings.altPlayerInstance || "https://yewtu.be";
@@ -2215,6 +2220,16 @@ function setupSettingsToggleListeners() {
             state.settings.groundingEnabled = e.target.checked;
             saveSettings();
             if (e.target.checked) scheduleGrounding(2000);
+        });
+    }
+    const statsToggleEl = document.getElementById("toggle-stats-prompt");
+    if (statsToggleEl) {
+        statsToggleEl.addEventListener("change", (e) => {
+            state.settings.statsPromptEnabled = e.target.checked;
+            saveSettings();
+            showToast(e.target.checked
+                ? "Prompts will use your measured outcomes"
+                : "Prompts back to the flat context - compare with wgPromptAB()", "info");
         });
     }
     const selectLlmModel = document.getElementById("select-llm-model");
@@ -6607,6 +6622,118 @@ function buildLikedClusters() {
 }
 
 // Build the common context payload for brainstorm/similar calls
+// ══════════════════════════════════════════════════════════════════════
+// TOPIC OUTCOMES — closing the loop
+// ══════════════════════════════════════════════════════════════════════
+//
+// Everything the system learned about how a topic PERFORMED used to be thrown
+// away: grounding verdicts were computed and discarded, A/B tiers were assigned
+// and never fed back, and `failedExamples` was a duplicate slice of
+// burnedQueries — so the one prompt field with real instructional leverage
+// ("study their SHAPE") was fed data the model had already seen.
+//
+// The Phase 1 signal ledger gives us the missing half: what the user actually
+// DID with each topic. Three verdicts fall out of it, and the middle one is the
+// valuable one because it is MEASURED rather than declared:
+//
+//   PROVEN  — they liked or repeatedly played its videos.
+//   IGNORED — shown to them again and again and never once played. A topic that
+//             looks right and is not. The user never told us; the counters did.
+//   SLOP    — real YouTube results judged generic by the grounding gate.
+//
+// Kept deliberately small: a handful of labelled examples with real numbers
+// beats a dump. Input is cheap (a brainstorm uses ~3% of the Jetson's 65,536
+// window) but attention is not.
+const OUTCOME_PROVEN_MAX = 12;
+const OUTCOME_IGNORED_MAX = 10;
+const OUTCOME_IGNORED_MIN_IMPRESSIONS = 8;  // shown this often…
+const OUTCOME_PROVEN_MIN_PLAYS = 2;
+
+/** Likes attributable to each topic, via the mined/matched topics on the rating record. */
+function buildTopicLikeCounts() {
+    const counts = Object.create(null);
+    Object.entries(state.ratingStates || {}).forEach(([id, st]) => {
+        if (!st || st.r !== 5) return;
+        const labels = new Set();
+        const v = st.v || {};
+        if (v.discoveryTopic) labels.add(normalizeTopic(v.discoveryTopic));
+        (v.matchedTopics || []).forEach(t => {
+            // The audit markers are not topics — isTopicLabel() owns that list.
+            if (typeof t === "string" && !t.startsWith("disliked:")) labels.add(normalizeTopic(t));
+        });
+        ((state.minedVideos || {})[id] || {}).topics?.forEach(t => labels.add(normalizeTopic(t)));
+        labels.forEach(l => { if (l) counts[l] = (counts[l] || 0) + 1; });
+    });
+    return counts;
+}
+
+/**
+ * Turn the ledger into labelled evidence for the prompt.
+ * Pure — takes no arguments, reads state, returns a plain object. Unit-tested.
+ */
+function buildTopicOutcomes() {
+    const likeCounts = buildTopicLikeCounts();
+    const signals = state.topicSignals || {};
+    const proven = [];
+    const ignored = [];
+
+    Object.keys(signals).forEach(topic => {
+        if (isBurned(topic)) return;   // already a declared failure; burnedQueries covers it
+        const imp = topicSignalTotal(topic, "imp");
+        const play = topicSignalTotal(topic, "play");
+        const open = topicSignalTotal(topic, "open");
+        const likes = likeCounts[topic] || 0;
+
+        if (likes > 0 || play >= OUTCOME_PROVEN_MIN_PLAYS) {
+            proven.push({ t: topic, likes, plays: play, opens: open });
+        } else if (imp >= OUTCOME_IGNORED_MIN_IMPRESSIONS && play === 0 && open === 0 && likes === 0) {
+            // …and never acted on. This is the measured failure.
+            ignored.push({ t: topic, shown: imp });
+        }
+    });
+
+    // A topic can be proven by likes even with no browsing signal yet.
+    Object.entries(likeCounts).forEach(([topic, likes]) => {
+        if (likes > 0 && !proven.some(p => p.t === topic) && !isBurned(topic)) {
+            proven.push({ t: topic, likes, plays: topicSignalTotal(topic, "play"), opens: topicSignalTotal(topic, "open") });
+        }
+    });
+
+    proven.sort((a, b) => (b.likes - a.likes) || (b.plays - a.plays));
+    ignored.sort((a, b) => b.shown - a.shown);
+
+    const slop = Object.entries(state.groundingVerdicts || {})
+        .filter(([, v]) => v && (v.verdict === "SLOP" || v.verdict === "DEAD"))
+        .sort((a, b) => (b[1].t || 0) - (a[1].t || 0))
+        .slice(0, 10)
+        .map(([topic]) => topic);
+
+    return {
+        proven: proven.slice(0, OUTCOME_PROVEN_MAX),
+        ignored: ignored.slice(0, OUTCOME_IGNORED_MAX),
+        slop
+    };
+}
+
+/**
+ * Is there enough measured evidence to be worth sending?
+ *
+ * Below this the block is noise dressed as data — a single "proven" topic tells
+ * the model nothing it cannot read off the liked-video list it already gets.
+ * This also makes the A/B honest: sessions with no evidence are not counted as
+ * "stats enabled".
+ */
+function hasUsableOutcomes(outcomes) {
+    return (outcomes.proven.length + outcomes.ignored.length + outcomes.slop.length) >= 3;
+}
+
+function statsPromptEnabled() {
+    // Default ON, but a toggle exists so the block can be switched off and the
+    // two prompt shapes compared on the same account. Without this the feature
+    // is unfalsifiable — see plan/signal_gated_topics.md.
+    return state.settings.statsPromptEnabled !== false;
+}
+
 function buildLlmContext() {
     const liked = state.topics.filter(t => t.weight > 0).sort((a, b) => b.weight - a.weight).slice(0, 15).map(t => t.phrase);
     const graphTopics = Object.values(state.ontologyGraph?.nodes || {})
@@ -6638,11 +6765,102 @@ function buildLlmContext() {
         watchlist: watchlist,
         tasteProfile: (state.tasteProfile && state.tasteProfile.text) || undefined,
         likedClusters: buildLikedClusters(),
-        failedExamples: state.burnedQueries.slice(-10),
+        ...buildOutcomeContext(),
         model: model,
         provider: provider
     };
 }
+
+/**
+ * The measured half of the context.
+ *
+ * `failedExamples` used to be `burnedQueries.slice(-10)` — the same array the
+ * model already receives as `burnedQueries`, one line further up. It now
+ * carries topics the user was SHOWN repeatedly and never touched, which is
+ * different data and the only kind that teaches a shape the user has not
+ * already had to reject by hand.
+ */
+function buildOutcomeContext() {
+    const outcomes = buildTopicOutcomes();
+    const useStats = statsPromptEnabled() && hasUsableOutcomes(outcomes);
+    // Stamped onto every topic this request produces, so the two prompt shapes
+    // can be compared later on real outcomes instead of on impressions.
+    _lastContextVariant = useStats ? "stats" : "flat";
+    if (!useStats) {
+        return { failedExamples: state.burnedQueries.slice(-10), promptVariant: "flat" };
+    }
+    return {
+        topicOutcomes: outcomes,
+        failedExamples: outcomes.ignored.map(i => i.t).slice(0, 10),
+        promptVariant: "stats"
+    };
+}
+
+// Which context shape produced the topics currently being applied.
+let _lastContextVariant = "flat";
+
+/**
+ * Score the two prompt shapes against each other on REAL outcomes.
+ *
+ * The question is never "does the stats prompt work?" — it is "does it beat the
+ * flat context that is free and already on the desk?" So this reports both arms
+ * side by side on the same account. Run it from the console: wgPromptAB().
+ *
+ * Tier-A rate is the cheap proxy (weight 8 = the rater called it well-anchored).
+ * The honest metric is the engagement one: of the topics each arm produced, how
+ * many did the user actually play or like? That needs the counters to fill in,
+ * which is why n is printed — a difference on n=3 is not a difference.
+ */
+window.wgPromptAB = function () {
+    const likeCounts = buildTopicLikeCounts();
+    const arms = { stats: [], flat: [], unstamped: [] };
+    (state.topics || []).forEach(t => {
+        if (t.weight <= 0) return;
+        (arms[t.src] || arms.unstamped).push(t);
+    });
+
+    const score = list => {
+        const n = list.length;
+        if (!n) return { n: 0 };
+        const tierA = list.filter(t => t.weight >= 8).length;
+        const played = list.filter(t => topicSignalTotal(t.phrase, "play") > 0).length;
+        const liked = list.filter(t => (likeCounts[normalizeTopic(t.phrase)] || 0) > 0).length;
+        const shown = list.filter(t => topicSignalTotal(t.phrase, "imp") > 0).length;
+        return {
+            n,
+            tierA_pct: Math.round((tierA / n) * 100),
+            // Of the topics that were actually SHOWN, how many earned a play?
+            // Rate over `shown`, not over n — a topic never surfaced cannot have
+            // failed, and counting it as a failure would punish whichever arm
+            // simply produced more.
+            engaged_pct: shown ? Math.round((played / shown) * 100) : null,
+            shown,
+            liked
+        };
+    };
+
+    const out = { stats: score(arms.stats), flat: score(arms.flat), unstamped: score(arms.unstamped) };
+    console.table(out);
+    const s = out.stats, f = out.flat;
+    if (!s.n || !f.n) {
+        console.log("Need topics from BOTH arms before this means anything. " +
+                    "Toggle Settings -> 'Use measured outcomes in prompts' to generate the other arm.");
+    } else if (s.n < 20 || f.n < 20) {
+        console.log(`n is small (stats=${s.n}, flat=${f.n}) — treat any gap as noise until both pass ~20.`);
+    }
+    return out;
+};
+
+/** What the model is being told about outcomes right now. */
+window.wgOutcomes = function () {
+    const o = buildTopicOutcomes();
+    console.log("proven :", o.proven);
+    console.log("ignored:", o.ignored);
+    console.log("slop   :", o.slop);
+    console.log(`usable: ${hasUsableOutcomes(o)} (needs >= 3 items total)`);
+    console.log(`variant this request would use: ${statsPromptEnabled() && hasUsableOutcomes(o) ? "stats" : "flat"}`);
+    return o;
+};
 
 // ── Liked-video topic mining ─────────────────────────────────
 // Turns accumulated likes into topics via the backend LLM extractor, then
@@ -6695,7 +6913,10 @@ function applyMinedTopics(videoId, ratedTopics, opts) {
         const weight = (rt.weight || 4) + 2;
         const existing = state.topics.find(t => normalizeTopic(t.phrase) === phrase);
         if (!existing) {
-            state.topics.push({ phrase, weight, addedAt: Date.now() });
+            // src = which prompt shape produced it. Without this stamp the
+            // A/B can never be scored on outcomes — the lesson from
+            // agent_skills, where 145 versions joined 0 outcome rows.
+            state.topics.push({ phrase, weight, addedAt: Date.now(), src: _lastContextVariant });
             added++;
         } else if (existing.weight > 0 && existing.weight < weight) {
             existing.weight = weight;
@@ -6975,7 +7196,7 @@ async function generateTopicsForSeeds(seeds, budget) {
             // normalizeTopic on BOTH sides — the old comparison lowercased only
             // the stored phrase, so a Title-Case reply duplicated the entry.
             if (!state.topics.some(t => normalizeTopic(t.phrase) === phrase)) {
-                state.topics.push({ phrase, weight: 4, addedAt: Date.now() });
+                state.topics.push({ phrase, weight: 4, addedAt: Date.now(), src: _lastContextVariant });
             }
             if (!state.smartFeedTopicsQueue.includes(phrase) && !state.smartFeedUsedTopics.includes(phrase)) {
                 state.smartFeedTopicsQueue.push(phrase);
