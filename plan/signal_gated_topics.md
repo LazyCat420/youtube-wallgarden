@@ -1,6 +1,6 @@
 # Signal-gated topics — blueprint
 
-Status: **Phase 1 and Phase 2 both shipped 2026-08-22.**
+Status: **Phases 1, 2 and Wave 1 all shipped 2026-08-22.**
 Phase 2's *effect* is **unproven** — see *First measurement* below, which found
 no difference. The instrument to settle it is in place.
 
@@ -228,3 +228,122 @@ Live check after deploy: open the dashboard, `wgResetCallStats()`, browse
 without liking anything for a few minutes, then `wgCallStats()`. Expect **0**
 topic-generating calls; previously this was ~8 per 15s plus one per video
 played.
+
+
+---
+
+# Wave 1 — pool hygiene + video anti-spam (shipped 2026-08-22)
+
+`youtube-wallgarden@a31094d` + `trading-service@5513c31` (scraper). Both
+deployed and live-verified.
+
+Phases 1-2 fixed how topics are BORN. Two audits found the remaining rot was
+in how they DIE and how videos are filtered.
+
+## The pool had no concept of time
+
+Every ageing mechanism was dead or inverted:
+
+| mechanism | state before |
+|---|---|
+| decay | keyed on `smartFeedUsedTopics` — **never persisted**, reset on nav. The one prune guaranteed to run (page load) decayed *nothing*, every time |
+| weight eviction | `Math.max(0.5, …)` floor made the `weight !== 0` filter unreachable |
+| the 400 cap | decay only touched **served** topics, so the cap's tail was the engaged ones. Never-served silt at birth weight 5 outlived evidence at 0.5 |
+| `addedAt` | written at four sites, **read nowhere** |
+| `topicSignals` | fed the prompt and a console tool. IGNORED topics were re-sampled at full weight forever |
+
+Now: decay keys on wall-clock staleness (7d), eviction at the floor after 21
+dead days with a `topic_evict_log`, and the cap exempts PROVEN topics. Unknown
+age means "clock starts now" — the existing suite caught that footgun.
+
+Selection skips IGNORED topics via a predicate **shared** with
+`buildTopicOutcomes` so the two cannot drift. Retirement is soft: one open,
+play or like flips the predicate and the topic is back. Never auto-burns.
+
+## Burns are sentences now
+
+6 months, doubling on re-burn after parole. Records are `{q,t,strikes}`;
+readers tolerate the legacy bare-string shape. Dislikes added *by* a burn are
+tagged and parole with it; hand-typed ones stay permanent.
+
+## Phase 1 had starved the grounding gate
+
+`scheduleGrounding` is a debounce, and the preload loop re-armed its 5s timer
+every ~1.5s — so the gate fired only when a fetch happened to run past ~3.5s.
+A race, not a cadence. It now runs on its own 90s interval.
+
+SLOP/DEAD verdicts cache **7d**, not 30d. That is what makes
+burn-on-second-strike reachable at all: the candidate filter skips any topic
+holding a verdict, so a flat 30d cache meant a first strike could not be
+re-judged for a month. `MIXED` was a documented verdict with no branch.
+
+**Cost note:** the gate genuinely runs now, which it previously did not. It is
+self-limiting (it returns early once queued topics all hold verdicts) but a
+large unjudged pool will trickle ~5 topics per 90s until it catches up.
+
+## burnTopic leaked
+
+Pool videos, rendered videos, ledger records and grounding verdicts all
+survived a burn, because the cleanup was open-coded in the **manual** nuke path
+only — so every *automatic* burn left up to 8 videos of the burned topic in the
+persisted pool. That cleanup moved into `burnTopic`. Both queue-refill sites
+got the `isBurned` filter only `initSmartFeed` had, and the last automatic
+100-topic brainstorm (unreachable behind a double guard, one edit from
+resurrection) is deleted.
+
+Removing a topic from the **liked** list called `nukeDiscoverTopic` — "I'm less
+into this" recorded as "never again, and demote every sibling". Fixed.
+
+## Video anti-spam
+
+Every filter was a soft penalty on a scale where only -10 mattered: a 45s
+ALL-CAPS 0-view short passed everything. `isSpamShapedVideo` is a binary gate
+running before scoring and before the classifier spends a call — shorts (so
+`muteShorts` finally applies to the smart feed, having been enforced at four
+render sites, none of them the main discovery surface), the extension's proven
+ALL-CAPS/`!!!` thresholds (which until now only protected youtube.com), and a
+<100-view floor exempting liked channels.
+
+**Measured on a live 25-item batch: 8 dropped (all genuinely 16-48s shorts),
+17 reached the classifier.** The view floor did not fire in that sample — it
+is the least-exercised rule and the most likely to need retuning.
+
+Discovery videos hardcoded `channelId: ""` at four sites because the scraper
+dropped it. Fixed upstream (`YouTubeVideo.channel_id`); **live coverage is now
+25/25**. Auto-blocking was separately dead: `graphGetDislikedChannels` returns
+the channel NAME in `id` (its comment says otherwise), `syncFeeds` wrote it
+into both fields, and the `!bc.id` guard then rejected it at all seven filter
+sites. Those seven copies are now one `isChannelBlocked` matching names by
+**equality** — blocking "Tech" used to hide every channel containing "tech".
+
+Only 15 of up to 25 candidates were classified; the rest sailed past the
+NOVELTY/OFF_TOPIC drop unlabelled. Now all of them. The verdict cache was keyed
+on video id with no TTL, so one OFF_TOPIC verdict for topic A poisoned that
+video for every other topic forever — now topic-scoped, 30d TTL.
+
+A dislike bounced off the pool: entries persisted with `_score` baked in, so
+the -15 and -50 penalties never applied to up to 1000 queued videos for 14
+days. `evictPoolForDislike` drops topic- and channel-mates and unfreezes the
+rest; both dislike buttons call it.
+
+Old uploads were double-rewarded (maturity 0.85 **and** +3 vintage). Maturity
+tapers to 0.6 past 12 years; vintage is +1, bounded to 2008-2023.
+
+## Verification
+
+67 checks across 9 suites, 21 merge tests, build, smoke 12/12. The new suites
+drive the real functions — `evictPoolForDislike` was extracted specifically so
+its test stopped re-implementing it. The behavioural tests fail on the old file
+with "not defined", so a regression gate greps the six removed mechanisms; all
+six were confirmed **present in the old file and absent now**. Two existing
+tests pinned contracts this change deliberately breaks and were rewritten.
+
+## Wave 2 (not built)
+
+Near-duplicate signature merge on add — `topicSignature`/subset machinery
+exists but is burn-only, and near-dups **split the ledger counters**, which
+suppresses the very thresholds meant to detect them. Channel reputation
+(now possible: discovery has real ids). Graph node decay — node weights never
+decay, so `n.weight > 3` re-injects pool-evicted topics into prompts forever,
+and graph-injected queue topics bypass pool hygiene entirely. Sub-feed quality
+filtering (`syncFeeds` requests no duration/views at all).
