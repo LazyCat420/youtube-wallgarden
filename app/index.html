@@ -314,8 +314,8 @@
     </style>
 
     <!-- Non-blocking full CSS via preload pattern -->
-    <link rel="preload" href="app.min.css?v=20260822-v62" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="app.min.css?v=20260822-v62"></noscript>
+    <link rel="preload" href="app.min.css?v=20260822-v63" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="app.min.css?v=20260822-v63"></noscript>
 </head>
 <body>
     <div class="app-layout">
@@ -724,6 +724,16 @@
                         </div>
                         <div class="filter-option settings-row">
                             <div>
+                                <label class="form-label">Use measured outcomes in prompts</label>
+                                <span class="form-hint">Tell the AI which topics you actually played or liked, and which it kept showing you that you never touched. Turn this OFF for a while to compare &mdash; run <code>wgPromptAB()</code> in the console to score both against each other.</span>
+                            </div>
+                            <label class="switch-toggle">
+                                <input type="checkbox" id="toggle-stats-prompt">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                        <div class="filter-option settings-row">
+                            <div>
                                 <label class="form-label">Alternative Embed Player Instance</label>
                                 <span class="form-hint">Specify a public Invidious or Piped instance URL used to bypass age restrictions.</span>
                             </div>
@@ -901,8 +911,8 @@
         </div>
     </div>
 
-    <script src="ontology.js?v=20260822-v62" defer></script>
-    <script src="ontologyRenderer.js?v=20260822-v62" defer></script>
-    <script src="app.min.js?v=20260822-v62" defer></script>
+    <script src="ontology.js?v=20260822-v63" defer></script>
+    <script src="ontologyRenderer.js?v=20260822-v63" defer></script>
+    <script src="app.min.js?v=20260822-v63" defer></script>
 </body>
 </html>
