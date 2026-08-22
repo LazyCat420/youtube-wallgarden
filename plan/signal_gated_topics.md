@@ -1,7 +1,8 @@
 # Signal-gated topics — blueprint
 
-Status: **Phase 1 shipped 2026-08-22.** Phase 2 (statistics package) designed
-below, not yet built — deliberately, see *Sequencing*.
+Status: **Phase 1 and Phase 2 both shipped 2026-08-22.**
+Phase 2's *effect* is **unproven** — see *First measurement* below, which found
+no difference. The instrument to settle it is in place.
 
 ## The problem
 
@@ -110,7 +111,7 @@ prism's per-project stats need auth. So the counter *is* the measurement:
 `countedFetch` wraps all six wallgarden LLM endpoints; read it in the console
 with `wgCallStats()`, reset with `wgResetCallStats()`.
 
-## Phase 2 — the statistics package (designed, not built)
+## Phase 2 — the statistics package (shipped, effect unproven)
 
 The finding that motivates it: **nothing about outcomes ever reaches the
 model.** Grounding verdicts (REAL/MIXED/SLOP) are computed and thrown away.
@@ -133,6 +134,67 @@ So the package is cheap to send and should carry outcomes, not more lists:
 
 The ledger from Phase 1 is exactly the substrate for this, which is why it
 ships first.
+
+### What shipped
+
+`buildTopicOutcomes()` (client) derives three classes and
+`buildOutcomesBlock()` (backend) renders them into the brainstorm and similar
+prompts:
+
+- **PROVEN** — liked, or played 2+ times.
+- **IGNORED** — shown 8+ times with zero plays, zero opens, zero likes.
+- **SLOP** — SLOP/DEAD grounding verdicts, previously computed and discarded.
+
+IGNORED is the half that justifies the tokens: those topics were produced by a
+previous run of this same prompt, surfaced repeatedly, and never touched. The
+user never rejected them by hand, so they are in no blacklist — only the
+counters know. A single open or play clears the verdict, so it is an engagement
+signal and not a shown-count blacklist.
+
+`failedExamples` now carries those measured failures instead of a duplicate
+slice of `burnedQueries`. The block is withheld below 3 measured items, so a
+fresh account gets exactly the prompt it got before. `/similar` also stopped
+dropping `failedExamples`, which it had destructured away since it was written.
+
+### Built to be disprovable
+
+- Settings toggle: **Use measured outcomes in prompts** — switches arms on one
+  account.
+- Every generated topic is stamped `src: "stats" | "flat"`. Without that stamp
+  the arms could never be compared on outcomes — the same failure as
+  `agent_skills`, where 145 versions joined 0 outcome rows.
+- `wgPromptAB()` scores both arms on tier-A rate and on engagement. Engagement
+  is rated over topics actually **shown**, not over topics produced, so an arm
+  is not punished for being more prolific. It prints n and says when n is too
+  small to mean anything.
+- `wgOutcomes()` prints what the model is currently being told.
+
+### First measurement — no difference found
+
+Three paired runs against the live Jetson, same seeds, 10 topics per run,
+synthetic outcomes (the real ledger is still filling):
+
+| arm | n | filler-shaped | tier-A |
+|---|---|---|---|
+| flat  | 30 | 3 (10%) | 29 (96%) |
+| stats | 30 | 3 (10%) | 28 (93%) |
+
+"Filler-shaped" greps the prompt's own banned vocabulary (techniques, basics,
+guide, studies, analysis, methods, …). **Within noise on both metrics.**
+
+The first pair looked better for the stats arm by eye — tighter phrases, fewer
+"-techniques" endings — and that impression did not survive n=30. Worth
+recording as exactly the thing this repo keeps relearning.
+
+Three caveats, none of which rescue the result:
+- the outcomes were **synthetic**; real accumulated ones may behave differently;
+- tier-A rate is a **proxy**. The metric that matters is whether the user plays
+  the topics, which needs the counters to fill;
+- one seed pair, n=30 per arm.
+
+So: shipped, mechanically verified, cheap (<1k tokens, withheld when empty),
+and **not yet shown to help**. Re-run `wgPromptAB()` once both arms have ~20
+topics with real engagement behind them.
 
 ### How Phase 2 must be judged
 
