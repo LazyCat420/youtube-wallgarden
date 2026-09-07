@@ -160,7 +160,7 @@ function clearRenderTimeouts() {
     renderRafs = [];
 }
 
-function getWeightedRandomTopics(topics) {
+function getWeightedRandomTopics(topics, scoreFn) {
     // Soft retire: a topic the user was shown 8+ times and never once touched
     // does not get picked again. It stays in the pool at its weight — one
     // deliberate open/play/like flips the predicate and it is instantly back.
@@ -168,14 +168,243 @@ function getWeightedRandomTopics(topics) {
     const likeCounts = buildTopicLikeCounts();
     const positiveTopics = topics.filter(t => t.weight > 0 && !isIgnoredTopic(t.phrase, likeCounts));
     // Sort using weighted random sampling without replacement (A-Res algorithm)
+    const weightOf = typeof scoreFn === "function" ? scoreFn : (t => t.weight);
     return positiveTopics
         .map(t => ({
             phrase: t.phrase.toLowerCase(),
-            sortKey: Math.pow(Math.random(), 1 / t.weight)
+            sortKey: Math.pow(Math.random(), 1 / Math.max(1e-6, weightOf(t)))
         }))
         .sort((a, b) => b.sortKey - a.sortKey)
         .map(t => t.phrase);
 }
+
+// ── Topic roles and the composed queue ────────────────────────────────
+// Until 2026-09-06 the fetch queue was the WHOLE positive pool in a weighted
+// shuffle, drained fully before refilling: weight decided WHEN a topic was
+// fetched, never WHETHER, and a weight-10 mined-from-a-like topic got the
+// same 8 videos as a weight-4 ungraded one. There was no exploration budget
+// — exploration was 75% of every brainstorm call instead.
+//
+// Every topic now carries a role. CORE is what the user demonstrably watches
+// (mined from a like, proven by plays, hand-added); ADJACENT is one step
+// away; EXPLORE is the small experiment slot. The queue is composed in
+// slates of QUEUE_COMPOSE.slate with role quotas, core calibrated across the
+// user's liked clusters by like share (Steck), and an explore share that
+// adapts to its measured hit-rate. Explore topics graduate to core on a play
+// or a like and expire when IGNORED.
+const TOPIC_ROLES = ["core", "adjacent", "explore"];
+const QUEUE_COMPOSE = {
+    slate: 30,                                   // topics per composition (was: the whole pool)
+    mix: { core: 0.60, adjacent: 0.25, explore: 0.15 },
+    exploreBand: [0.05, 0.25],                   // the adaptive share stays inside this
+    exploreTargetHitRate: 0.15,                  // hit-rate above target -> share drifts up
+    exploreMinResolved: 10,                      // graduated+expired explore topics before adapting
+    successHalfLifeMs: 14 * 86400e3,
+    fetchBudget: { core: 10, adjacent: 8, explore: 5 }   // per-form limit hint for fetchVideosForTopic
+};
+
+/** The role a topic plays. Legacy entries derive: proven or weight >= 10 -> core, else adjacent; never explore. */
+function topicRole(t, likeCounts) {
+    if (!t) return "adjacent";
+    if (TOPIC_ROLES.includes(t.role)) return t.role;
+    if (isProvenTopic(t.phrase, likeCounts) || t.weight >= 10) return "core";
+    return "adjacent";
+}
+
+/** A play or a like on an explore/adjacent topic makes it core; bornRole never changes. */
+function promoteTopicRole(phrase, why) {
+    const key = normalizeTopic(phrase);
+    if (!key) return false;
+    const t = (state.topics || []).find(x => normalizeTopic(x.phrase) === key);
+    if (!t || t.weight <= 0) return false;
+    const before = TOPIC_ROLES.includes(t.role) ? t.role : null;
+    if (before === "core") return false;
+    if (!t.bornRole) t.bornRole = before || "adjacent";
+    t.role = "core";
+    t.graduatedAt = Date.now();
+    debug(`[Topics] "${key}" graduated ${before || "legacy"} -> core (${why || "engagement"})`);
+    saveTopics();
+    return true;
+}
+
+/** Like-share per liked cluster (Steck's p(cluster|user)) and topic -> cluster. */
+function buildClusterIndex() {
+    const share = {};
+    const topicToCluster = new Map();
+    const clusters = buildLikedClusters();
+    let total = 0;
+    clusters.forEach((c, i) => {
+        const name = c.name || `cluster ${i + 1}`;
+        const size = c.size || c.videos.length;
+        share[name] = (share[name] || 0) + size;
+        total += size;
+        (c.ids || []).forEach(id => {
+            (((state.minedVideos || {})[id] || {}).topics || []).forEach(t => {
+                const k = normalizeTopic(t);
+                if (k && !topicToCluster.has(k)) topicToCluster.set(k, name);
+            });
+        });
+    });
+    Object.keys(share).forEach(k => { share[k] = total ? share[k] / total : 0; });
+    return { share, topicToCluster, clusters };
+}
+
+function clusterOfTopic(t, idx) {
+    if (t && t.cluster) return t.cluster;
+    const k = normalizeTopic(t && t.phrase);
+    return (idx && idx.topicToCluster.get(k)) || "other";
+}
+
+/** Integer slots per bucket by largest remainder; sums exactly to n. */
+function largestRemainderSlots(n, shares) {
+    const keys = Object.keys(shares);
+    const total = keys.reduce((a, k) => a + (shares[k] || 0), 0) || 1;
+    const exact = keys.map(k => n * (shares[k] || 0) / total);
+    const out = {};
+    let left = n;
+    keys.forEach((k, i) => { out[k] = Math.floor(exact[i]); left -= out[k]; });
+    keys.map((k, i) => ({ k, frac: exact[i] - Math.floor(exact[i]), i }))
+        .sort((a, b) => b.frac - a.frac || a.i - b.i)
+        .forEach(({ k }) => { if (left > 0) { out[k] += 1; left -= 1; } });
+    return out;
+}
+
+/** Explore share = default x (measured hit-rate / target), clamped, once enough explore topics have resolved. */
+function adaptiveExploreShare(topics, likeCounts) {
+    const born = (topics || []).filter(t => t.bornRole === "explore");
+    let hits = 0, expired = 0;
+    born.forEach(t => {
+        const k = normalizeTopic(t.phrase);
+        if (t.graduatedAt || topicSignalTotal(k, "play") > 0 || (likeCounts[k] || 0) > 0) hits += 1;
+        else if (isIgnoredTopic(k, likeCounts) || t.weight <= 0.5) expired += 1;
+    });
+    const resolved = hits + expired;
+    const base = QUEUE_COMPOSE.mix.explore;
+    if (resolved < QUEUE_COMPOSE.exploreMinResolved) return { share: base, hits, expired, adapted: false };
+    const rate = hits / resolved;
+    const [lo, hi] = QUEUE_COMPOSE.exploreBand;
+    const share = Math.max(lo, Math.min(hi, base * (rate / QUEUE_COMPOSE.exploreTargetHitRate)));
+    return { share, hits, expired, adapted: true };
+}
+
+/**
+ * Compose the next slate of topics to fetch. Returns phrases (the queue stays
+ * string[] for its .shift() consumers). Pure apart from Math.random inside
+ * the weighted sampler and the ledger/like reads.
+ */
+function composeTopicQueue(topics, n) {
+    const size = Math.max(1, n || QUEUE_COMPOSE.slate);
+    const likeCounts = buildTopicLikeCounts();
+    const now = Date.now();
+    const eligible = (topics || []).filter(t => t && t.weight > 0 && !isBurned(t.phrase) && !isIgnoredTopic(t.phrase, likeCounts));
+    if (!eligible.length) return [];
+
+    const byRole = { core: [], adjacent: [], explore: [] };
+    eligible.forEach(t => byRole[topicRole(t, likeCounts)].push(t));
+
+    const explore = adaptiveExploreShare(topics, likeCounts);
+    const share = { ...QUEUE_COMPOSE.mix, explore: explore.share };
+    share.core += QUEUE_COMPOSE.mix.explore - explore.share;   // the delta stays with core
+    const quota = largestRemainderSlots(Math.min(size, eligible.length), share);
+
+    // Recency of success: a topic that earned a play/like recently samples
+    // above its raw weight; the bonus halves every two weeks.
+    const lastSuccess = t => {
+        const rec = (state.topicSignals || {})[normalizeTopic(t.phrase)];
+        return Math.max(t.graduatedAt || 0, (rec && rec.t && (topicSignalTotal(normalizeTopic(t.phrase), "play") > 0) ? rec.t : 0));
+    };
+    const score = t => {
+        const ls = lastSuccess(t);
+        const bonus = ls ? 0.5 * Math.exp(-(now - ls) / QUEUE_COMPOSE.successHalfLifeMs) : 0;
+        return Math.max(0.1, t.weight) * (1 + bonus);
+    };
+    const pick = (list, k, taken) => {
+        if (k <= 0 || !list.length) return [];
+        const fresh = list.filter(t => !taken.has(normalizeTopic(t.phrase)));
+        return getWeightedRandomTopics(fresh, score).slice(0, k);
+    };
+
+    const taken = new Set();
+    const picked = { core: [], adjacent: [], explore: [] };
+    const takeAll = (role, phrases) => { phrases.forEach(p => { taken.add(p); picked[role].push(p); }); };
+
+    // Core, calibrated across liked clusters by like share.
+    const idx = buildClusterIndex();
+    const clusterNames = Object.keys(idx.share).filter(k => idx.share[k] > 0);
+    if (clusterNames.length && quota.core > 0) {
+        const perCluster = largestRemainderSlots(quota.core, idx.share);
+        clusterNames.forEach(name => {
+            const pool = byRole.core.filter(t => clusterOfTopic(t, idx) === name);
+            takeAll("core", pick(pool, perCluster[name] || 0, taken));
+        });
+    }
+    takeAll("core", pick(byRole.core, quota.core - picked.core.length, taken));
+    takeAll("adjacent", pick(byRole.adjacent, quota.adjacent, taken));
+    takeAll("explore", pick(byRole.explore, quota.explore, taken));
+
+    // Shortfall in any role fills from core, then adjacent, then explore.
+    let want = Math.min(size, eligible.length) - taken.size;
+    for (const role of ["core", "adjacent", "explore"]) {
+        if (want <= 0) break;
+        const more = pick(byRole[role], want, taken);
+        takeAll(role, more);
+        want -= more.length;
+    }
+
+    // Interleave so explore is spread through the slate, not clumped at the end.
+    const out = [];
+    const lists = [picked.core, picked.adjacent, picked.explore];
+    const maxLen = Math.max(...lists.map(l => l.length));
+    for (let i = 0; i < maxLen; i++) lists.forEach(l => { if (i < l.length) out.push(l[i]); });
+    debug(`[Topics] composed queue of ${out.length}: core ${picked.core.length}, adjacent ${picked.adjacent.length}, explore ${picked.explore.length} (explore share ${(explore.share * 100).toFixed(0)}%${explore.adapted ? ", adapted" : ""})`);
+    return out;
+}
+
+/** Role + per-form fetch budget for a topic about to be fetched. */
+function topicFetchHint(phrase) {
+    const key = normalizeTopic(phrase);
+    const t = (state.topics || []).find(x => normalizeTopic(x.phrase) === key);
+    const role = t ? topicRole(t, buildTopicLikeCounts()) : "adjacent";
+    return { role, fetchBudget: QUEUE_COMPOSE.fetchBudget[role] || QUEUE_COMPOSE.fetchBudget.adjacent };
+}
+
+window.wgTopicMix = function () {
+    const likeCounts = buildTopicLikeCounts();
+    const idx = buildClusterIndex();
+    const topics = (state.topics || []).filter(t => t.weight > 0);
+    const shown = topics.filter(t => topicSignalTotal(normalizeTopic(t.phrase), "imp") > 0);
+    const byRole = {};
+    TOPIC_ROLES.forEach(r => { byRole[r] = { n: 0, shown: 0, played: 0, liked: 0 }; });
+    topics.forEach(t => {
+        const r = topicRole(t, likeCounts); const k = normalizeTopic(t.phrase);
+        const b = byRole[r]; b.n += 1;
+        if (topicSignalTotal(k, "imp") > 0) b.shown += 1;
+        if (topicSignalTotal(k, "play") > 0) b.played += 1;
+        if ((likeCounts[k] || 0) > 0) b.liked += 1;
+    });
+    Object.values(byRole).forEach(b => { b.engaged_pct = b.shown ? Math.round(100 * b.played / b.shown) : null; });
+    const fetchedByCluster = {};
+    shown.forEach(t => { if (topicRole(t, likeCounts) === "core") { const c = clusterOfTopic(t, idx); fetchedByCluster[c] = (fetchedByCluster[c] || 0) + 1; } });
+    const coreShown = Object.values(fetchedByCluster).reduce((a, b) => a + b, 0);
+    const clusters = {};
+    Object.keys(idx.share).forEach(c => { clusters[c] = { like_share_pct: Math.round(100 * idx.share[c]), core_fetched_pct: coreShown ? Math.round(100 * (fetchedByCluster[c] || 0) / coreShown) : null }; });
+    if (fetchedByCluster.other) clusters.other = { like_share_pct: 0, core_fetched_pct: coreShown ? Math.round(100 * fetchedByCluster.other / coreShown) : null };
+    const explore = adaptiveExploreShare(topics, likeCounts);
+    const byGen = {};
+    topics.forEach(t => {
+        const g = t.gen || "v1"; const k = normalizeTopic(t.phrase);
+        const b = byGen[g] || (byGen[g] = { n: 0, shown: 0, played: 0, tierA: 0 });
+        b.n += 1; if (t.weight >= 8) b.tierA += 1;
+        if (topicSignalTotal(k, "imp") > 0) b.shown += 1;
+        if (topicSignalTotal(k, "play") > 0) b.played += 1;
+    });
+    Object.values(byGen).forEach(b => { b.tierA_pct = Math.round(100 * b.tierA / b.n); b.engaged_pct = b.shown ? Math.round(100 * b.played / b.shown) : null; });
+    console.log("topics by role (n, shown, played, liked, engaged% of shown):"); console.table(byRole);
+    console.log("core fetched share vs like share, by liked cluster:"); console.table(clusters);
+    console.log(`explore: ${explore.hits} graduated, ${explore.expired} expired -> hit-rate ${explore.hits + explore.expired ? Math.round(100 * explore.hits / (explore.hits + explore.expired)) : "n/a"}%, share ${(explore.share * 100).toFixed(0)}%${explore.adapted ? " (adapted)" : " (default; needs " + QUEUE_COMPOSE.exploreMinResolved + " resolved)"}`);
+    console.log("by generation arm (v1 = pre-roles, v2 = roles+fit, v2-nofit = roles, anchoring only):"); console.table(byGen);
+    return { byRole, clusters, explore, byGen };
+};
 
 function initSmartFeed() {
     state.smartFeedVideos = [];
@@ -186,9 +415,7 @@ function initSmartFeed() {
     state.smartFeedPreloadLoading = false;
     
     // Get positive topics randomized by weight
-    const randomizedTopics = getWeightedRandomTopics(state.topics).filter(t => !isBurned(t));
-
-    state.smartFeedTopicsQueue = [...randomizedTopics];
+    state.smartFeedTopicsQueue = composeTopicQueue(state.topics);
 
     // ── Graph-based topic discovery: inject related topics ──
     const recentLiked = (state.likedTopics || []).slice(-5);
@@ -196,7 +423,9 @@ function initSmartFeed() {
         // Filter burns here too: the graph is a separate path into the queue
         // and it used to let a topic you had explicitly nuked walk right back
         // in through its neighbours.
-        const graphSuggestions = graphGetRelatedForDiscovery(state.ontologyGraph, recentLiked, 5)
+        // Capped at 2: graph injection bypasses pool hygiene, so it is charged
+        // against the explore budget rather than added on top of it.
+        const graphSuggestions = graphGetRelatedForDiscovery(state.ontologyGraph, recentLiked, 2)
             .filter(t => !isBurned(t));
         graphSuggestions.forEach((topic, i) => {
             if (!state.smartFeedTopicsQueue.includes(topic)) {
@@ -570,6 +799,13 @@ function pruneTopicPool() {
         if (!t.addedAt) { t.addedAt = now; return; }
         const phrase = normalizeTopic(t.phrase);
         if (likedSet.has(phrase) || isProvenTopic(phrase, likeCounts)) return;
+        // An explore topic that was shown enough to be IGNORED has resolved:
+        // the experiment failed. Drop it to the floor so the 21-day eviction
+        // below can reach it. Core/adjacent keep the soft retirement only.
+        if (t.role === "explore" && isIgnoredTopic(phrase, likeCounts)) {
+            t.weight = Math.min(t.weight, 0.5);
+            return;
+        }
         if (now - topicFreshness(t) > TOPIC_STALE_DECAY_MS) {
             t.weight = Math.max(0.5, t.weight - TOPIC_DECAY_PER_PRUNE);
         }
@@ -1305,6 +1541,8 @@ function recordTopicSignal(topic, kind, dedupeKey) {
         enqueueAgentJob("expand_topic", phrase, { topic: phrase, reason: kind, count: total });
     }
     saveTopicSignals();
+    // One deliberate play graduates an explore/adjacent topic to core.
+    if (kind === "play") promoteTopicRole(phrase, "play");
     return crossed;
 }
 
@@ -1383,10 +1621,16 @@ async function flushAgentQueue(force) {
             await mineLikedVideosIntoTopics();
         }
         if (expands.length) {
-            // Seed from the strongest signal in the batch; the rest of the
-            // batch still shapes the request through buildLlmContext.
-            const seeds = expands.map(j => j.payload.topic).filter(Boolean);
-            await generateTopicsForSeeds(seeds, budget);
+            // Strongest evidence first (play > open > impressions, then count):
+            // the backend anchors half the expansion on seeds[0], and the
+            // strongest reason decides whether the children are born
+            // adjacent or explore.
+            const strength = { play: 3, open: 2, imp: 1 };
+            const ordered = expands.slice().sort((a, b) =>
+                ((strength[b.payload.reason] || 0) - (strength[a.payload.reason] || 0)) ||
+                ((b.payload.count || 0) - (a.payload.count || 0)));
+            const seeds = ordered.map(j => j.payload.topic).filter(Boolean);
+            await generateTopicsForSeeds(seeds, budget, ordered[0] && ordered[0].payload.reason);
         }
     } catch (err) {
         console.error("[Agent Queue] flush failed:", err);
@@ -1569,7 +1813,12 @@ function stampRatingStates() {
         const cur = state.ratingStates[id];
         if (!cur || cur.r !== r) {
             state.ratingStates[id] = { r, t: now, v: _wgVideoMeta(id) };
-            if (r === 5) markFeedEvent(id, "like");
+            if (r === 5) {
+                markFeedEvent(id, "like");
+                const liked = (typeof findVideoById === "function" && findVideoById(id)) || null;
+                const topic = liked && (liked.discoveryTopic || liked._topic);
+                if (topic) promoteTopicRole(topic, "like");
+            }
         }
     });
     // Cleared ratings (unlike / undislike) → tombstone (r=0) so the removal syncs.
@@ -2323,7 +2572,7 @@ function setupTopicPrefListeners() {
         if (existingIdx !== -1) {
             state.topics[existingIdx].weight = weight;
         } else {
-            state.topics.push({ phrase, weight, addedAt: Date.now() });
+            state.topics.push({ phrase, weight, addedAt: Date.now(), role: "core", bornRole: "core" });
         }
         
         saveTopics();
@@ -7112,13 +7361,15 @@ function buildLikedClusters() {
                 (mined && mined.topics || []).forEach(t => counts.set(t, (counts.get(t) || 0) + 1));
             });
             const name = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
-            clusters.push({ name, videos: members.slice(0, 10).map(label).filter(Boolean) });
+            // size = the cluster's real like count (videos is sliced to 10), so
+            // the backend and composeTopicQueue can allocate by like share.
+            clusters.push({ name, videos: members.slice(0, 10).map(label).filter(Boolean), size: members.length, ids: members.map(v => v.id) });
         } else {
             leftovers.push(...members);
         }
     });
     if (leftovers.length >= 2 && clusters.length < 6) {
-        clusters.push({ name: undefined, videos: leftovers.slice(0, 10).map(label).filter(Boolean) });
+        clusters.push({ name: undefined, videos: leftovers.slice(0, 10).map(label).filter(Boolean), size: leftovers.length, ids: leftovers.map(v => v.id) });
     }
     return clusters;
 }
@@ -7289,7 +7540,7 @@ function buildLlmContext() {
         likedVideos: likedVideos,
         watchlist: watchlist,
         tasteProfile: (state.tasteProfile && state.tasteProfile.text) || undefined,
-        likedClusters: buildLikedClusters(),
+        likedClusters: buildLikedClusters().map(({ ids, ...c }) => c),
         ...buildOutcomeContext(),
         model: model,
         provider: provider
@@ -7441,10 +7692,12 @@ function applyMinedTopics(videoId, ratedTopics, opts) {
             // src = which prompt shape produced it. Without this stamp the
             // A/B can never be scored on outcomes — the lesson from
             // agent_skills, where 145 versions joined 0 outcome rows.
-            state.topics.push({ phrase, weight, addedAt: Date.now(), src: _lastContextVariant });
+            state.topics.push({ phrase, weight, addedAt: Date.now(), src: _lastContextVariant, role: "core", bornRole: "core" });
             added++;
-        } else if (existing.weight > 0 && existing.weight < weight) {
-            existing.weight = weight;
+        } else if (existing.weight > 0) {
+            if (existing.weight < weight) existing.weight = weight;
+            // A like just got mined into this topic: that is core evidence.
+            promoteTopicRole(phrase, "like mined");
         }
         const inQueue = state.smartFeedTopicsQueue.includes(phrase);
         const inUsed = state.smartFeedUsedTopics.includes(phrase);
@@ -7578,7 +7831,11 @@ async function generateBrainstormTopics(append, numRequests = 1) {
 
     try {
         const ctx = buildLlmContext();
-        ctx.numTopics = 100;
+        // 60, not 100: the roles planner turns this into one CORE batch, cluster
+        // ADJACENT batches and one EXPLORE batch (≤6 calls + rating), and the
+        // composed queue no longer drains the whole pool anyway.
+        ctx.numTopics = 60;
+        ctx.rateFit = state.settings.fitRatingEnabled !== false;
         
         const resp = await countedFetch("/api/wallgarden/brainstorm", {
             method: "POST",
@@ -7601,9 +7858,15 @@ async function generateBrainstormTopics(append, numRequests = 1) {
         const rated = Array.isArray(data.rated) && data.rated.length
             ? data.rated
             : (data.topics || []).map(topic => ({ topic, weight: 5 }));
+        // Generation arm, so wgTopicMix can compare v1 (no roles) / v2
+        // (roles + fit) / v2-nofit (roles, anchoring only) on outcomes.
+        const gen = rated.some(r => TOPIC_ROLES.includes(r.role))
+            ? (data.rateFit === false ? "v2-nofit" : "v2")
+            : "v1";
         let allAddedPhrases = [];
 
-        rated.forEach(({ topic: rawPhrase, weight }) => {
+        rated.forEach(r => {
+            const { topic: rawPhrase, weight } = r;
             // Store canonical (lowercase) so the existence check below actually
             // matches an existing entry — a raw Title-Case phrase never equalled
             // its lowercased twin, so every brainstorm duplicated the pool. Cards
@@ -7618,7 +7881,14 @@ async function generateBrainstormTopics(append, numRequests = 1) {
 
             const existing = state.topics.find(t => normalizeTopic(t.phrase) === phrase);
             if (!existing) {
-                state.topics.push({ phrase, weight: weight || 5, addedAt: Date.now() });
+                const role = TOPIC_ROLES.includes(r.role) ? r.role : undefined;
+                // src was never stamped on this path (the "unstamped" arm in
+                // wgPromptAB); role/cluster/fit/gen are the new stamps.
+                state.topics.push({
+                    phrase, weight: weight || 5, addedAt: Date.now(), src: _lastContextVariant,
+                    role, bornRole: role, cluster: r.cluster || undefined, fit: r.fit || undefined,
+                    tier: r.tier || undefined, gen
+                });
             }
 
             const inQueue = state.smartFeedTopicsQueue.includes(phrase);
@@ -7670,8 +7940,11 @@ async function generateBrainstormTopics(append, numRequests = 1) {
  * query (a full video TITLE, when called from playVideo) into the pool as a
  * weight-2 topic before it had earned anything.
  */
-async function generateTopicsForSeeds(seeds, budget) {
+async function generateTopicsForSeeds(seeds, budget, strongestReason) {
     const cleanSeeds = (seeds || []).map(normalizeTopic).filter(Boolean);
+    // Expansions of something the user PLAYED or OPENED are adjacent; ones
+    // that only accumulated impressions are the weaker evidence — explore.
+    const bornRole = strongestReason === "imp" ? "explore" : "adjacent";
     if (!cleanSeeds.length) return [];
 
     // The seed itself has now earned its place in the pool — it crossed a
@@ -7679,7 +7952,7 @@ async function generateTopicsForSeeds(seeds, budget) {
     cleanSeeds.forEach(seed => {
         if (isBurned(seed)) return;
         const idx = state.topics.findIndex(t => normalizeTopic(t.phrase) === seed);
-        if (idx === -1) state.topics.push({ phrase: seed, weight: 5, addedAt: Date.now() });
+        if (idx === -1) state.topics.push({ phrase: seed, weight: 5, addedAt: Date.now(), role: "core", bornRole: "core" });
         else state.topics[idx].weight = Math.max(state.topics[idx].weight, 5);
         if (!state.smartFeedTopicsQueue.includes(seed)) state.smartFeedTopicsQueue.push(seed);
     });
@@ -7693,6 +7966,7 @@ async function generateTopicsForSeeds(seeds, budget) {
         // fan-out to rescue an over-long request that bails mid-array.
         ctx.numTopics = Math.min(TOPICS_PER_FLUSH_MAX, Math.max(2, budget || 2));
         ctx.seeds = cleanSeeds.slice(0, 8);
+        ctx.rateFit = state.settings.fitRatingEnabled !== false;
 
         const resp = await countedFetch("/api/wallgarden/similar", {
             method: "POST",
@@ -7708,10 +7982,21 @@ async function generateTopicsForSeeds(seeds, budget) {
 
         const data = await resp.json();
         const addedPhrases = [];
+        // Newer backends rate /similar output too (weight = f(anchoring, fit));
+        // a topic the rater dropped is absent from `rated` and is skipped.
+        const ratedMap = Array.isArray(data.rated) && data.rated.length
+            ? new Map(data.rated.map(r => [normalizeTopic(r.topic), r]))
+            : null;
+        const gen = ratedMap ? (data.rateFit === false ? "v2-nofit" : "v2") : "v1";
 
         (data.topics || []).forEach(raw => {
             const phrase = normalizeTopic(raw);
             if (!phrase) return;
+            const r = ratedMap ? ratedMap.get(phrase) : null;
+            if (ratedMap && !r) {
+                debug(`[Topics] Rater dropped "${phrase}" from seed expansion.`);
+                return;
+            }
             // isBurned(), not burnedQueries.includes() — the old path used a raw
             // substring test, so a burn never generalised on this route.
             if (isBurned(phrase)) {
@@ -7721,7 +8006,10 @@ async function generateTopicsForSeeds(seeds, budget) {
             // normalizeTopic on BOTH sides — the old comparison lowercased only
             // the stored phrase, so a Title-Case reply duplicated the entry.
             if (!state.topics.some(t => normalizeTopic(t.phrase) === phrase)) {
-                state.topics.push({ phrase, weight: 4, addedAt: Date.now(), src: _lastContextVariant });
+                state.topics.push({
+                    phrase, weight: (r && r.weight) || 4, addedAt: Date.now(), src: _lastContextVariant,
+                    role: bornRole, bornRole, fit: (r && r.fit) || undefined, tier: (r && r.tier) || undefined, gen
+                });
             }
             if (!state.smartFeedTopicsQueue.includes(phrase) && !state.smartFeedUsedTopics.includes(phrase)) {
                 state.smartFeedTopicsQueue.push(phrase);
@@ -7830,7 +8118,8 @@ async function classifyCandidatesWithLLM(topic, candidates) {
                         id: v.id,
                         title: v.title,
                         channel: v.channelName,
-                        durationSecs: v.duration
+                        durationSecs: v.duration,
+                        description: (v.description || "").slice(0, 200) || undefined
                     }))
                 }),
                 signal: controller.signal
@@ -8090,11 +8379,15 @@ async function fetchVideosForTopic(topic) {
             // the scraper (hard 10s timeout there), so the cold-start fan-out
             // below was lowered 6 -> 4 topics to keep peak concurrency flat.
             const F = DISCOVERY_FORMS;
+            // Core topics deserve more candidates than an explore experiment:
+            // scale every form's limit by the topic's role budget (10/8/5).
+            const hint = topicFetchHint(topic);
+            const lim = base => Math.max(3, Math.round(base * hint.fetchBudget / QUEUE_COMPOSE.fetchBudget.core));
             const [recentItems, broadItems, depthItems, provenItems] = await Promise.all([
-                fetchOne(topic, F.recent, "recent(this-year+popularity)", F.recent.limit),
-                fetchOne(topic, F.broad, "broad(relevance)", F.broad.limit),
-                fetchOne(depthQuery, F.depth, `depth(${depthQuery})`, F.depth.limit),
-                fetchOne(topic, F.proven, "proven(popularity:capped)", F.proven.limit)
+                fetchOne(topic, F.recent, "recent(this-year+popularity)", lim(F.recent.limit)),
+                fetchOne(topic, F.broad, "broad(relevance)", lim(F.broad.limit)),
+                fetchOne(depthQuery, F.depth, `depth(${depthQuery})`, lim(F.depth.limit)),
+                fetchOne(topic, F.proven, "proven(popularity:capped)", lim(F.proven.limit))
             ]);
 
             // Map items to video objects, tagging form + in-form rank for the scorer
@@ -8426,7 +8719,15 @@ async function groundNextQueuedTopics() {
                     items.push({
                         topic,
                         titles: results.map(r => r.title).filter(Boolean).slice(0, 8),
-                        channels: [...new Set(results.map(r => r.channel).filter(Boolean))].slice(0, 8)
+                        channels: [...new Set(results.map(r => r.channel).filter(Boolean))].slice(0, 8),
+                        // Views + upload year let the judge tell a dead scene
+                        // from a live one (verdict DEAD); older backends ignore it.
+                        results: results.filter(r => r && r.title).slice(0, 8).map(r => ({
+                            title: r.title,
+                            channel: r.channel || undefined,
+                            views: typeof r.view_count === "number" ? r.view_count : undefined,
+                            year: r.published_at ? new Date(r.published_at).getUTCFullYear() : undefined
+                        }))
                     });
                 }
             } catch (err) {
@@ -8509,8 +8810,7 @@ async function fillSmartFeedPreloadBuffer() {
         debug("[Smart Feed] Queue is empty! Repopulating from positive topics...");
         // Same burn filter initSmartFeed applies — without it, a mid-session
         // burn's reworded siblings walked straight back into the queue here.
-        const randomizedTopics = getWeightedRandomTopics(state.topics).filter(t => !isBurned(t));
-        state.smartFeedTopicsQueue = [...randomizedTopics];
+        state.smartFeedTopicsQueue = composeTopicQueue(state.topics);
     }
     
     // If pool is empty or low, fetch multiple topics in parallel for speed and topic diversity
@@ -8731,7 +9031,7 @@ async function loadNextSmartFeedBatch() {
             // because this branch requires an empty queue AND a non-empty
             // positive pool, and the line above always refilled the queue
             // first. Deleted rather than left one edit from resurrection.
-            state.smartFeedTopicsQueue = getWeightedRandomTopics(state.topics).filter(t => !isBurned(t));
+            state.smartFeedTopicsQueue = composeTopicQueue(state.topics);
         }
     }
     
@@ -8947,7 +9247,7 @@ async function editDiscoverTopic(topic) {
     if (existingNewIndex !== -1) {
         state.topics[existingNewIndex].weight = Math.max(state.topics[existingNewIndex].weight, 5); // Ensure not muted
     } else {
-        state.topics.push({ phrase: newTopicClean, weight: 5 });
+        state.topics.push({ phrase: newTopicClean, weight: 5, addedAt: Date.now(), role: "core", bornRole: "core" });
     }
     saveTopics();
     
