@@ -1,7 +1,7 @@
 # Calibrated feed — from random topics + random videos to a composed slate
 
-Status: **Phases 1–3 shipped 2026-09-06.** Phase 4 (topic roles, fit rating,
-calibrated topic queue) is designed, not built — see the end.
+Status: **Phases 1–4 shipped 2026-09-06.** Everything below is live; the
+measurements that judge it need a week of ledger — see *How to judge it*.
 
 ## The problem, as measured
 
@@ -92,18 +92,35 @@ npm run build && npm run test:smoke
 # console: WG_DEBUG=1; wgFeedMix(); wgEraPrior()
 ```
 
-## Phase 4 — designed, not built: topic roles, fit, calibrated queue
+## Phase 4 — topic roles, FIT, the composed queue (shipped)
 
-Backend: roles decided per BATCH (one blended CORE batch that sees all
-clusters at temperature 0.6, ADJACENT batches allocated across clusters by
-like share, one small EXPLORE batch), a FIT rubric (HIGH/MED/LOW given the
-taste profile) next to ANCHORING with `rateFit:false` as the control arm,
-`/similar` adjacency-first with all seeds and the failed-examples line
-rendered, `promptVariant` forwarded, grounding evidence carrying views and
-years. Client: topics stamped `role/bornRole/cluster/fit/gen`,
-`composeTopicQueue` (30-topic slates, 60/25/15 core/adjacent/explore with the
-explore share adapting to its measured hit-rate, core calibrated across
-clusters by like share), explore topics graduate on a play or like and expire
-when IGNORED, `wgTopicMix()`. The full design with line anchors is in the
-session plan file; acceptance needs ≥7 days of ledger and ≥20 shown topics
-per role before any prompt is edited again.
+Backend (`lazy-agent-service`): roles are decided per BATCH by
+`planBrainstormBatches` — one blended CORE batch that sees every liked cluster
+at temperature 0.6, ADJACENT batches allocated across clusters by like share,
+one small EXPLORE batch at 0.9. `rateTopics` asks FIT (HIGH/MED/LOW) next to
+ANCHORING when given the taste profile and liked titles; weight = f(tier,
+fit); LOW fit is dropped unless the role is explore; a topic the rater never
+graded gets weight 2, not B's 4. `/similar` sees every seed strongest-first
+and the failed-shape line, asks 60/30/10 adjacency-first, and is rated.
+`rateFit: false` (Settings toggle `fitRatingEnabled`, default on) is the
+control arm; `promptVariant` is forwarded and echoed.
+
+Client (this repo): every topic carries `role` (core / adjacent / explore),
+`bornRole`, `cluster`, `fit`, `tier`, `gen`. `composeTopicQueue` replaces the
+whole-pool shuffle: 30-topic slates at 60/25/15, core calibrated across liked
+clusters by like share (`buildClusterIndex`), sampling by weight times
+recency-of-success, an explore share that adapts to its measured hit-rate
+inside [5%, 25%] once ten explore topics have resolved. A play or a like
+graduates explore/adjacent to core; an explore topic that becomes IGNORED
+drops to the floor and is evicted after 21 days. Brainstorm asks for 60.
+Fetch limits scale with the role's budget (10 / 8 / 5). `wgTopicMix()` prints
+topics by role with engaged % of shown, core fetched share vs like share per
+cluster, explore hit-rate and share, and per-arm (v1 / v2 / v2-nofit) tier-A
+and engaged %.
+
+Acceptance (evaluate after ≥ 7 days of ledger AND ≥ 20 shown topics per
+role): core engaged % ≥ 1.5× the pre-change overall; explore hit-rate ≥ 10%
+(the band lowers the share on its own; < 5% after two weeks → set
+`mix.explore` to 0.10); the largest cluster's fetched core share within ±15
+points of its like share; `v2` vs `v2-nofit` engaged % within noise at n ≥ 20
+per arm → delete the FIT rubric. No prompt edits before that horizon.
