@@ -4,7 +4,7 @@ Four commits on this repo (`6f8215c` era buckets + ledger, `cfaf6d2` slate,
 `ab26c4c` topic roles, `4316e65` plan), plus `trading-service@631935ab`
 (scraper dates, redeployed as scraper-service) and
 `lazy-agent-service@5955b89` (roles + FIT). All three containers deployed to
-synology and live-verified. Assets at `?v=20260906-v67`.
+synology and live-verified. Assets at `?v=20260906-v68`.
 
 The blueprint with the full audit is `plan/calibrated_feed.md`. Read it first.
 
@@ -59,6 +59,29 @@ Acceptance after ≥ 7 days of ledger and ≥ 20 shown topics per role is writte
 in `plan/calibrated_feed.md`. **Do not edit prompts or constants before that
 horizon** — this repo has learned twice that an eyeball read does not survive
 n = 30.
+
+## Same evening: why it took so long to load (`381660d`, assets `v68`)
+
+The user asked why the feed took so long and why "discovering more" never
+ended. Three measured causes, none of them the ranking math:
+
+| measured | value |
+|---|---|
+| classify 30 candidates on the Jetson | **10.2 s**, and `fetchVideosForTopic` AWAITED it before returning — nothing rendered until the scraper AND the model had answered |
+| cold start | every topic's videos held behind one `Promise.all` until the slowest topic came back |
+| 16 parallel scraper searches (4 topics x 4 forms) on the 4-core NAS | **14.7 s wall, 13 of 16 EMPTY** (10 s subprocess timeout, no fallback) — the preloader got `[]` and asked again every 1.5 s |
+
+Fixed: `scheduleLateClassification` (verdicts land in the background, at most
+two in flight, NOVELTY/OFF_TOPIC evicted from the pool when they arrive);
+the preloader absorbs each topic as it lands and renders the first batch from
+the first topic back; cold-start fan-out 3; per-form timeout 30 s. Scraper
+side (`trading-service@7c7c6a58`, redeployed): a 3-wide gate on yt-dlp
+subprocesses, 25 s each, and a 30-minute search cache. Re-probed after the
+deploy: the same 16-wide burst returned **0 empties** (was 13), and a repeated
+single search answers in ~0.1 s. The scraper runs two uvicorn workers, so the
+cache is per worker — a repeated burst still misses about half the time.
+
+`test/feed_latency.test.mjs` pins all three client changes.
 
 ## Traps for the next session
 
