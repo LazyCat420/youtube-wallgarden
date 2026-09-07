@@ -3556,8 +3556,8 @@ function klDivergence(p, q, eps) {
 // row later. Local-only (not synced), capped FIFO. Read with wgFeedMix().
 const FEED_MIX_MAX = 600;
 // Stamped on each row so two composition strategies can be compared on the
-// same ledger. Phase 3 switches this to "slate".
-const FEED_COMPOSE_MODE = "shuffle";
+// same ledger ("shuffle" = the pre-2026-09-06 pool shuffle + topic round-robin).
+const FEED_COMPOSE_MODE = "slate";
 
 function recordFeedShown(videos, mode) {
     if (!state.feedMix || !Array.isArray(state.feedMix.shown)) state.feedMix = { shown: [] };
@@ -7746,6 +7746,23 @@ async function generateTopicsForSeeds(seeds, budget) {
     }
 }
 
+// The four retrieval forms per topic. YouTube has no "older than" filter
+// (it removed sort-by-upload-date in Jan 2026 and never had an age window),
+// so older eras come from relevance/popularity results bucketed by their
+// (now real) dates; the recent form is the one era YouTube CAN be asked for.
+//   recent: sp = popularity + uploaded this year + type:video (CAMSBAgFEAE=,
+//           verified live 2026-09-06 — only uploads from the last year came back)
+//   broad:  relevance, any era, bucketed by date downstream
+//   depth:  relevance on topic + facet/qualifier, intent-precise
+//   proven: YouTube "popularity" (blends watch time; not pure views since
+//           Jan 2026) — the only supply of classic/vintage uploads
+const DISCOVERY_FORMS = {
+    recent: { sp: "CAMSBAgFEAE=", limit: 8 },
+    broad: { sort: "relevance", limit: 10 },
+    depth: { sort: "relevance", limit: 8 },
+    proven: { sort: "views", limit: 6 }
+};
+
 // Qualifiers for the "depth" query form when topic policy has no specific facets.
 const DEPTH_QUALIFIERS = ["documentary", "deep dive", "explained", "full process", "start to finish"];
 
@@ -7753,7 +7770,8 @@ function getRandomDepthQualifier() {
     return DEPTH_QUALIFIERS[Math.floor(Math.random() * DEPTH_QUALIFIERS.length)];
 }
 
-// Interleave arrays round-robin for era diversity
+// Interleave arrays round-robin so dedupe treats the query FORMS evenly.
+// (This is not era diversity — era balance is composeSlate's job.)
 function interleaveArrays(...arrays) {
     const result = [];
     const maxLen = Math.max(...arrays.map(a => a.length));
@@ -7850,6 +7868,170 @@ async function classifyCandidatesWithLLM(topic, candidates) {
     return candidates;
 }
 
+// ── One rank scale ────────────────────────────────────────────────────
+// The discovery axes (0..2.5), the classifier verdict and the legacy keyword
+// score used to be combined inline at fetch time and never read again. This
+// is the single place that combination lives, so the slate composer can
+// recompute it from the CURRENT preferences (a dislike or a new liked channel
+// changes the order, not only the gate).
+function rankScoreFor(v, ctx) {
+    const axis = scoreDiscoveryVideo(v, ctx);
+    let semanticBonus = 0;
+    if (v._classification === "ON_TOPIC") semanticBonus = 8;
+    else if (v._classification === "ADJACENT") semanticBonus = 2;
+    else if (v._classification === "NOVELTY") semanticBonus = -30;
+    else if (v._classification === "OFF_TOPIC") semanticBonus = -40;
+    const legacy = (ctx && typeof ctx.legacyScore === "number") ? ctx.legacyScore
+        : (typeof v.score === "number" ? v.score : 0);
+    const rankScore = axis.score * 10 + semanticBonus + Math.max(-15, Math.min(15, legacy)) * 0.4;
+    return {
+        rankScore,
+        breakdown: { ...axis.breakdown, classification: v._classification || "heuristic", reason: v._classificationReason }
+    };
+}
+
+// ── Slate composition: calibrated, capped, deterministic ──────────────
+// The pool is a candidate RESERVOIR, not an order. Until 2026-09-06 the ranked
+// candidates were shuffled into it and a topic round-robin drew from it, so
+// the rank never reached the screen and one channel could fill a batch.
+//
+// composeSlate is Steck's calibrated re-ranking (RecSys'18) with an MMR-style
+// repeat penalty: each slot takes the candidate maximising
+//   (1 - λ) · relevance  −  λ · KL(p_era ‖ q_era with this candidate)  −  penalty · repeats
+// under per-channel and per-topic caps that relax only when nothing else is
+// left. One explore slot mid-slate takes the best candidate from a topic the
+// user has never been shown. Pure: no Math.random, ties go to pool order.
+const SLATE_DEFAULTS = {
+    lambda: 0.6,               // KL term is bounded ~ln(1/β); relevance is [0,1]
+    beta: 0.01,                // Steck's smoothing so an empty bucket is finite
+    caps: { channel: 2, topic: 3 },   // per 12 shown; scaled with the slate size
+    perSlate: 12,
+    repeatPenalty: 0.08,
+    exploreSlots: 1
+};
+
+function composeSlate(pool, n, ctx) {
+    const items = Array.isArray(pool) ? pool : [];
+    const o = Object.assign({}, SLATE_DEFAULTS, ctx || {});
+    const caps = Object.assign({}, SLATE_DEFAULTS.caps, (ctx && ctx.caps) || {});
+    const p = o.targetEra || ERA_TARGET_MIX;
+    const size = Math.min(Math.max(0, n | 0), items.length);
+    const empty = { slate: [], breakdown: { era: {}, eraRaw: {}, topic: {}, channel: {}, target: p, kl: null } };
+    if (size === 0) return empty;
+
+    const now = (typeof o.now === "number") ? o.now : Date.now();
+    const relFn = o.relevance || (v => (typeof v._rankScore === "number" ? v._rankScore : 0));
+    const eraOf = o.eraOf || (v => eraBucketOf(v.published, now));
+    const topicOf = o.topicOf || (v => normalizeTopic(v._topic || v.discoveryTopic || ""));
+    const channelOf = o.channelOf || (v => ((v.channelName || "").toLowerCase() || v.channelId || ""));
+    const scale = size / SLATE_DEFAULTS.perSlate;
+    const capC = Number.isFinite(caps.channel) ? Math.max(1, Math.ceil(caps.channel * scale)) : Infinity;
+    const capT = Number.isFinite(caps.topic) ? Math.max(1, Math.ceil(caps.topic * scale)) : Infinity;
+
+    const cand = items.map((v, i) => {
+        const raw = eraOf(v);
+        const rel = relFn(v);
+        return { v, i, rel: Number.isFinite(rel) ? rel : 0, eraRaw: raw,
+                 // An undated row is a clock that starts now: it competes as
+                 // "recent" and can never satisfy an older bucket's share.
+                 era: raw === "unknown" ? "recent" : raw,
+                 topic: topicOf(v), channel: channelOf(v) };
+    });
+    let lo = Infinity, hi = -Infinity;
+    cand.forEach(c => { lo = Math.min(lo, c.rel); hi = Math.max(hi, c.rel); });
+    cand.forEach(c => { c.relN = hi > lo ? (c.rel - lo) / (hi - lo) : 0.5; });
+
+    const chosen = [];
+    const used = new Set();
+    const cnt = { era: {}, topic: {}, channel: {} };
+    const calibWith = (era) => {
+        const total = chosen.length + 1;
+        const mixed = {};
+        ERA_BUCKETS.forEach(b => {
+            const q = ((cnt.era[b] || 0) + (b === era ? 1 : 0)) / total;
+            mixed[b] = (1 - o.beta) * q + o.beta * (p[b] || 0);
+        });
+        return -klDivergence(p, mixed);
+    };
+    const underCaps = (c) => (cnt.channel[c.channel] || 0) < capC && (cnt.topic[c.topic] || 0) < capT;
+    const take = (c) => {
+        used.add(c.i); chosen.push(c);
+        cnt.era[c.era] = (cnt.era[c.era] || 0) + 1;
+        cnt.topic[c.topic] = (cnt.topic[c.topic] || 0) + 1;
+        cnt.channel[c.channel] = (cnt.channel[c.channel] || 0) + 1;
+    };
+    const scan = (strict) => {
+        let best = null, bestS = -Infinity;
+        for (const c of cand) {
+            if (used.has(c.i)) continue;
+            if (strict && !underCaps(c)) continue;
+            const repeat = (cnt.topic[c.topic] || 0) + (cnt.channel[c.channel] || 0);
+            const sc = (1 - o.lambda) * c.relN + o.lambda * calibWith(c.era) - o.repeatPenalty * repeat;
+            if (sc > bestS) { bestS = sc; best = c; }
+        }
+        return best;
+    };
+
+    let exploreLeft = o.exploreSlots || 0;
+    const explorePos = Math.floor(size / 2);
+    for (let slot = 0; slot < size; slot++) {
+        if (exploreLeft > 0 && slot === explorePos && typeof o.isUnexploredTopic === "function") {
+            let best = null, bestRel = -Infinity;
+            for (const c of cand) {
+                if (used.has(c.i) || !underCaps(c) || !o.isUnexploredTopic(c.topic)) continue;
+                if (c.relN > bestRel) { bestRel = c.relN; best = c; }
+            }
+            if (best) { take(best); exploreLeft -= 1; continue; }
+        }
+        const best = scan(true) || scan(false);
+        if (!best) break;
+        take(best);
+    }
+
+    const eraRaw = {};
+    chosen.forEach(c => { eraRaw[c.eraRaw] = (eraRaw[c.eraRaw] || 0) + 1; });
+    const qFinal = {};
+    ERA_BUCKETS.forEach(b => { qFinal[b] = (cnt.era[b] || 0) / chosen.length; });
+    return {
+        slate: chosen.map(c => c.v),
+        breakdown: { era: cnt.era, eraRaw, topic: cnt.topic, channel: cnt.channel, target: p, kl: klDivergence(p, qFinal) }
+    };
+}
+
+// Everything composeSlate needs from live state, built once per slate.
+function buildSlateCtx() {
+    const now = Date.now();
+    const likedChannels = new Set(getLikedChannelAffinity().keys());
+    return {
+        now,
+        targetEra: deriveEraPrior(undefined, now),
+        likedChannels,
+        // Fresh rank from CURRENT preferences; written back so the render
+        // gate and the debug breakdown read the same number.
+        relevance: (v) => {
+            const topic = v._topic || v.discoveryTopic || "";
+            const legacy = getScoreAndMatches(v).score;
+            const r = rankScoreFor(v, { topic, likedChannels, legacyScore: legacy });
+            v._rankScore = r.rankScore;
+            v._rankBreakdown = r.breakdown;
+            return r.rankScore;
+        },
+        isUnexploredTopic: (t) => topicSignalTotal(t, "imp") === 0
+    };
+}
+
+// Same mutate-and-return contract the old round-robin picker had: the chosen
+// videos leave the pool. Breakdown goes to the console under WG_DEBUG.
+function takeSlate(pool, n, ctx) {
+    const { slate, breakdown } = composeSlate(pool, n, ctx || buildSlateCtx());
+    const ids = new Set(slate.map(v => v.id));
+    for (let i = pool.length - 1; i >= 0; i--) {
+        if (ids.has(pool[i].id)) pool.splice(i, 1);
+    }
+    if (slate.length) debug(`[Slate] ${slate.length} picked — eras ${JSON.stringify(breakdown.era)} (raw ${JSON.stringify(breakdown.eraRaw)}), KL ${breakdown.kl === null ? "n/a" : breakdown.kl.toFixed(3)}, topics ${Object.keys(breakdown.topic).length}, channels ${Object.keys(breakdown.channel).length}`);
+    return slate;
+}
+
 async function fetchVideosForTopic(topic) {
     let videos = [];
     let success = false;
@@ -7858,10 +8040,7 @@ async function fetchVideosForTopic(topic) {
     
     if (state.settings.useYtdlp) {
         try {
-            // Intent-aware 3-way parallel fetch:
-            //   broad:  YouTube relevance for raw topic
-            //   facet:  positive facet query from topic policy if available, else depth qualifier
-            //   proven: view-count sort (capped at limit 5 to avoid popularity spam)
+            // Era-aware 4-way parallel fetch — see DISCOVERY_FORMS.
             let depthQuery = "";
             if (policy && Array.isArray(policy.includeFacets) && policy.includeFacets.length > 0) {
                 const facet = policy.includeFacets[Math.floor(Math.random() * policy.includeFacets.length)];
@@ -7870,23 +8049,26 @@ async function fetchVideosForTopic(topic) {
                 depthQuery = `${topic} ${getRandomDepthQualifier()}`;
             }
 
-            debug(`[Smart Feed Fetch] 3-way parallel for "${topic}" — broad(relevance) + depth(${depthQuery}) + proven(views:capped)`);
+            debug(`[Smart Feed Fetch] 4-way parallel for "${topic}" — recent(this year) + broad(relevance) + depth(${depthQuery}) + proven(popularity)`);
 
-            const fetchOne = async (query, sort, label, limit = fetchCountPerRequest) => {
+            const fetchOne = async (query, how, label, limit = fetchCountPerRequest) => {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 15000);
                 try {
+                    // The scraper's raw `sp` (YouTube results-filter token) wins
+                    // over `sort` when both are sent, so send exactly one.
+                    const body = {
+                        source: "youtube",
+                        query: query,
+                        limit: limit,
+                        days_back: 0,
+                        require_transcript: false
+                    };
+                    if (how && how.sp) body.sp = how.sp; else body.sort = (how && how.sort) || "relevance";
                     const resp = await fetch("/scraper/collect", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            source: "youtube",
-                            query: query,
-                            limit: limit,
-                            days_back: 0,
-                            require_transcript: false,
-                            sort: sort
-                        }),
+                        body: JSON.stringify(body),
                         signal: controller.signal
                     });
                     clearTimeout(timeoutId);
@@ -7904,11 +8086,15 @@ async function fetchVideosForTopic(topic) {
                 return [];
             };
 
-            // Fire all 3 in parallel
-            const [broadItems, depthItems, provenItems] = await Promise.all([
-                fetchOne(topic, "relevance", "broad(relevance)", 10),
-                fetchOne(depthQuery, "relevance", `depth(${depthQuery})`, 10),
-                fetchOne(topic, "views", "proven(views:capped)", 5)
+            // Four forms, fired in parallel. Each is one yt-dlp subprocess on
+            // the scraper (hard 10s timeout there), so the cold-start fan-out
+            // below was lowered 6 -> 4 topics to keep peak concurrency flat.
+            const F = DISCOVERY_FORMS;
+            const [recentItems, broadItems, depthItems, provenItems] = await Promise.all([
+                fetchOne(topic, F.recent, "recent(this-year+popularity)", F.recent.limit),
+                fetchOne(topic, F.broad, "broad(relevance)", F.broad.limit),
+                fetchOne(depthQuery, F.depth, `depth(${depthQuery})`, F.depth.limit),
+                fetchOne(topic, F.proven, "proven(popularity:capped)", F.proven.limit)
             ]);
 
             // Map items to video objects, tagging form + in-form rank for the scorer
@@ -7942,12 +8128,13 @@ async function fetchVideosForTopic(topic) {
                 return mapped;
             };
 
+            const recentVideos = mapItems(recentItems, "recent");
             const broadVideos = mapItems(broadItems, "broad");
             const depthVideos = mapItems(depthItems, "depth");
             const provenVideos = mapItems(provenItems, "proven");
 
             // Interleave forms round-robin so dedupe treats them evenly
-            const interleaved = interleaveArrays(broadVideos, depthVideos, provenVideos);
+            const interleaved = interleaveArrays(recentVideos, broadVideos, depthVideos, provenVideos);
 
             // Deduplicate by video id
             const seenIds = new Set();
@@ -7961,11 +8148,12 @@ async function fetchVideosForTopic(topic) {
             if (videos.length > 0) {
                 success = true;
                 const formBreakdown = {
+                    recent: videos.filter(v => v._form === "recent").length,
                     broad: videos.filter(v => v._form === "broad").length,
                     depth: videos.filter(v => v._form === "depth").length,
                     proven: videos.filter(v => v._form === "proven").length
                 };
-                debug(`[Smart Feed Fetch] Total unique videos for "${topic}": ${videos.length} (broad:${formBreakdown.broad}, depth:${formBreakdown.depth}, proven:${formBreakdown.proven})`);
+                debug(`[Smart Feed Fetch] Total unique videos for "${topic}": ${videos.length} (recent:${formBreakdown.recent}, broad:${formBreakdown.broad}, depth:${formBreakdown.depth}, proven:${formBreakdown.proven})`);
             }
         } catch (err) {
             console.error(`[Smart Feed Fetch] Scraper fetch failed for "${topic}":`, err);
@@ -8093,19 +8281,13 @@ async function fetchVideosForTopic(topic) {
         // Backend fans out at CLASSIFY_BATCH_SIZE=15 with a route cap of 50.
         await classifyCandidatesWithLLM(topic, kept.slice(0, 30));
 
-        // Rank best-first so the downstream per-topic cap keeps the top
+        // Rank best-first so the downstream per-topic keep takes the top
         // candidates instead of whatever arrived first.
         const likedChannels = new Set(getLikedChannelAffinity().keys());
         kept.forEach(v => {
-            const axis = scoreDiscoveryVideo(v, { topic, topicPolicy: policy, likedChannels });
-            let semanticBonus = 0;
-            if (v._classification === "ON_TOPIC") semanticBonus = 8;
-            else if (v._classification === "ADJACENT") semanticBonus = 2;
-            else if (v._classification === "NOVELTY") semanticBonus = -30;
-            else if (v._classification === "OFF_TOPIC") semanticBonus = -40;
-
-            v._rankScore = axis.score * 10 + semanticBonus + Math.max(-15, Math.min(15, v.score)) * 0.4;
-            v._rankBreakdown = { ...axis.breakdown, classification: v._classification || "heuristic", reason: v._classificationReason };
+            const r = rankScoreFor(v, { topic, topicPolicy: policy, likedChannels, legacyScore: v.score });
+            v._rankScore = r.rankScore;
+            v._rankBreakdown = r.breakdown;
         });
 
         // Filter out outright NOVELTY and OFF_TOPIC candidates before feed cap
@@ -8286,52 +8468,6 @@ function shuffleArray(arr) {
     return arr;
 }
 
-// Pick a diverse batch from the pool by round-robining across different topics
-function pickDiverseBatch(pool, batchSize) {
-    if (pool.length <= batchSize) {
-        return pool.splice(0, pool.length);
-    }
-    
-    // Group by topic
-    const topicGroups = {};
-    const topicOrder = [];
-    pool.forEach((v, idx) => {
-        const topic = v._topic || v.discoveryTopic || '__unknown__';
-        if (!topicGroups[topic]) {
-            topicGroups[topic] = [];
-            topicOrder.push(topic);
-        }
-        topicGroups[topic].push(idx);
-    });
-    
-    // Round-robin pick across topics
-    shuffleArray(topicOrder);
-    const pickedIndices = new Set();
-    let round = 0;
-    while (pickedIndices.size < batchSize) {
-        let addedThisRound = false;
-        for (const topic of topicOrder) {
-            if (pickedIndices.size >= batchSize) break;
-            const group = topicGroups[topic];
-            if (round < group.length) {
-                pickedIndices.add(group[round]);
-                addedThisRound = true;
-            }
-        }
-        if (!addedThisRound) break;
-        round++;
-    }
-    
-    // Extract picked items and remove them from pool (in reverse order to preserve indices)
-    const sortedIndices = [...pickedIndices].sort((a, b) => a - b);
-    const picked = sortedIndices.map(i => pool[i]);
-    for (let i = sortedIndices.length - 1; i >= 0; i--) {
-        pool.splice(sortedIndices[i], 1);
-    }
-    
-    return picked;
-}
-
 async function fillSmartFeedPreloadBuffer() {
     if (state.smartFeedPreloadLoading) {
         return currentPreloadPromise || Promise.resolve();
@@ -8382,7 +8518,8 @@ async function fillSmartFeedPreloadBuffer() {
     const isPoolEmpty = state.smartFeedSuggestionPool.length === 0;
     // Cold start is the latency-critical path: fan out wider so the first
     // batch renders after ONE round-trip instead of several sequential rounds.
-    const parallelCount = isPoolEmpty ? 6 : (isPoolLow ? 3 : 1);
+    // 4, not 6: each topic is now four scraper subprocesses (was three).
+    const parallelCount = isPoolEmpty ? 4 : (isPoolLow ? 3 : 1);
     
     const topicsToFetch = [];
     for (let i = 0; i < parallelCount; i++) {
@@ -8421,6 +8558,7 @@ async function fillSmartFeedPreloadBuffer() {
             const results = await Promise.all(fetchPromises);
             const timestamp = Date.now();
             let totalAdded = 0;
+            const slateCtx = { now: timestamp, targetEra: deriveEraPrior(undefined, timestamp) };
 
             // Dedupe against everything already in the pool or rendered in the feed
             const knownIds = new Set(state.smartFeedSuggestionPool.map(v => v.id));
@@ -8433,8 +8571,13 @@ async function fillSmartFeedPreloadBuffer() {
                         v.crawledAt = timestamp;
                     });
 
-                    // Limit to a max of 8 videos per topic to ensure a diverse mix in the feed
-                    const limitedVideos = videos.filter(v => !knownIds.has(v.id)).slice(0, 8);
+                    // Keep at most 8 per topic — and pick those 8 as a small
+                    // era-calibrated, channel-capped slate rather than the top 8
+                    // by rank, which would be whatever era relevance favours.
+                    const fresh = videos.filter(v => !knownIds.has(v.id));
+                    const limitedVideos = composeSlate(fresh, 8, {
+                        ...slateCtx, caps: { channel: 2, topic: Infinity }, exploreSlots: 0
+                    }).slate;
                     limitedVideos.forEach(v => knownIds.add(v.id));
                     state.smartFeedSuggestionPool.push(...limitedVideos);
                     totalAdded += limitedVideos.length;
@@ -8444,8 +8587,7 @@ async function fillSmartFeedPreloadBuffer() {
             }
             
             if (totalAdded > 0) {
-                // Fisher-Yates shuffle to mix topics seamlessly
-                shuffleArray(state.smartFeedSuggestionPool);
+                // No shuffle: the pool is a reservoir and composeSlate orders it.
                 saveSmartFeedSuggestionPool();
                 
                 debug(`[Smart Feed Preload] Successfully preloaded ${totalAdded} videos from ${results.filter(r => r.videos.length > 0).length} topics. Pool size: ${state.smartFeedSuggestionPool.length}`);
@@ -8485,8 +8627,8 @@ async function loadNextSmartFeedBatch() {
     
     // Check if we have suggestions in our persistent pool
     if (state.smartFeedSuggestionPool.length > 0) {
-        // Pick a diverse batch of 12 videos round-robined across topics
-        const videosToRender = pickDiverseBatch(state.smartFeedSuggestionPool, 12);
+        // A calibrated slate of 12: ranked, era-balanced, channel/topic-capped
+        const videosToRender = takeSlate(state.smartFeedSuggestionPool, 12);
         
         saveSmartFeedSuggestionPool();
         
@@ -8498,7 +8640,10 @@ async function loadNextSmartFeedBatch() {
             
             const isBlockedChannel = isChannelBlocked(v.channelId, v.channelName);
             
-            return !isBlockedChannel && v.score > -10;
+            // Both scales gate here: the legacy keyword score (-10 floor) and
+            // the unified rank the slate was composed on (-5 floor).
+            const rankOk = typeof v._rankScore !== "number" || v._rankScore > -5;
+            return !isBlockedChannel && v.score > -10 && rankOk;
         });
         
         const existingIds = new Set(state.smartFeedVideos.map(v => v.id));
@@ -8609,14 +8754,18 @@ async function loadNextSmartFeedBatch() {
         const existingIds = new Set(state.smartFeedVideos.map(v => v.id));
         const deduplicated = videos.filter(v => !existingIds.has(v.id));
         // Cap per-topic to prevent single-topic flooding (same as preload path)
-        const limited = deduplicated.slice(0, 8);
+        const limited = composeSlate(deduplicated, 8, {
+            targetEra: deriveEraPrior(), caps: { channel: 2, topic: Infinity }, exploreSlots: 0
+        }).slate;
+        const limitedIds = new Set(limited.map(v => v.id));
         
         if (limited.length > 0) {
             limited.forEach(v => v._topic = topic);
             state.smartFeedVideos.push(...limited);
+            recordFeedShown(limited);
             
             // Also add remaining videos to the pool for future batches
-            const remainingForPool = deduplicated.slice(8);
+            const remainingForPool = deduplicated.filter(v => !limitedIds.has(v.id));
             if (remainingForPool.length > 0) {
                 const timestamp = Date.now();
                 remainingForPool.forEach(v => {
@@ -8624,7 +8773,6 @@ async function loadNextSmartFeedBatch() {
                     v.crawledAt = timestamp;
                 });
                 state.smartFeedSuggestionPool.push(...remainingForPool);
-                shuffleArray(state.smartFeedSuggestionPool);
                 saveSmartFeedSuggestionPool();
             }
             
@@ -8671,7 +8819,7 @@ async function replenishSmartFeed(count, appendToDom = true) {
     }
     
     if (pool.length > 0) {
-        const videosToRender = pickDiverseBatch(pool, count);
+        const videosToRender = takeSlate(pool, count);
         saveSmartFeedSuggestionPool();
         
         // Filter allowed videos on-the-fly
@@ -8682,7 +8830,10 @@ async function replenishSmartFeed(count, appendToDom = true) {
             
             const isBlockedChannel = isChannelBlocked(v.channelId, v.channelName);
             
-            return !isBlockedChannel && v.score > -10;
+            // Both scales gate here: the legacy keyword score (-10 floor) and
+            // the unified rank the slate was composed on (-5 floor).
+            const rankOk = typeof v._rankScore !== "number" || v._rankScore > -5;
+            return !isBlockedChannel && v.score > -10 && rankOk;
         });
         
         const existingIds = new Set(state.smartFeedVideos.map(v => v.id));
