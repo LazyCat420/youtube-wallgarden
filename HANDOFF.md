@@ -1,3 +1,85 @@
+# Handoff — the calibrated feed: dated rows, a composed slate, topic roles (2026-09-06)
+
+Four commits on this repo (`6f8215c` era buckets + ledger, `cfaf6d2` slate,
+`ab26c4c` topic roles, `4316e65` plan), plus `trading-service@631935ab`
+(scraper dates, redeployed as scraper-service) and
+`lazy-agent-service@5955b89` (roles + FIT). All three containers deployed to
+synology and live-verified. Assets at `?v=20260906-v67`.
+
+The blueprint with the full audit is `plan/calibrated_feed.md`. Read it first.
+
+## Why
+
+"Random topics pulling random videos" was five mechanisms, each reasonable:
+every discovery video arrived UNDATED (the scraper's date repair was gated on
+`require_transcript`), the per-topic rank was computed and then the whole pool
+was SHUFFLED (`_rankScore` was never read again), retrieval never asked
+YouTube for any era, the brainstorm prompt told 75% of every batch to leave
+the user's scene, and topic selection was a full-pool shuffle where weight
+decided WHEN a topic was fetched, never WHETHER.
+
+## What is live
+
+- **Dates.** Every scraper row now carries `published_at` (approximate:
+  month/year real, day = today's) plus `published_at_estimated` and a
+  `description` snippet. Probe after deploy: 90/90 dated across three forms,
+  upload years 2009–2026. Pool version 3 flushed the undated pool.
+- **Era buckets + prior.** `eraBucketOf` (recent <1y / mid 1–4y / classic
+  4–10y / vintage >10y, 10-day edge tolerance; undated = unknown, charged to
+  recent). `deriveEraPrior` = dated likes smoothed toward 35/35/25/5.
+- **Four retrieval forms** (`DISCOVERY_FORMS`): recent (`sp=CAMSBAgFEAE=`,
+  popularity + this year), broad, depth, proven. Limits scale with the topic's
+  role budget (10/8/5). Cold-start fan-out 6 → 4 topics.
+- **One rank scale** (`rankScoreFor`) recomputed at composition time.
+- **`composeSlate`** — Steck-calibrated, MMR-penalised, channel/topic-capped,
+  one explore slot, deterministic. `takeSlate` at both draw sites; the shuffle
+  and `pickDiverseBatch` are gone. Per-topic keep of 8 is itself a slate.
+- **Topic roles** (core / adjacent / explore) stamped at birth, derived for
+  legacy entries; `composeTopicQueue` builds 30-topic slates at 60/25/15 with
+  core calibrated across liked clusters by like share and an explore share
+  that adapts to its hit-rate; graduation on play/like; explore expiry on
+  IGNORED. Brainstorm asks for 60 topics and sends `rateFit`.
+- **Backend**: roles decided per batch (one blended CORE at 0.6, ADJACENT
+  by cluster share, EXPLORE at 0.9), FIT rubric next to ANCHORING, `/similar`
+  sees all seeds and the failed-shape line and is rated, `promptVariant`
+  echoed, grounding evidence carries views + years and may return DEAD.
+  Live probe: 20 topics → roles 7/8/5, fits 18 HIGH / 2 MED, variant echoed.
+
+## Instruments — this is how the change gets judged
+
+```
+wgFeedMix()   // era shown vs target, KL, plays/likes per 100 shown, top channels with max-in-any-12, per-mode shuffle/slate
+wgEraPrior()  // default vs derived era prior, dated-like count
+wgTopicMix()  // topics by role (engaged % of shown), core fetched share vs like share per cluster, explore hit-rate, v1/v2/v2-nofit arms
+wgPromptAB()  // unchanged; the brainstorm path finally stamps src
+WG_DEBUG = 1  // logs each composed slate's era/topic/channel breakdown
+```
+
+Acceptance after ≥ 7 days of ledger and ≥ 20 shown topics per role is written
+in `plan/calibrated_feed.md`. **Do not edit prompts or constants before that
+horizon** — this repo has learned twice that an eyeball read does not survive
+n = 30.
+
+## Traps for the next session
+
+- Bump every `?v=` (now `20260906-v67`) or the immutable cache serves the
+  old bundle; three bumps happened in one session for three deploys.
+- `window.wgX` helpers live on the VM's `window` in tests: `get("window").wgX`.
+  Copy VM arrays out with `plain()` before `deepStrictEqual` (test/_boot.mjs).
+- YouTube's this-year window is honoured on most calls but not all: one
+  "raku kiln firing" call through the container returned 2015/2020/2021 rows
+  while the same request direct and a retry were all 2025–2026. The slate
+  charges rows by their REAL date, so a leaky window costs nothing but one
+  wasted form.
+- `sort:"date"` is relevance order since YouTube's Jan 2026 change; the
+  channel-sync fallback still asks for it. Documented, not fixed.
+- The Jetson currently reports model `nemotron35`; the backend pins the box,
+  discovers the model, and only warns when it is not the expected Qwen.
+- `test:smoke` needs `.venv` (gitignored) — from a worktree run
+  `../youtube-wallgarden/.venv/bin/python test/smoke.py` (12/12 today).
+
+---
+
 # Handoff — pinned to the Jetson, and the AI channel suggestion never ran (2026-08-22)
 
 Commit `b29bdf0` (this repo) + `lazy-agent-service@8456371`. Both containers
