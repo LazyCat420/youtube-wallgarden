@@ -174,4 +174,15 @@ const ctx0 = { topic: "workshop build", likedChannels: new Set() };
   console.log("✅ views/duration text parsers");
 }
 
+// Maturity is a live axis only when the row is dated. Every discovery row was
+// undated until scraper 2026-09-06, so this axis read its default on every
+// video; pin that a dated row is scored DIFFERENTLY from an undated one.
+{
+  const dated = scoreDiscoveryVideo(base({ published: Date.now() - 3 * 365 * DAY }), { topic: "quiet workshop" });
+  const undated = scoreDiscoveryVideo(base({ published: null }), { topic: "quiet workshop" });
+  assert.notStrictEqual(dated.breakdown.maturity, undated.breakdown.maturity,
+    "a dated video must not score the undated default on the maturity axis");
+  console.log("✅ maturity axis is live for dated rows");
+}
+
 console.log("\nAll ranking tests passed.");

@@ -121,6 +121,9 @@ let state = {
     topicSignals: {},   // { [topic]: { t, c: { [clientId]: {imp,open,play} }, f: {imp,open,play} } }
     agentQueue: [],     // [{ type, key, payload, addedAt }] — the "checklist"
     llmCallStats: {},   // { [endpoint]: { n, lastAt } } — the before/after number
+    // Feed-mix ledger: every video the smart feed SHOWED, with its era bucket,
+    // topic, channel and what it later earned. Read with wgFeedMix().
+    feedMix: { shown: [] },
     // Mined / defined topic retrieval policies (intent, positive facets, negative exclusions).
     topicPolicies: {},
     // Cached semantic candidate classifications (videoId -> { classification, reason, t }).
@@ -891,6 +894,10 @@ function loadState() {
     state.topicSignals = JSON.parse(getStoredItem("topic_signals") || "{}");
     state.agentQueue = JSON.parse(getStoredItem("agent_queue") || "[]");
     state.llmCallStats = JSON.parse(getStoredItem("llm_call_stats") || "{}");
+    try {
+        state.feedMix = JSON.parse(getStoredItem("feed_mix") || '{"shown":[]}');
+    } catch (e) { state.feedMix = null; }
+    if (!state.feedMix || !Array.isArray(state.feedMix.shown)) state.feedMix = { shown: [] };
     state.brainstormTopics = rawBrainstorm ? JSON.parse(rawBrainstorm) : [];
     state.videoRatings = rawVideoRatings ? JSON.parse(rawVideoRatings) : {};
     const rawRatingStates = getStoredItem("rating_states");
@@ -974,7 +981,10 @@ function loadState() {
     // One-time flush when the ranking pipeline changes: pool entries fetched
     // under an older strategy (e.g. the date-sorted era queries) would keep
     // serving slop for days. Bump WG_POOL_VERSION to invalidate.
-    const WG_POOL_VERSION = "2";
+    // "3": every entry fetched before scraper 2026-09-06 has published=null
+    // (the scraper's date repair was gated on require_transcript). Era
+    // bucketing needs dated rows, so the undated pool goes.
+    const WG_POOL_VERSION = "3";
     if (getStoredItem("pool_version") !== JSON.stringify(WG_POOL_VERSION) && state.smartFeedSuggestionPool.length > 0) {
         debug(`[Smart Feed] Pool version changed — flushing ${state.smartFeedSuggestionPool.length} pre-ranking suggestions.`);
         state.smartFeedSuggestionPool = [];
@@ -1434,7 +1444,9 @@ function flushSmartFeedSuggestionPoolSave() {
     // penalty never applied to anything already in the pool: up to 1000
     // videos frozen at fetch-time scores for 14 days.
     const clean = (state.smartFeedSuggestionPool || []).map(v => {
-        const { _score, _matchedTopics, ...rest } = v;
+        // `description` is a classifier hint that already did its job before
+        // the entry reached the pool; 1000 x 200 chars is dead weight in storage.
+        const { _score, _matchedTopics, description, ...rest } = v;
         return rest;
     });
     persistField("smart_feed_pool", clean);
@@ -1557,6 +1569,7 @@ function stampRatingStates() {
         const cur = state.ratingStates[id];
         if (!cur || cur.r !== r) {
             state.ratingStates[id] = { r, t: now, v: _wgVideoMeta(id) };
+            if (r === 5) markFeedEvent(id, "like");
         }
     });
     // Cleared ratings (unlike / undislike) → tombstone (r=0) so the removal syncs.
@@ -3475,6 +3488,181 @@ const DISCOVERY_WEIGHTS = { intent: 1.0, authority: 0.6, maturity: 0.4, watchabi
 const WG_CLICKBAIT_RE = /\b(you won'?t believe|gone wrong|shocking|insane|must (?:see|watch)|top \d+|life hacks?|exposed|destroyed|1 in a million)\b/i;
 const WG_NOVELTY_RE = /\b(entirely (?:from|out of) lego|made (?:of|from|out of) lego|lego build|in minecraft|minecraft (?:build|working)|roblox|giant gummy|100 layers|prank|challenge|toy diorama)\b/i;
 
+// ── Era buckets: the calibration target for the feed ─────────────────
+// Every discovery video arrived UNDATED until scraper 2026-09-06 (the date
+// repair was gated on require_transcript, which the feed never sets), so no
+// era logic could work — the maturity axis below read its default on every
+// row. Dates are now yt-dlp's approximate_date: month/year real, day-of-month
+// = today's, and "N years ago" lands EXACTLY on the N-year edge. The
+// tolerance pushes an edge case into the OLDER bucket, which is what
+// "N years ago" means on YouTube (N..N+1 years).
+const ERA_BUCKETS = ["recent", "mid", "classic", "vintage"];
+const ERA_EDGES_YEARS = { recent: 1, mid: 4, classic: 10 };
+const ERA_EDGE_TOLERANCE_DAYS = 10;
+// Default target mix: 70% within four years keeps the feed current, 30% older
+// is the "proven / timeless" share. The user's own dated likes override it as
+// they accumulate (deriveEraPrior) — this is Steck's p(c|u).
+const ERA_TARGET_MIX = { recent: 0.35, mid: 0.35, classic: 0.25, vintage: 0.05 };
+const ERA_PRIOR_SMOOTHING = 12;   // pseudo-likes behind the default before history outweighs it
+
+// "unknown" is a REPORTING bucket only. An undated row means the clock starts
+// now, never "this is old" — quota code charges it to "recent".
+function eraBucketOf(published, now) {
+    if (typeof published !== "number" || !Number.isFinite(published) || published <= 0) return "unknown";
+    const at = (typeof now === "number") ? now : Date.now();
+    const ageDays = (at - published) / 86400e3 + ERA_EDGE_TOLERANCE_DAYS;
+    if (ageDays < ERA_EDGES_YEARS.recent * 365.25) return "recent";
+    if (ageDays < ERA_EDGES_YEARS.mid * 365.25) return "mid";
+    if (ageDays < ERA_EDGES_YEARS.classic * 365.25) return "classic";
+    return "vintage";
+}
+
+// p(era | this user): dated likes, smoothed toward the default. With no dated
+// likes it IS the default. `likes` is an array of {published}; omitted = the
+// user's liked videos from the synced rating log.
+function deriveEraPrior(likes, now) {
+    const src = likes || Object.values(state.ratingStates || {})
+        .filter(st => st && st.r === 5 && st.v && st.v.published)
+        .map(st => st.v);
+    const counts = {}; let n = 0;
+    ERA_BUCKETS.forEach(b => { counts[b] = 0; });
+    src.forEach(v => {
+        const b = eraBucketOf(v && v.published, now);
+        if (b !== "unknown") { counts[b] += 1; n += 1; }
+    });
+    const p = {};
+    ERA_BUCKETS.forEach(b => {
+        p[b] = (counts[b] + ERA_PRIOR_SMOOTHING * ERA_TARGET_MIX[b]) / (n + ERA_PRIOR_SMOOTHING);
+    });
+    return p;
+}
+
+// KL(p || q) in nats over p's keys; q is floored so a missing bucket is a
+// large finite cost, not Infinity.
+function klDivergence(p, q, eps) {
+    const floor = eps || 1e-6;
+    let kl = 0;
+    Object.keys(p).forEach(k => {
+        const pk = p[k] || 0;
+        if (pk > 0) kl += pk * Math.log(pk / Math.max(q[k] || 0, floor));
+    });
+    return kl;
+}
+
+// ── Feed-mix ledger: what the smart feed SHOWED, and what it earned ─────
+// There was no instrument that could see the feed's era/topic/channel mix,
+// so the shuffle at the pool could discard the ranking for months unnoticed.
+// Every rendered smart-feed batch lands here; play/like are stamped onto the
+// row later. Local-only (not synced), capped FIFO. Read with wgFeedMix().
+const FEED_MIX_MAX = 600;
+// Stamped on each row so two composition strategies can be compared on the
+// same ledger. Phase 3 switches this to "slate".
+const FEED_COMPOSE_MODE = "shuffle";
+
+function recordFeedShown(videos, mode) {
+    if (!state.feedMix || !Array.isArray(state.feedMix.shown)) state.feedMix = { shown: [] };
+    const now = Date.now();
+    const hist = {};
+    (videos || []).forEach(v => {
+        if (!v || !v.id) return;
+        const era = eraBucketOf(v.published, now);
+        hist[era] = (hist[era] || 0) + 1;
+        state.feedMix.shown.push({
+            id: v.id, era,
+            topic: normalizeTopic(v._topic || v.discoveryTopic || ""),
+            channel: (v.channelName || "").toLowerCase(),
+            form: v._form || "", mode: mode || FEED_COMPOSE_MODE, t: now
+        });
+    });
+    const overflow = state.feedMix.shown.length - FEED_MIX_MAX;
+    if (overflow > 0) state.feedMix.shown.splice(0, overflow);
+    persistField("feed_mix", state.feedMix);
+    if (videos && videos.length) debug(`[Feed Mix] ${videos.length} shown (${mode || FEED_COMPOSE_MODE}) eras ${JSON.stringify(hist)}`);
+    return hist;
+}
+
+// Stamp a play/like onto the most recent shown row for the video. Returns
+// false when the video was never shown by the smart feed (a sub-feed play).
+function markFeedEvent(videoId, kind) {
+    const shown = state.feedMix && state.feedMix.shown;
+    if (!shown || !videoId || (kind !== "play" && kind !== "like")) return false;
+    for (let i = shown.length - 1; i >= 0; i--) {
+        if (shown[i].id !== videoId) continue;
+        if (!shown[i][kind]) shown[i][kind] = Date.now();
+        persistField("feed_mix", state.feedMix);
+        return true;
+    }
+    return false;
+}
+
+// Pure: the report wgFeedMix() prints. Charges "unknown" to "recent" for the
+// KL (an undated row is a clock that starts now), reports it separately.
+function feedMixReport(shown, target, windowSize) {
+    const rows = shown || [];
+    const w = windowSize || 12;
+    const n = rows.length;
+    const eras = {};
+    ERA_BUCKETS.concat(["unknown"]).forEach(b => { eras[b] = { target: target[b] || 0, shown: 0, plays: 0, likes: 0 }; });
+    rows.forEach(r => {
+        const e = eras[r.era] || (eras[r.era] = { target: 0, shown: 0, plays: 0, likes: 0 });
+        e.shown += 1; if (r.play) e.plays += 1; if (r.like) e.likes += 1;
+    });
+    const q = {};
+    ERA_BUCKETS.forEach(b => { q[b] = n ? eras[b].shown / n : 0; });
+    if (n) q.recent += eras.unknown.shown / n;
+    Object.keys(eras).forEach(b => {
+        const e = eras[b];
+        e.shown_pct = n ? Math.round(1000 * e.shown / n) / 10 : 0;
+        e.plays_per_100 = e.shown ? Math.round(1000 * e.plays / e.shown) / 10 : 0;
+        e.likes_per_100 = e.shown ? Math.round(1000 * e.likes / e.shown) / 10 : 0;
+        e.target = Math.round(1000 * e.target) / 10;
+    });
+    const share = (key) => {
+        const counts = {}; const maxWin = {};
+        rows.forEach((r, i) => {
+            const k = r[key] || "?";
+            counts[k] = (counts[k] || 0) + 1;
+            let c = 0;
+            for (let j = Math.max(0, i - w + 1); j <= i; j++) if ((rows[j][key] || "?") === k) c += 1;
+            if (c > (maxWin[k] || 0)) maxWin[k] = c;
+        });
+        return Object.keys(counts).sort((a, b) => counts[b] - counts[a]).slice(0, 10)
+            .map(k => ({ [key]: k, shown: counts[k], share_pct: Math.round(1000 * counts[k] / n) / 10, max_in_any_12: maxWin[k] }));
+    };
+    const byMode = {};
+    rows.forEach(r => {
+        const m = r.mode || "?";
+        const b = byMode[m] || (byMode[m] = { n: 0, plays: 0, likes: 0, eras: {} });
+        b.n += 1; if (r.play) b.plays += 1; if (r.like) b.likes += 1;
+        b.eras[r.era] = (b.eras[r.era] || 0) + 1;
+    });
+    Object.values(byMode).forEach(b => {
+        b.plays_per_100 = b.n ? Math.round(1000 * b.plays / b.n) / 10 : 0;
+        b.likes_per_100 = b.n ? Math.round(1000 * b.likes / b.n) / 10 : 0;
+    });
+    return { n, eras, kl: n ? klDivergence(target, q) : null, topics: n ? share("topic") : [], channels: n ? share("channel") : [], byMode };
+}
+
+window.wgFeedMix = function () {
+    const target = deriveEraPrior();
+    const rep = feedMixReport((state.feedMix && state.feedMix.shown) || [], target);
+    console.log(`feed mix over the last ${rep.n} shown (cap ${FEED_MIX_MAX}); KL(target || shown) = ${rep.kl === null ? "n/a" : rep.kl.toFixed(3)}`);
+    console.table(rep.eras);
+    console.log("by composition mode:"); console.table(rep.byMode);
+    console.log("top topics:"); console.table(rep.topics);
+    console.log("top channels:"); console.table(rep.channels);
+    if (rep.n < 60) console.log(`n=${rep.n} is too small to read the era mix from — browse a few batches first.`);
+    return rep;
+};
+
+window.wgEraPrior = function () {
+    const dated = Object.values(state.ratingStates || {}).filter(st => st && st.r === 5 && st.v && st.v.published).length;
+    const out = { default: ERA_TARGET_MIX, derived: deriveEraPrior(), datedLikes: dated };
+    console.table({ default: ERA_TARGET_MIX, derived: out.derived });
+    console.log(`${dated} dated likes behind the derived prior (smoothing ${ERA_PRIOR_SMOOTHING})`);
+    return out;
+};
+
 function scoreDiscoveryVideo(video, ctx) {
     const w = (ctx && ctx.weights) || DISCOVERY_WEIGHTS;
     const rawTitle = video.title || "";
@@ -4257,7 +4445,9 @@ function renderFeed() {
     const topHeaderActions = document.querySelector(".header-actions");
     if (topHeaderActions) {
         topHeaderActions.innerHTML = "";
-        const sortableViews = ["smart-feed", "subscription-feed", "channel_", "topic_", "search_"];
+        // "smart-feed" is deliberately absent: its render branch never read
+        // discoverySortOrder, so the dropdown promised a date sort it never did.
+        const sortableViews = ["subscription-feed", "channel_", "topic_", "search_"];
         const isSortable = sortableViews.some(v => state.currentView === v || state.currentView.startsWith(v));
         if (isSortable) {
             const selectEl = document.createElement("select");
@@ -5085,6 +5275,7 @@ function playVideo(video) {
     // concurrent calls and pushed five raw video TITLES into the topic pool.
     const playedTopic = video.discoveryTopic || video._topic || video.topic;
     if (playedTopic) recordTopicSignal(playedTopic, "play");
+    markFeedEvent(video.id, "play");
 
     renderQueueUI();
 }
@@ -7734,6 +7925,11 @@ async function fetchVideosForTopic(topic) {
                             // blocking and graph Channel nodes finally work on discovery.
                             channelId: item.channel_id || "",
                             published: item.published_at ? Date.parse(item.published_at) : null,
+                            // Approximate (month/year real, day = today's) — see eraBucketOf.
+                            publishedEstimated: !!item.published_at_estimated,
+                            // First ~200 chars of the results-card snippet; a classifier
+                            // hint, stripped again before the pool is persisted.
+                            description: item.description || "",
                             duration: item.duration_secs,
                             viewCount: item.view_count,
                             isDiscover: true,
@@ -8310,6 +8506,7 @@ async function loadNextSmartFeedBatch() {
         
         if (deduplicated.length > 0) {
             state.smartFeedVideos.push(...deduplicated);
+            recordFeedShown(deduplicated);
             
             const fragment = document.createDocumentFragment();
             deduplicated.forEach(video => {
@@ -8493,6 +8690,7 @@ async function replenishSmartFeed(count, appendToDom = true) {
         
         if (deduplicated.length > 0) {
             state.smartFeedVideos.push(...deduplicated);
+            recordFeedShown(deduplicated);
             
             if (appendToDom) {
                 const suggestionsGrid = document.getElementById("suggestions-grid") || document.getElementById("video-grid");
@@ -8666,6 +8864,7 @@ async function editDiscoverTopic(topic) {
             
             if (deduplicated.length > 0) {
                 state.smartFeedVideos.push(...deduplicated);
+                recordFeedShown(deduplicated);
                 
                 const fragment = document.createDocumentFragment();
                 deduplicated.forEach(video => {
