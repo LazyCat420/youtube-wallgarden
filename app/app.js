@@ -8321,6 +8321,49 @@ function takeSlate(pool, n, ctx) {
     return slate;
 }
 
+// ── Late classification: the model's verdict, off the render path ───────
+// At most LATE_CLASSIFY_CONCURRENCY calls in flight; the rest queue. Verdicts
+// are written onto the candidate objects (the same objects the pool holds),
+// and NOVELTY/OFF_TOPIC survivors are evicted from the pool.
+const LATE_CLASSIFY_CONCURRENCY = 2;
+const _lateClassifyQueue = [];
+let _lateClassifyInFlight = 0;
+
+function scheduleLateClassification(topic, candidates) {
+    if (!candidates || !candidates.length) return;
+    if (state.settings.semanticFilterEnabled === false) return;
+    _lateClassifyQueue.push({ topic, candidates });
+    pumpLateClassification();
+}
+
+function pumpLateClassification() {
+    while (_lateClassifyInFlight < LATE_CLASSIFY_CONCURRENCY && _lateClassifyQueue.length) {
+        const job = _lateClassifyQueue.shift();
+        _lateClassifyInFlight += 1;
+        Promise.resolve()
+            .then(() => classifyCandidatesWithLLM(job.topic, job.candidates))
+            .then(() => applyLateClassifications(job.topic, job.candidates))
+            .catch(err => console.warn(`[Classify] late classification failed for "${job.topic}":`, err && err.message))
+            .finally(() => { _lateClassifyInFlight -= 1; pumpLateClassification(); });
+    }
+}
+
+function applyLateClassifications(topic, candidates) {
+    const bad = new Set(candidates
+        .filter(v => v._classification === "NOVELTY" || v._classification === "OFF_TOPIC")
+        .map(v => v.id));
+    if (!bad.size) return 0;
+    const pool = state.smartFeedSuggestionPool || [];
+    const before = pool.length;
+    state.smartFeedSuggestionPool = pool.filter(v => !bad.has(v.id));
+    const evicted = before - state.smartFeedSuggestionPool.length;
+    if (evicted) {
+        saveSmartFeedSuggestionPool();
+        debug(`[Classify] "${topic}": late verdicts evicted ${evicted} NOVELTY/OFF_TOPIC candidate(s) from the pool`);
+    }
+    return evicted;
+}
+
 async function fetchVideosForTopic(topic) {
     let videos = [];
     let success = false;
@@ -8342,7 +8385,10 @@ async function fetchVideosForTopic(topic) {
 
             const fetchOne = async (query, how, label, limit = fetchCountPerRequest) => {
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 15000);
+                // The scraper queues searches behind a 3-wide gate and gives
+                // each one 25 s; abort a little above that so a queued form
+                // returns instead of being dropped at 15 s and re-asked.
+                const timeoutId = setTimeout(() => controller.abort(), 30000);
                 try {
                     // The scraper's raw `sp` (YouTube results-filter token) wins
                     // over `sort` when both are sent, so send exactly one.
@@ -8568,11 +8614,14 @@ async function fetchVideosForTopic(topic) {
             debug(`[Discovery] "${topic}": dropped spam-shaped ${JSON.stringify(spamDropped)}`);
         }
 
-        // Classify EVERY kept candidate. The old slice(0, 15) left candidates
-        // 16-25 unlabelled, and unlabelled videos sail past the NOVELTY/
-        // OFF_TOPIC drop below — the _rankScore floor cannot catch them.
-        // Backend fans out at CLASSIFY_BATCH_SIZE=15 with a route cap of 50.
-        await classifyCandidatesWithLLM(topic, kept.slice(0, 30));
+        // The classifier is a ~10 s Jetson call per topic (measured 10.2 s for
+        // 30 candidates on 2026-09-06) and it sat on the critical path of every
+        // render: nothing appeared until the scraper AND the model had both
+        // answered. Candidates now ship on the heuristic rank; the verdicts
+        // land in the background and evict NOVELTY/OFF_TOPIC from the pool
+        // when they arrive (composeSlate re-ranks from `_classification` at
+        // every draw, so a late verdict still orders later slates).
+        scheduleLateClassification(topic, kept.slice(0, 30));
 
         // Rank best-first so the downstream per-topic keep takes the top
         // candidates instead of whatever arrived first.
@@ -8818,8 +8867,10 @@ async function fillSmartFeedPreloadBuffer() {
     const isPoolEmpty = state.smartFeedSuggestionPool.length === 0;
     // Cold start is the latency-critical path: fan out wider so the first
     // batch renders after ONE round-trip instead of several sequential rounds.
-    // 4, not 6: each topic is now four scraper subprocesses (was three).
-    const parallelCount = isPoolEmpty ? 4 : (isPoolLow ? 3 : 1);
+    // 3, not 6: each topic is four scraper subprocesses and the scraper runs
+    // three yt-dlp calls at a time on its 4-core box (the rest queue). A wider
+    // fan-out only makes every topic wait for every other topic.
+    const parallelCount = isPoolEmpty ? 3 : (isPoolLow ? 2 : 1);
     
     const topicsToFetch = [];
     for (let i = 0; i < parallelCount; i++) {
@@ -8855,16 +8906,20 @@ async function fillSmartFeedPreloadBuffer() {
                     })
             );
             
-            const results = await Promise.all(fetchPromises);
             const timestamp = Date.now();
             let totalAdded = 0;
+            let topicsWithVideos = 0;
             const slateCtx = { now: timestamp, targetEra: deriveEraPrior(undefined, timestamp) };
 
             // Dedupe against everything already in the pool or rendered in the feed
             const knownIds = new Set(state.smartFeedSuggestionPool.map(v => v.id));
             (state.smartFeedVideos || []).forEach(v => knownIds.add(v.id));
 
-            for (const { topic, videos } of results) {
+            // Absorb each topic AS IT LANDS. The old Promise.all held every
+            // topic's videos until the slowest topic answered, so a cold start
+            // painted nothing for the full round trip; now the first topic
+            // back is the first chunk on screen and the rest fill the pool.
+            const absorb = ({ topic, videos }) => {
                 if (videos.length > 0) {
                     videos.forEach(v => {
                         v._topic = topic;
@@ -8881,20 +8936,23 @@ async function fillSmartFeedPreloadBuffer() {
                     limitedVideos.forEach(v => knownIds.add(v.id));
                     state.smartFeedSuggestionPool.push(...limitedVideos);
                     totalAdded += limitedVideos.length;
+                    if (limitedVideos.length) topicsWithVideos += 1;
+
+                    if (limitedVideos.length && state.currentView === "smart-feed" &&
+                        state.smartFeedVideos.length === 0 && !state.smartFeedLoading) {
+                        loadNextSmartFeedBatch();
+                    }
                 } else {
                     console.warn(`[Smart Feed Preload] No videos found for topic "${topic}".`);
                 }
-            }
+            };
+            await Promise.all(fetchPromises.map(p => p.then(absorb)));
             
             if (totalAdded > 0) {
                 // No shuffle: the pool is a reservoir and composeSlate orders it.
                 saveSmartFeedSuggestionPool();
                 
-                debug(`[Smart Feed Preload] Successfully preloaded ${totalAdded} videos from ${results.filter(r => r.videos.length > 0).length} topics. Pool size: ${state.smartFeedSuggestionPool.length}`);
-                
-                if (state.currentView === "smart-feed" && state.smartFeedVideos.length === 0 && !state.smartFeedLoading) {
-                    loadNextSmartFeedBatch();
-                }
+                debug(`[Smart Feed Preload] Successfully preloaded ${totalAdded} videos from ${topicsWithVideos} topics. Pool size: ${state.smartFeedSuggestionPool.length}`);
             }
         } catch (err) {
             console.error(`[Smart Feed Preload] Failed preloading:`, err);
