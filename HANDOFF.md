@@ -1,3 +1,31 @@
+# Handoff — Music Feed, Anti-DJ Mix Gate, Queue Autoplay Fix & FYP Avoidance Loop (2026-09-16)
+
+Fixes the queue/play-next autoplay bug, introduces a dedicated algorithmic Music Feed strictly filtering out DJ mixes and compilations in favor of standalone artist tracks, and creates a two-way recommendation avoidance feedback loop between regular YouTube browsing and Wallgarden. Assets bumped to `?v=20260916-v70`.
+
+## What changed
+- **Queue & Play Next Autoplay Fix**:
+  - `addToQueue(video, playNext)` in `app/app.js`: eliminated flawed `!isWatchMode` condition that forcibly stopped active playback and autoplayed the new video when floating in Miniplayer or browsing the feed. Active playback is strictly preserved uninterrupted.
+  - Video card 3-dot dropdown menu updated with "Play Next" (inserts at head of queue), "Add to Queue" (appends to queue), and "Add to Playlist" options with SVG icons and click handlers.
+  - Test suite: `test/queue_playback.test.mjs` verifying queue preservation during watch mode, miniplayer mode, idle state, FIFO playback, and dropdown action availability.
+- **Dedicated Music Feed & Anti-DJ Mix Gate**:
+  - Dedicated "Music Feed" sidebar navigation button in `app/index.html` and view orchestration in `app/app.js` (`renderMusicFeed()`, `loadNextMusicFeedBatch()`).
+  - Binary Anti-DJ Mix gate (`isDjMixOrCompilation(video)`) strictly eliminating tracks $> 14$ minutes and matching regex for full mixes, DJ sets, club mixes, live sets, megamixes, compilations, mixtapes, boiler rooms, soundtracks, discographies, and album streams.
+  - Automatic music taste seeding (`getMusicSeeds()`): extracts verified artist channels (including `- Topic` channels), liked track artist splits, and music genre topics from the user's active preferences.
+  - Test suite: `test/music_filter.test.mjs` validating rejection of mixes/compilations, pass-through of authentic artist songs, and music seed extraction.
+- **Two-Way Extension FYP Avoidance Loop**:
+  - `extension/scripts/content.js`: observes YouTube recommendation cards (`ytd-rich-item-renderer`, `ytd-video-renderer`, etc.) entering the viewport. Cards seen for $\ge 15$ seconds that are NOT clicked are marked as skipped/uninteresting and dispatched in batches via `FYP_AVOID_BATCH`.
+  - Rejection handler (`handleRejection`): clicking YouTube's native "Not interested" sends `NOT_INTERESTED` (recording avoidance and setting $-5$ rating in Wallgarden), while "Don't recommend channel" sends `BLOCK_CHANNEL`.
+  - `extension/scripts/background.js`: persists `NOT_INTERESTED` and `FYP_AVOID_BATCH` events to the server's `PUT /sync/global` endpoint under `avoided` and relays `WG_EXT_SYNC` to open Wallgarden tabs.
+  - `sync-service/main.py`: added `avoided` to `SYNC_FIELDS` and LWW map mergers. Verified with `test_lww_avoided_merges_by_timestamp` in `test_merge.py`.
+  - `app/app.js`: added `avoidedVideos` state, `isAvoidedVideo(video)` gate hooked at the top of `isSpamShapedVideo`, snapshot persistence in `_wgSyncSnapshot()`, and `handleExtensionSyncEvent` handling `FYP_AVOID_BATCH`, `NOT_INTERESTED`, and `BLOCK_CHANNEL`.
+  - Fixed binary null byte in `extension/scripts/content.js` (`commentKey`) replacing with `\u0000`.
+  - Test suite: `test/fyp_avoidance.test.mjs` verifying avoidance gates, message ingestion, and feed eviction.
+- **Validation**:
+  - All 18 unit test suites in `npm test` passing cleanly.
+  - All 22 server sync merge tests in `sync-service` passing cleanly.
+
+---
+
 # Handoff — floating bottom-right miniplayer & full feed discovery (2026-09-16)
 
 Adds floating bottom-right Miniplayer (Picture-in-Picture) support so users can continuously watch YouTube videos while browsing and scrolling the discovery feed at 100% full width. Assets bumped to `?v=20260916-v69`.

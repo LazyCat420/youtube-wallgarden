@@ -626,6 +626,23 @@ function handleRejection(menuText, videoCard) {
     // Persist
     saveBlocklist();
 
+    // --- Dispatch to Wallgarden Dashboard & Server Sync ---
+    let videoId = '';
+    if (videoCard) {
+        const link = videoCard.querySelector('a#thumbnail, a#video-title-link, a[href*="/watch?v="]');
+        if (link) {
+            const m = (link.getAttribute('href') || '').match(/[?&]v=([a-zA-Z0-9_-]{11})/);
+            if (m) videoId = m[1];
+        }
+    }
+    if (menuText.includes("not interested")) {
+        if (videoId) {
+            sendSyncEvent('NOT_INTERESTED', { videoId, channelName: channel, title });
+        }
+    } else if (menuText.includes("don't recommend")) {
+        sendSyncEvent('BLOCK_CHANNEL', { videoId, channelName: channel, title });
+    }
+
     // Show a brief notification badge on the video card
     if (videoCard) {
         showBlockedBadge(videoCard, channel || title);
@@ -1072,7 +1089,7 @@ function parseCommentCount(raw) {
  */
 function commentKey(info) {
     if (info.id) return info.id;
-    const src = `${info.author} ${info.text.slice(0, 120)}`;
+    const src = `${info.author}\u0000${info.text.slice(0, 120)}`;
     let h = 5381;
     for (let i = 0; i < src.length; i++) h = ((h << 5) + h + src.charCodeAt(i)) | 0;
     return `h${(h >>> 0).toString(36)}`;
@@ -1731,12 +1748,14 @@ const _recentSync = new Map();
 const SYNC_DEDUP_MS = 1500;
 
 function sendSyncEvent(action, data = {}) {
-    const videoId = data.videoId || getVideoIdFromUrl();
-    if (!videoId) {
+    const videoId = data.videoId || getVideoIdFromUrl() || (action === 'BLOCK_CHANNEL' ? (data.channelName || '') : '');
+    if (!videoId && action !== 'FYP_AVOID_BATCH') {
         console.warn("[Wallgarden Sync] sendSyncEvent failed: no videoId (not on a watch page and no card context)");
         return;
     }
-    const dedupKey = `${action}:${videoId}:${data.playlistId || data.playlistName || ''}`;
+    const dedupKey = action === 'FYP_AVOID_BATCH'
+        ? `FYP_AVOID_BATCH:${Date.now()}`
+        : `${action}:${videoId}:${data.playlistId || data.playlistName || ''}`;
     const now = Date.now();
     const last = _recentSync.get(dedupKey);
     if (last && (now - last) < SYNC_DEDUP_MS) {
@@ -1750,13 +1769,13 @@ function sendSyncEvent(action, data = {}) {
             if (now - t > SYNC_DEDUP_MS) _recentSync.delete(k);
         }
     }
-    console.log(`[Wallgarden Sync] sendSyncEvent: Sending ${action} for ${videoId}`);
+    console.log(`[Wallgarden Sync] sendSyncEvent: Sending ${action} for ${videoId || (data.items && data.items.length) || ''}`);
     try {
         chrome.runtime.sendMessage({
             type: 'WALLGARDEN_SYNC',
             data: {
                 action,
-                videoId,
+                videoId: videoId || undefined,
                 ...data
             }
         }, () => {
@@ -1986,6 +2005,96 @@ function startSyncObservers() {
         }
     }, true); // capture phase — YouTube stopPropagation()s many button clicks,
               // so bubble-phase listeners on document never see them
+
+    // 3. YouTube Feed / FYP Suggestion Avoidance Tracker
+    startFypAvoidanceTracker();
+}
+
+// ── FYP / Recommendation Feed Avoidance Tracker ──
+const _seenFypCards = new Map();
+let _fypObserver = null;
+
+function startFypAvoidanceTracker() {
+    if (_fypObserver) {
+        _fypObserver.disconnect();
+    }
+
+    _fypObserver = new IntersectionObserver((entries) => {
+        const now = Date.now();
+        entries.forEach(entry => {
+            if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
+                const card = entry.target;
+                const link = card.querySelector('a#thumbnail, a#video-title-link, a[href*="/watch?v="]');
+                if (!link) return;
+                const m = (link.getAttribute('href') || '').match(/[?&]v=([a-zA-Z0-9_-]{11})/);
+                if (!m) return;
+                const videoId = m[1];
+
+                if (!_seenFypCards.has(videoId)) {
+                    const titleEl = card.querySelector('#video-title, #title');
+                    const channelEl = card.querySelector('#channel-name .yt-simple-endpoint, #channel-name a, #text.ytd-channel-name');
+                    _seenFypCards.set(videoId, {
+                        videoId,
+                        title: titleEl ? titleEl.textContent.trim() : '',
+                        channelName: channelEl ? channelEl.textContent.trim() : '',
+                        seenAt: now,
+                        clicked: false,
+                        sent: false
+                    });
+
+                    // If user clicks the card, mark it clicked so we DO NOT avoid it
+                    card.addEventListener('click', () => {
+                        const rec = _seenFypCards.get(videoId);
+                        if (rec) rec.clicked = true;
+                    }, { once: true });
+                }
+            }
+        });
+    }, {
+        threshold: 0.5
+    });
+
+    const observeCards = () => {
+        const cards = document.querySelectorAll(
+            'ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model'
+        );
+        cards.forEach(card => {
+            if (!card.dataset.wgFypObserved) {
+                card.dataset.wgFypObserved = 'true';
+                _fypObserver.observe(card);
+            }
+        });
+    };
+
+    observeCards();
+    setInterval(observeCards, 4000);
+
+    // Flush unclicked suggestions that have been observed for >= 15 seconds
+    const flushUnclicked = () => {
+        const now = Date.now();
+        const unclicked = [];
+        for (const [vid, info] of _seenFypCards.entries()) {
+            if (!info.clicked && !info.sent && (now - info.seenAt) >= 15000) {
+                info.sent = true;
+                unclicked.push({
+                    videoId: info.videoId,
+                    title: info.title,
+                    channelName: info.channelName,
+                    t: info.seenAt
+                });
+            }
+        }
+        if (unclicked.length > 0) {
+            console.log(`[Wallgarden FYP] Flushing ${unclicked.length} unclicked suggestions to avoid:`, unclicked);
+            sendSyncEvent('FYP_AVOID_BATCH', { items: unclicked });
+        }
+    };
+
+    setInterval(flushUnclicked, 25000);
+    window.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') flushUnclicked();
+    });
+    window.addEventListener('pagehide', flushUnclicked);
 }
 
 // ============================================================

@@ -60,6 +60,14 @@ def test_lww_equal_t_takes_incoming():
     assert _merge_lww_map(base, inc)["A"]["r"] == -5
 
 
+def test_lww_avoided_merges_by_timestamp():
+    base = {"vid1": {"t": 100, "channelName": "ch1", "reason": "fyp_unclicked"}}
+    inc = {"vid1": {"t": 200, "channelName": "ch1", "reason": "not_interested"}}
+    merged = _merge_lww_map(base, inc)
+    assert merged["vid1"]["t"] == 200
+    assert merged["vid1"]["reason"] == "not_interested"
+
+
 def test_lww_ignores_non_dict():
     base = {"A": {"r": 5, "t": 1}}
     assert _merge_lww_map(base, {"A": "garbage"})["A"] == {"r": 5, "t": 1}

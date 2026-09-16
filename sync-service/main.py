@@ -69,7 +69,9 @@ app.add_middleware(
 # * `topicSignals`: { topic: { t, c: {clientId: {imp,open,play}}, f: {...} } } —
 #   how much interest each topic has accumulated. NOT last-write-wins; see
 #   _merge_topic_signals.
-SYNC_FIELDS = ["ratings", "queue", "playlists", "watched", "mined", "profile", "topicSignals"]
+# * `avoided`: { videoId: { t, channelName, title, reason } } — unclicked
+#   YouTube FYP recommendations or rejected videos to avoid in feeds.
+SYNC_FIELDS = ["ratings", "queue", "playlists", "watched", "mined", "profile", "topicSignals", "avoided"]
 
 
 def _merge_lww_map(base, incoming):
@@ -186,6 +188,7 @@ _MERGERS = {
     "mined": _merge_lww_map,
     "topicSignals": _merge_topic_signals,
     "profile": _merge_profile,
+    "avoided": _merge_lww_map,
 }
 
 
