@@ -1,3 +1,21 @@
+# Handoff — floating bottom-right miniplayer & full feed discovery (2026-09-16)
+
+Adds floating bottom-right Miniplayer (Picture-in-Picture) support so users can continuously watch YouTube videos while browsing and scrolling the discovery feed at 100% full width. Assets bumped to `?v=20260916-v69`.
+
+## What changed
+- **Zero-reload miniplayer mode**: `#inline-player` transitions seamlessly via `body.miniplayer-mode` to a fixed floating window on the bottom right (`380px`, `bottom: 24px`, `right: 24px`) without detaching, re-inserting, or restarting the playing iframe or `<video>` stream.
+- **Feed restoration**: In miniplayer mode, `.main-content` clears grid column splits, restoring `.feed-section` to full viewport width for unrestricted browsing, filtering, and infinite scrolling.
+- **Quick controls**:
+  - Minimize button in inline player action bar (`.btn-toggle-miniplayer`, labeled `Miniplayer (i)`).
+  - Hover overlay on video with Expand to Watch View, Close, and Play/Pause toggle.
+  - Compact bottom strip displaying video title, channel, expand, play/pause, and close.
+  - Clicking miniplayer outside buttons expands it back to the full side-by-side watch mode.
+- **Keyboard shortcuts**: `i` toggles between watch mode and miniplayer mode (ignoring input/textarea targets); `Escape` restores watch mode.
+- **Auto-minimize**: Navigating sidebar views (Smart Feed, Subscriptions, Liked Videos) or submitting a search while watching a video automatically minimizes the player into the corner so the new feed has full width.
+- **Test suite**: Added `test/miniplayer.test.mjs` covering state transitions, DOM preservation, keyboard gating, auto-minimization, and cleanup. All 15 unit test suites pass.
+
+---
+
 # Handoff — the calibrated feed: dated rows, a composed slate, topic roles (2026-09-06)
 
 Four commits on this repo (`6f8215c` era buckets + ledger, `cfaf6d2` slate,
