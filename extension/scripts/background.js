@@ -57,7 +57,7 @@ async function updateBadge() {
 async function queuePendingEvent(event) {
     const data = await chrome.storage.local.get([PENDING_KEY]);
     const pending = (data[PENDING_KEY] || []).filter(
-        e => !(e.videoId === event.videoId && e.action === event.action)
+        e => !(e.videoId && e.videoId === event.videoId && e.action === event.action)
     );
     pending.push(event);
     await chrome.storage.local.set({ [PENDING_KEY]: pending.slice(-MAX_PENDING) });
@@ -81,26 +81,52 @@ function slimVideo(ev) {
  * Returns null for actions with no server-side field (e.g. SUBSCRIBE).
  */
 function buildSyncFields(ev) {
-    if (!ev || !ev.videoId) return null;
+    if (!ev) return null;
     const t = ev.syncedAt || Date.now();
     const v = slimVideo(ev);
     const id = ev.videoId;
 
     switch (ev.action) {
         case "LIKE":
+            if (!id) return null;
             return { ratings: { [id]: { r: 5, t, v } } };
         case "DISLIKE":
+            if (!id) return null;
             return { ratings: { [id]: { r: -5, t, v } } };
+        case "NOT_INTERESTED":
+            if (!id) return null;
+            return {
+                ratings: { [id]: { r: -5, t, v } },
+                avoided: { [id]: { t, channelName: ev.channelName || "", reason: "not_interested" } }
+            };
+        case "FYP_AVOID_BATCH": {
+            const avoided = {};
+            (ev.items || []).forEach(item => {
+                if (item && item.videoId) {
+                    avoided[item.videoId] = {
+                        t: item.t || t,
+                        channelName: item.channelName || "",
+                        title: item.title || "",
+                        reason: "fyp_unclicked"
+                    };
+                }
+            });
+            return Object.keys(avoided).length ? { avoided } : null;
+        }
         case "UNLIKE":
         case "UNDISLIKE":
+            if (!id) return null;
             return { ratings: { [id]: { r: 0, t, v } } };
         case "WATCHED":
+            if (!id) return null;
             return { watched: { [id]: t } };
         case "WATCHLIST_ADD":
         case "PLAYLIST_SAVE":
         case "WALLGARDEN_SAVE":
+            if (!id) return null;
             return { queue: { [id]: { p: 1, t, v } } };
         case "WATCHLIST_REMOVE":
+            if (!id) return null;
             return { queue: { [id]: { p: 0, t, v } } };
         default:
             return null;
@@ -119,7 +145,7 @@ async function postEventToServer(ev) {
         body: JSON.stringify({ fields })
     });
     if (!res.ok) throw new Error(`sync API responded ${res.status}`);
-    console.log(`[Background] ${ev.action} ${ev.videoId} → synced to server`);
+    console.log(`[Background] ${ev.action} ${ev.videoId || (ev.items && ev.items.length) || ''} → synced to server`);
 }
 
 /** Best-effort: nudge any open dashboard tab so its UI updates immediately. */

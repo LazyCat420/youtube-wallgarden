@@ -62,6 +62,12 @@ let state = {
     channels: [],
     topics: [],
     blockedChannels: [], // Array of { name: string, id: string }
+    avoidedVideos: {}, // Map of videoId -> { t: timestamp, channelName: string, reason: string }
+    musicFeedVideos: [],
+    musicFeedLoading: false,
+    musicFeedSeeds: [],
+    musicFeedSeedIndex: 0,
+    musicFeedInitialized: false,
     cache: {
         videos: {}, // channelId -> array of videos
         lastSync: 0
@@ -1149,6 +1155,8 @@ function loadState() {
     state.queueStates = rawQueueStates ? JSON.parse(rawQueueStates) : {};
     const rawPlaylistStates = getStoredItem("playlist_states");
     state.playlistStates = rawPlaylistStates ? JSON.parse(rawPlaylistStates) : {};
+    const rawAvoided = getStoredItem("avoided_videos");
+    state.avoidedVideos = rawAvoided ? JSON.parse(rawAvoided) : {};
     state.discoveredChannels = rawDiscovered ? JSON.parse(rawDiscovered) : [];
     state.smartFeedSuggestionPool = rawPool ? JSON.parse(rawPool) : [];
     // Canonicalise legacy bare-string burns into {q,t,strikes} records. The
@@ -1661,6 +1669,7 @@ function saveTopicPolicies()  { persistField("topic_policies", state.topicPolici
 function saveCandidateClassificationCache() { persistField("candidate_classifications", state.candidateClassificationCache); }
 function saveCache()          { persistField("cache", state.cache); }
 function saveVideoRatings()   { persistField("video_ratings", state.videoRatings); schedulePushRemoteState(); }
+function saveAvoidedVideos()  { persistField("avoided_videos", state.avoidedVideos); schedulePushRemoteState(); }
 function saveNewsRatings()    { persistField("news_ratings", state.newsSourceRatings); }
 function saveLikedVideos()    {
     persistField("liked_videos", state.likedVideos);
@@ -2002,7 +2011,8 @@ function _wgSyncSnapshot() {
         playlists: state.playlistStates || {},
         watched: state.watchedHistory || {},
         mined: state.minedVideos || {},
-        topicSignals: state.topicSignals || {}
+        topicSignals: state.topicSignals || {},
+        avoided: state.avoidedVideos || {}
     };
     // Only ship a profile that exists — an empty object would fight the
     // server's LWW merge for no reason.
@@ -2135,6 +2145,12 @@ function _wgApplyRemoteFields(fields) {
             if (_wgMergeIncomingPlaylists(fields.playlists)) {
                 persistField("playlist_states", state.playlistStates);
                 _wgRebuildPlaylists();
+            }
+        }
+        if (fields.avoided) {
+            if (!state.avoidedVideos) state.avoidedVideos = {};
+            if (_wgMergeLwwInto(state.avoidedVideos, fields.avoided)) {
+                saveAvoidedVideos();
             }
         }
         if (fields.watched) {
@@ -2322,6 +2338,8 @@ function setupNavListeners() {
                 state.smartFeedVideos = [];
                 // Do not clear persistent suggestions pool so we can render instantly
                 initSmartFeed(); // Repopulates and randomizes topics queue
+            } else if (state.currentView === "music-feed") {
+                initMusicFeed();
             } else if (state.currentView === "discover-channels") {
                 initDiscoverChannels();
             }
@@ -4461,6 +4479,14 @@ function wireCardActionMenu(card, video, isSubscribed) {
                 <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
                 Play Next
             </button>
+            <button data-action="add-to-queue">
+                <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                Add to Queue
+            </button>
+            <button data-action="add-to-playlist">
+                <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                Add to Playlist
+            </button>
             <button data-action="play-inline">
                 <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
                 Play Inline
@@ -4502,6 +4528,18 @@ function wireCardActionMenu(card, video, isSubscribed) {
             ev.stopPropagation();
             addToQueue(video, true);
             dropdown.remove();
+        });
+
+        dropdown.querySelector('[data-action="add-to-queue"]').addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            addToQueue(video, false);
+            dropdown.remove();
+        });
+
+        dropdown.querySelector('[data-action="add-to-playlist"]').addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            dropdown.remove();
+            showPlaylistModal(video);
         });
 
         dropdown.querySelector('[data-action="play-inline"]').addEventListener("click", (ev) => {
@@ -4760,6 +4798,17 @@ function renderFeed() {
         if (grid) grid.classList.add("hidden");
         if (likedVideosContainer) likedVideosContainer.classList.remove("hidden");
         renderLikedVideosView();
+        return;
+    }
+
+    if (state.currentView === "music-feed") {
+        if (shortsGrid) shortsGrid.innerHTML = "";
+        if (shortsShelf) shortsShelf.classList.add("hidden");
+        if (redditGrid) redditGrid.innerHTML = "";
+        if (redditShelf) redditShelf.classList.add("hidden");
+        if (emptyState) emptyState.classList.add("hidden");
+
+        renderMusicFeed();
         return;
     }
     
@@ -6127,20 +6176,7 @@ function addToQueue(video, playNext = false) {
     }
     
     saveQueue();
-    
-    const isWatchMode = document.body.classList.contains("watch-mode");
-    if (!isWatchMode) {
-        // Start playing immediately if not in watch mode
-        if (playNext) {
-            state.queue.shift();
-        } else {
-            state.queue.pop();
-        }
-        saveQueue();
-        playVideo(video);
-    } else {
-        renderQueueUI();
-    }
+    renderQueueUI();
 }
 
 function renderQueueUI() {
@@ -7159,10 +7195,21 @@ function formatDuration(secs) {
  *
  * Returns the reason string (for debug counts) or null to keep.
  */
+function isAvoidedVideo(video) {
+    if (!video || !video.id) return null;
+    if (state.avoidedVideos && state.avoidedVideos[video.id]) {
+        return "fyp-avoided";
+    }
+    return null;
+}
+
 function isSpamShapedVideo(v, likedChannels) {
+    const avoidedReason = isAvoidedVideo(v);
+    if (avoidedReason) return avoidedReason;
+
     // Shorts: muteShorts finally applies to the smart feed — it was enforced
     // at four render sites and none of them was the main discovery surface.
-    if (state.settings.muteShorts && isShortVideo(v)) return "short";
+    if (state.settings && state.settings.muteShorts && isShortVideo(v)) return "short";
 
     const title = v.title || "";
     const letters = title.replace(/[^a-zA-Z]/g, "");
@@ -7193,8 +7240,186 @@ function isShortVideo(video) {
     return false;
 }
 
+// ── Music Section: Anti-DJ Mix Gate & Music Taste Seeding ───────────────
+const WG_DJ_MIX_RE = /\b(full(\s+[a-z0-9-]+)?\s+mix|dj\s+(mix|set)|live\s+set|club\s+mix|megamix|continuous(\s+[a-z0-9-]+)?\s+mix|compilation|mixtape|radio\s+show|essential\s+mix|boiler\s+room|session\s+mix|hour\s+mix|best\s+of|all\s+songs|full\s+album|discography|jukebox|soundtrack|ost|mashup\s+mix|party\s+mix|workout\s+mix|chillout\s+mix|sleep\s+mix|(lofi|lo-fi|chill|study|relaxing|beats|ambient|hip\s*hop|summer|workout)\s+mix|beat\s+tape)\b/i;
+const WG_MIX_TIME_RE = /\b(\d+\s*hours?|\d+\s*hrs?|vol\.\s*\d+|part\s*\d+)\b/i;
+const MAX_MUSIC_SONG_DURATION = 14 * 60; // 14 minutes = 840s (max length for a standalone artist song)
+
+function isDjMixOrCompilation(video) {
+    if (!video) return null;
+    const dur = typeof video.duration === "number" ? video.duration : 0;
+    if (dur > MAX_MUSIC_SONG_DURATION) {
+        return "mix-duration";
+    }
+
+    const title = video.title || "";
+    if (WG_DJ_MIX_RE.test(title) || WG_MIX_TIME_RE.test(title)) {
+        return "dj-mix-title";
+    }
+
+    const channel = (video.channelName || "").toLowerCase();
+    if (channel.includes("boiler room") || channel.includes("cercle") || channel.includes("defected radio")) {
+        return "dj-mix-channel";
+    }
+
+    return null;
+}
+
+const WG_MUSIC_GENRE_RE = /\b(synthwave|ambient|techno|house|electronic|hip hop|rap|jazz|funk|soul|indie|rock|metal|reggae|pop|r&b|disco|shoegaze|idm|lofi|folk|classical|punk|trap|edm|dreampop|synthpop|post-punk|downtempo|trance|drum & bass|dnb|garage|dubstep)\b/i;
+
+function getMusicSeeds() {
+    const artists = new Set();
+    const genres = new Set();
+
+    // Extract artists from liked videos
+    (state.likedVideos || []).forEach(v => {
+        if (!v) return;
+        const ch = (v.channelName || "").trim();
+        if (ch.endsWith(" - Topic")) {
+            artists.add(ch.replace(/\s*-\s*Topic$/i, "").toLowerCase());
+        } else if (v.title && (v.title.includes(" - ") || /\((official|audio|video|lyric)\)/i.test(v.title))) {
+            if (ch && !ch.toLowerCase().includes("records") && !ch.toLowerCase().includes("music")) {
+                artists.add(ch.toLowerCase());
+            }
+            const parts = v.title.split(/\s+-\s+/);
+            if (parts.length >= 2 && parts[0].trim().length > 1 && parts[0].trim().length < 40) {
+                artists.add(parts[0].trim().toLowerCase());
+            }
+        }
+    });
+
+    // Extract music genres from active user topics
+    (state.topics || []).forEach(t => {
+        if (!t || !t.phrase || t.weight <= 0) return;
+        const phrase = t.phrase.toLowerCase();
+        if (WG_MUSIC_GENRE_RE.test(phrase)) {
+            genres.add(phrase);
+        }
+    });
+
+    return {
+        artists: Array.from(artists),
+        genres: Array.from(genres)
+    };
+}
+
+function getMusicQueryList() {
+    const { artists, genres } = getMusicSeeds();
+    const list = [];
+    artists.forEach(a => {
+        list.push(`${a} official audio`);
+        list.push(`${a} song`);
+    });
+    genres.forEach(g => {
+        list.push(`${g} music`);
+        list.push(`${g} tracks`);
+    });
+    if (list.length === 0) {
+        list.push("synthwave song", "chillwave music", "ambient music", "indie song", "electronic music", "idm track");
+    }
+    return list;
+}
+
+function initMusicFeed() {
+    state.musicFeedVideos = [];
+    state.musicFeedLoading = false;
+    state.musicFeedSeedIndex = 0;
+    state.musicFeedInitialized = true;
+    state.musicFeedSeeds = getMusicQueryList();
+    state.musicFeedSeeds.sort(() => Math.random() - 0.5);
+
+    const grid = document.getElementById("video-grid");
+    if (grid) {
+        grid.innerHTML = "";
+        const fragment = document.createDocumentFragment();
+        for (let i = 0; i < 8; i++) {
+            const skel = document.createElement("div");
+            skel.className = "skeleton-card";
+            fragment.appendChild(skel);
+        }
+        grid.appendChild(fragment);
+    }
+    loadNextMusicFeedBatch();
+}
+
+function renderMusicFeed() {
+    const grid = document.getElementById("video-grid");
+    if (!grid) return;
+    if (!state.musicFeedInitialized || state.musicFeedVideos.length === 0) {
+        initMusicFeed();
+    } else {
+        grid.innerHTML = "";
+        const fragment = document.createDocumentFragment();
+        state.musicFeedVideos.forEach(v => renderCard(v, fragment));
+        grid.appendChild(fragment);
+    }
+}
+
+async function loadNextMusicFeedBatch() {
+    if (state.musicFeedLoading) return;
+    state.musicFeedLoading = true;
+
+    const grid = document.getElementById("video-grid");
+    if (!grid) {
+        state.musicFeedLoading = false;
+        return;
+    }
+
+    if (!state.musicFeedSeeds || state.musicFeedSeeds.length === 0) {
+        state.musicFeedSeeds = getMusicQueryList();
+    }
+
+    const queriesToFetch = [];
+    for (let i = 0; i < 2; i++) {
+        const q = state.musicFeedSeeds[state.musicFeedSeedIndex % state.musicFeedSeeds.length];
+        state.musicFeedSeedIndex++;
+        queriesToFetch.push(q);
+    }
+
+    try {
+        const results = await Promise.all(
+            queriesToFetch.map(q => fetchVideosForTopic(q).catch(() => []))
+        );
+        const candidates = results.flat();
+        const existingIds = new Set(state.musicFeedVideos.map(v => v.id));
+
+        const allowed = candidates.filter(v => {
+            if (!v || !v.id || existingIds.has(v.id)) return false;
+            if (isChannelBlocked(v.channelId, v.channelName)) return false;
+            if (isAvoidedVideo(v)) return false;
+            if (isDjMixOrCompilation(v)) return false; // Strictly reject DJ sets, full mixes, compilations, >14min
+            if (state.videoRatings && state.videoRatings[v.id] === -5) return false;
+            return true;
+        });
+
+        grid.querySelectorAll(".skeleton-card").forEach(s => s.remove());
+
+        if (allowed.length > 0) {
+            const deduped = [];
+            const seen = new Set();
+            for (const v of allowed) {
+                if (!seen.has(v.id)) {
+                    seen.add(v.id);
+                    deduped.push(v);
+                }
+            }
+            state.musicFeedVideos.push(...deduped);
+            const fragment = document.createDocumentFragment();
+            deduped.forEach(v => renderCard(v, fragment));
+            grid.appendChild(fragment);
+        } else if (state.musicFeedVideos.length === 0) {
+            grid.innerHTML = `<div class="empty-state"><h3>No songs found</h3><p>Try liking some artist tracks or adding music topics!</p></div>`;
+        }
+    } catch (err) {
+        console.error("[Music Feed] Error fetching batch:", err);
+    } finally {
+        state.musicFeedLoading = false;
+    }
+}
+
 // Toast notification system
 function showToast(message, type) {
+    if (typeof document === "undefined" || typeof document.createElement !== "function") return;
     type = type || "info";
     let container = document.querySelector(".toast-container");
     if (!container) {
@@ -7271,6 +7496,11 @@ function handleTriggerIntersection() {
     // Handle Smart Feed scroll discovery
     if (state.currentView === "smart-feed") {
         loadNextSmartFeedBatch();
+        return;
+    }
+
+    if (state.currentView === "music-feed") {
+        loadNextMusicFeedBatch();
         return;
     }
 
@@ -10578,12 +10808,92 @@ function findVideoById(videoId) {
     return null;
 }
 
-window.addEventListener("message", (event) => {
-    // Make sure we only accept messages from our own domain/content script
-    if (event.source !== window || !event.data || event.data.type !== 'WG_EXT_SYNC') return;
+function handleExtensionSyncEvent(payload) {
+    if (!payload || !payload.action) return;
 
-    const payload = event.data.data;
-    if (!payload || !payload.action || !payload.videoId) return;
+    if (payload.action === 'FYP_AVOID_BATCH') {
+        if (!state.avoidedVideos) state.avoidedVideos = {};
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        let added = false;
+        items.forEach(item => {
+            if (item && item.videoId) {
+                state.avoidedVideos[item.videoId] = {
+                    t: item.t || Date.now(),
+                    title: item.title || "",
+                    channelName: item.channelName || "",
+                    reason: "fyp_unclicked"
+                };
+                added = true;
+            }
+        });
+        if (added) {
+            saveAvoidedVideos();
+            if (state.smartFeedVideos) {
+                state.smartFeedVideos = state.smartFeedVideos.filter(v => !state.avoidedVideos[v.id]);
+            }
+            if (state.smartFeedSuggestionPool) {
+                state.smartFeedSuggestionPool = state.smartFeedSuggestionPool.filter(v => !state.avoidedVideos[v.id]);
+            }
+        }
+        return;
+    }
+
+    if (payload.action === 'NOT_INTERESTED') {
+        if (!payload.videoId) return;
+        if (!state.avoidedVideos) state.avoidedVideos = {};
+        state.avoidedVideos[payload.videoId] = {
+            t: payload.syncedAt || Date.now(),
+            channelName: payload.channelName || "",
+            reason: "not_interested"
+        };
+        saveAvoidedVideos();
+
+        if (!state.videoRatings) state.videoRatings = {};
+        state.videoRatings[payload.videoId] = -5;
+        if (state.likedVideos) {
+            state.likedVideos = state.likedVideos.filter(v => v.id !== payload.videoId);
+        }
+
+        if (state.ontologyGraph) {
+            graphProcessRating(state.ontologyGraph, { id: payload.videoId, channelName: payload.channelName }, -1);
+            saveOntologyGraph();
+        }
+
+        saveVideoRatings();
+        if (typeof saveLikedVideos === "function") saveLikedVideos();
+
+        if (state.smartFeedVideos) {
+            state.smartFeedVideos = state.smartFeedVideos.filter(v => v.id !== payload.videoId);
+        }
+        if (state.smartFeedSuggestionPool) {
+            state.smartFeedSuggestionPool = state.smartFeedSuggestionPool.filter(v => !state.avoidedVideos[v.id]);
+        }
+
+        if (typeof renderFeed === "function" && state.currentView === "smart-feed") {
+            renderFeed();
+        }
+        if (typeof showToast === "function") {
+            showToast("Video marked Not Interested (synced)", "info");
+        }
+        return;
+    }
+
+    if (payload.action === 'BLOCK_CHANNEL') {
+        if (payload.channelName) {
+            const lc = payload.channelName.toLowerCase();
+            if (!state.blockedChannels.some(bc => (bc.name || "").toLowerCase() === lc)) {
+                state.blockedChannels.push({ name: payload.channelName, id: payload.channelId || "" });
+                saveBlocked();
+                if (typeof renderFeed === "function") renderFeed();
+                if (typeof showToast === "function") {
+                    showToast(`Blocked channel ${payload.channelName} (synced)`, "info");
+                }
+            }
+        }
+        return;
+    }
+
+    if (!payload.videoId) return;
 
     debug("[Wallgarden Sync] Received extension event:", payload);
 
@@ -10808,6 +11118,12 @@ window.addEventListener("message", (event) => {
             saveOntologyGraph();
         }
     }
+}
+
+window.addEventListener("message", (event) => {
+    // Make sure we only accept messages from our own domain/content script
+    if (event.source !== window || !event.data || event.data.type !== 'WG_EXT_SYNC') return;
+    handleExtensionSyncEvent(event.data.data);
 });
 
 // ── Ontology Graph Rendering ──
