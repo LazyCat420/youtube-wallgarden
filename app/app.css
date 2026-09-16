@@ -1067,10 +1067,12 @@ body {
     background: #000;
 }
 
-.inline-player .player-wrapper-box iframe {
+.inline-player .player-wrapper-box iframe,
+.inline-player .player-wrapper-box video {
     position: absolute;
     top: 0; left: 0; width: 100%; height: 100%;
     border: 0;
+    object-fit: contain;
 }
 
 .inline-player-bar {
@@ -2875,6 +2877,231 @@ body {
         overflow-y: visible;
     }
 }
+
+/* ── Floating Miniplayer (Picture-in-Picture) ── */
+body.miniplayer-mode #inline-player {
+    position: fixed !important;
+    bottom: 24px !important;
+    right: 24px !important;
+    left: auto !important;
+    top: auto !important;
+    width: 380px !important;
+    max-width: calc(100vw - 32px) !important;
+    z-index: 9999 !important;
+    border-radius: var(--radius-lg, 8px) !important;
+    overflow: hidden !important;
+    background: var(--bg-surface, #131714) !important;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.75), 0 0 0 1px var(--border-strong, rgba(255, 255, 255, 0.15)) !important;
+    display: block !important;
+    animation: miniplayerSlideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.12)) !important;
+    cursor: pointer;
+}
+
+@keyframes miniplayerSlideIn {
+    from {
+        opacity: 0;
+        transform: translateY(20px) scale(0.96);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+body.miniplayer-mode #inline-player .inline-player-inner {
+    display: block !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+body.miniplayer-mode #inline-player .inline-player-main {
+    display: flex !important;
+    flex-direction: column !important;
+    width: 100% !important;
+}
+
+body.miniplayer-mode #inline-player .inline-player-sidebar {
+    display: none !important;
+}
+
+body.miniplayer-mode #inline-player .inline-player-video {
+    position: relative !important;
+    width: 100% !important;
+    border-radius: 0 !important;
+    border: none !important;
+    background: #000 !important;
+}
+
+body.miniplayer-mode #inline-player .player-wrapper-box {
+    width: 100% !important;
+    padding-bottom: 56.25% !important;
+    height: 0 !important;
+    min-height: unset !important;
+}
+
+body.miniplayer-mode #inline-player .player-wrapper-box iframe,
+body.miniplayer-mode #inline-player .player-wrapper-box video,
+body.miniplayer-mode #inline-player #yt-player-element {
+    width: 100% !important;
+    height: 100% !important;
+    min-height: unset !important;
+    border: none !important;
+    display: block !important;
+}
+
+/* Hover overlay on the miniplayer video */
+.miniplayer-controls-overlay {
+    display: none;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 10;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 8px 10px;
+    pointer-events: none;
+}
+
+body.miniplayer-mode #inline-player .inline-player-video:hover .miniplayer-controls-overlay {
+    display: flex;
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.miniplayer-top-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.btn-miniplayer-expand,
+.btn-miniplayer-close {
+    background: rgba(20, 20, 20, 0.8);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: var(--text-primary, #fff);
+    border-radius: 50%;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.15s, color 0.15s;
+}
+
+.btn-miniplayer-expand:hover {
+    background: var(--accent, #4ade80);
+    color: var(--accent-contrast, #000);
+    transform: scale(1.08);
+}
+
+.btn-miniplayer-close:hover {
+    background: var(--danger-bright, #ef4444);
+    color: #fff;
+    transform: scale(1.08);
+}
+
+.btn-miniplayer-playpause {
+    align-self: center;
+    background: rgba(20, 20, 20, 0.8);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: var(--text-primary, #fff);
+    border-radius: 50%;
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    margin-bottom: 24px;
+    transition: background 0.15s, transform 0.15s;
+}
+
+.btn-miniplayer-playpause:hover {
+    background: rgba(255, 255, 255, 0.25);
+    transform: scale(1.1);
+}
+
+/* Miniplayer bottom bar */
+body.miniplayer-mode #inline-player .inline-player-bar {
+    padding: 6px 10px;
+    background: var(--bg-surface, #131714);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+    user-select: none;
+}
+
+body.miniplayer-mode #inline-player .inline-player-meta {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+}
+
+body.miniplayer-mode #inline-player .player-title {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin: 0;
+}
+
+body.miniplayer-mode #inline-player .player-channel {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin: 2px 0 0 0;
+}
+
+body.miniplayer-mode #inline-player .player-stats,
+body.miniplayer-mode #inline-player .btn-open-youtube,
+body.miniplayer-mode #inline-player .btn-miniplayer-text {
+    display: none !important;
+}
+
+body.miniplayer-mode #inline-player .btn-miniplayer-bar-playpause {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+}
+
+body.miniplayer-mode #inline-player .player-bar-actions {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+body.miniplayer-mode #inline-player .player-bar-actions button {
+    padding: 4px 6px;
+    font-size: 0.75rem;
+}
+
+@media (max-width: 768px) {
+    body.miniplayer-mode #inline-player {
+        bottom: 12px !important;
+        right: 12px !important;
+        left: 12px !important;
+        width: auto !important;
+        max-width: none !important;
+    }
+}
+
 
 /* ── Mobile Responsive Support (max-width: 768px) ── */
 @media (max-width: 768px) {

@@ -10,6 +10,11 @@ const ICONS = {
     sprout: '<path d="M7 20h10"/><path d="M10 20c5.5-2.5.8-6.4 3-10"/><path d="M9.5 9.4c1.1.8 1.8 2.2 2.3 3.7-2 .4-3.5.4-4.8-.3-1.2-.6-2.3-1.9-3-4.2 2.8-.5 4.4 0 5.5.8z"/><path d="M14.1 6a7 7 0 0 0-1.1 4c1.9-.1 3.3-.6 4.3-1.4 1-1 1.6-2.3 1.7-4.6-2.7.1-4 1-4.9 2z"/>',
     bulb: '<path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/>',
     sparkles: '<path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>',
+    miniplayer: '<rect width="20" height="16" x="2" y="4" rx="2"/><rect width="8" height="6" x="12" y="12" rx="1" fill="currentColor"/>',
+    expand: '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>',
+    minimize: '<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="10" y1="14" x2="3" y2="21"/>',
+    play: '<polygon points="5 3 19 12 5 21 5 3" fill="currentColor"/>',
+    pause: '<rect x="6" y="4" width="4" height="16" fill="currentColor"/><rect x="14" y="4" width="4" height="16" fill="currentColor"/>',
 };
 
 function icon(name, size = 14, extraClass = "") {
@@ -67,6 +72,8 @@ let state = {
     playlists: {}, // id -> { name, createdAt, videos: [] }
     queue: [], // list of queued video objects
     currentlyPlayingId: null, // ID of currently playing video to avoid restarts on state updates
+    currentlyPlayingVideo: null, // Full metadata object of currently playing video
+    isMiniplayer: false, // Whether the player is in floating bottom-right miniplayer mode
     brainstormTopics: [], // Brainstormed topics from LLM
     brainstormLoading: false,
     lastBrainstormTime: 0,
@@ -2279,6 +2286,7 @@ function setupEventListeners() {
     setupSearchListeners();
     setupProfilesUI();
     setupHeaderAndLikedListeners();
+    setupKeyboardShortcuts();
 }
 
 function setupNavListeners() {
@@ -2286,6 +2294,10 @@ function setupNavListeners() {
     document.querySelectorAll(".nav-item").forEach(item => {
         item.addEventListener("click", (e) => {
             closeMobileSidebar();
+            // If watching a video, minimize to floating miniplayer so the new view has full width
+            if (state.currentlyPlayingId && document.body.classList.contains("watch-mode")) {
+                setMiniplayerMode(true);
+            }
             document.querySelectorAll(".nav-item").forEach(btn => btn.classList.remove("active"));
             const btn = e.currentTarget;
             btn.classList.add("active");
@@ -5502,9 +5514,14 @@ function playVideo(video) {
     }
 
     // Show and animate in
+    state.isMiniplayer = false;
+    document.body.classList.remove("miniplayer-mode");
+    inlinePlayer.classList.remove("is-miniplayer");
     document.body.classList.add("watch-mode");
     inlinePlayer.classList.remove("hidden", "closing");
     inlinePlayer.style.display = "";
+    updateMiniplayerButtonState(false);
+    updateMiniplayerPlayButton(true);
 
     // Scroll the main content area so player is visible & apply custom width if saved
     const mainContent = document.querySelector(".main-content");
@@ -5541,6 +5558,13 @@ function ensureInlinePlayer() {
         '  <div class="inline-player-main">',
         '    <div class="inline-player-video">',
         '      <div class="player-wrapper-box"></div>',
+        '      <div class="miniplayer-controls-overlay">',
+        '        <div class="miniplayer-top-actions">',
+        '          <button type="button" class="btn-miniplayer-expand" title="Expand to Watch Page (i)">' + icon("expand", 14) + '</button>',
+        '          <button type="button" class="btn-miniplayer-close" title="Close Player">' + icon("x", 14) + '</button>',
+        '        </div>',
+        '        <button type="button" class="btn-miniplayer-playpause" title="Play/Pause">' + icon("pause", 20) + '</button>',
+        '      </div>',
         '    </div>',
         '    <div class="inline-player-bar">',
         '      <div class="inline-player-meta">',
@@ -5548,9 +5572,11 @@ function ensureInlinePlayer() {
         '        <p class="player-channel"></p>',
         '        <p class="player-stats" style="font-size: 0.85rem; color: var(--text-secondary); margin-top: 4px;"></p>',
         '      </div>',
-        '      <div class="player-bar-actions" style="display: flex; gap: 0.75rem; align-items: center;">',
-        '        <button class="btn btn-primary btn-sm btn-open-youtube" title="Open Video on YouTube (New Tab)">' + icon("tv") + ' Watch on YouTube</button>',
-        '        <button class="inline-player-close" title="Close Player">' + icon("x", 12) + ' Close</button>',
+        '      <div class="player-bar-actions" style="display: flex; gap: 0.5rem; align-items: center;">',
+        '        <button type="button" class="btn btn-outline btn-sm btn-miniplayer-bar-playpause" title="Play/Pause" style="display: none;">' + icon("pause", 14) + '</button>',
+        '        <button type="button" class="btn btn-outline btn-sm btn-toggle-miniplayer" title="Minimize to Miniplayer (i)">' + icon("miniplayer", 14) + ' <span class="btn-miniplayer-text">Miniplayer</span></button>',
+        '        <button type="button" class="btn btn-primary btn-sm btn-open-youtube" title="Open Video on YouTube (New Tab)">' + icon("tv") + ' Watch on YouTube</button>',
+        '        <button type="button" class="inline-player-close" title="Close Player">' + icon("x", 12) + ' Close</button>',
         '      </div>',
         '    </div>',
         '  </div>',
@@ -5616,8 +5642,46 @@ function ensureInlinePlayer() {
     resizer.addEventListener("pointerup", stopDragging);
     resizer.addEventListener("pointercancel", stopDragging);
 
-    // Bind close button using querySelector on the element itself
-    inlinePlayer.querySelector(".inline-player-close").addEventListener("click", closePlayer);
+    // Bind close buttons
+    inlinePlayer.querySelectorAll(".inline-player-close, .btn-miniplayer-close").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            closePlayer();
+        });
+    });
+
+    // Bind toggle miniplayer button
+    const btnToggleMini = inlinePlayer.querySelector(".btn-toggle-miniplayer");
+    if (btnToggleMini) {
+        btnToggleMini.addEventListener("click", (e) => {
+            e.stopPropagation();
+            toggleMiniplayerMode();
+        });
+    }
+
+    // Bind expand miniplayer button
+    const btnExpandMini = inlinePlayer.querySelector(".btn-miniplayer-expand");
+    if (btnExpandMini) {
+        btnExpandMini.addEventListener("click", (e) => {
+            e.stopPropagation();
+            setMiniplayerMode(false);
+        });
+    }
+
+    // Bind miniplayer play/pause buttons
+    inlinePlayer.querySelectorAll(".btn-miniplayer-playpause, .btn-miniplayer-bar-playpause").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            toggleVideoPlayback();
+        });
+    });
+
+    // Clicking anywhere on miniplayer (except controls/buttons) expands it back to watch mode
+    inlinePlayer.addEventListener("click", (e) => {
+        if (!state.isMiniplayer) return;
+        if (e.target.closest("button") || e.target.closest("a")) return;
+        setMiniplayerMode(false);
+    });
 
     // Bind open on YouTube button
     const btnOpenYoutube = inlinePlayer.querySelector(".btn-open-youtube");
@@ -5630,6 +5694,126 @@ function ensureInlinePlayer() {
         });
     }
     return inlinePlayer;
+}
+
+function setMiniplayerMode(enable) {
+    const inlinePlayer = document.getElementById("inline-player");
+    if (!inlinePlayer) return;
+    const mainContent = document.querySelector(".main-content");
+
+    if (enable) {
+        if (!state.currentlyPlayingId) return;
+        document.body.classList.remove("watch-mode");
+        document.body.classList.add("miniplayer-mode");
+        inlinePlayer.classList.add("is-miniplayer");
+        inlinePlayer.classList.remove("hidden");
+        inlinePlayer.style.display = "";
+        state.isMiniplayer = true;
+
+        if (mainContent) {
+            mainContent.style.gridTemplateColumns = ""; // Restore full-width feed
+        }
+        updateMiniplayerButtonState(true);
+    } else {
+        document.body.classList.remove("miniplayer-mode");
+        inlinePlayer.classList.remove("is-miniplayer");
+        state.isMiniplayer = false;
+
+        if (state.currentlyPlayingId) {
+            document.body.classList.add("watch-mode");
+            if (mainContent) {
+                const savedWidth = localStorage.getItem("watch-sidebar-width");
+                if (savedWidth) {
+                    mainContent.style.gridTemplateColumns = `1fr 6px ${savedWidth}px`;
+                } else {
+                    mainContent.style.gridTemplateColumns = "";
+                }
+            }
+        }
+        updateMiniplayerButtonState(false);
+    }
+}
+
+function toggleMiniplayerMode() {
+    if (!state.currentlyPlayingId) return;
+    setMiniplayerMode(!state.isMiniplayer);
+}
+
+function updateMiniplayerButtonState(isMiniplayer) {
+    const inlinePlayer = document.getElementById("inline-player");
+    if (!inlinePlayer) return;
+    const toggleBtn = inlinePlayer.querySelector(".btn-toggle-miniplayer");
+    if (toggleBtn) {
+        if (isMiniplayer) {
+            toggleBtn.innerHTML = icon("expand", 14) + ' <span class="btn-miniplayer-text">Expand</span>';
+            toggleBtn.setAttribute("title", "Expand to Watch Page (i)");
+        } else {
+            toggleBtn.innerHTML = icon("miniplayer", 14) + ' <span class="btn-miniplayer-text">Miniplayer</span>';
+            toggleBtn.setAttribute("title", "Minimize to Miniplayer (i)");
+        }
+    }
+}
+
+function updateMiniplayerPlayButton(isPlaying) {
+    const inlinePlayer = document.getElementById("inline-player");
+    if (!inlinePlayer) return;
+    const playPauseBtns = inlinePlayer.querySelectorAll(".btn-miniplayer-playpause, .btn-miniplayer-bar-playpause");
+    playPauseBtns.forEach(btn => {
+        btn.innerHTML = isPlaying ? icon("pause", 18) : icon("play", 18);
+        btn.setAttribute("title", isPlaying ? "Pause (k)" : "Play (k)");
+    });
+}
+
+function toggleVideoPlayback() {
+    const inlinePlayer = document.getElementById("inline-player");
+    if (!inlinePlayer) return;
+    const videoEl = inlinePlayer.querySelector("video");
+    if (videoEl) {
+        if (videoEl.paused) {
+            videoEl.play().catch(() => {});
+            updateMiniplayerPlayButton(true);
+        } else {
+            videoEl.pause();
+            updateMiniplayerPlayButton(false);
+        }
+        return;
+    }
+    if (window.ytPlayer && typeof window.ytPlayer.getPlayerState === "function") {
+        try {
+            const playerState = window.ytPlayer.getPlayerState();
+            if (playerState === 1) { // playing
+                window.ytPlayer.pauseVideo();
+                updateMiniplayerPlayButton(false);
+            } else {
+                window.ytPlayer.playVideo();
+                updateMiniplayerPlayButton(true);
+            }
+        } catch (err) {
+            console.warn("Could not toggle YT player playback:", err);
+        }
+    }
+}
+
+function setupKeyboardShortcuts() {
+    window.addEventListener("keydown", (e) => {
+        const target = e.target;
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable || target.tagName === "SELECT")) {
+            return;
+        }
+        if (e.altKey || e.ctrlKey || e.metaKey) return;
+
+        if (e.key === "i" || e.key === "I") {
+            if (state.currentlyPlayingId) {
+                e.preventDefault();
+                toggleMiniplayerMode();
+            }
+        } else if (e.key === "Escape") {
+            if (state.isMiniplayer) {
+                e.preventDefault();
+                setMiniplayerMode(false);
+            }
+        }
+    });
 }
 
 function buildPlayerSidebarHtml(video, currentRating, isSubscribed, topicBtnHtml) {
@@ -5734,6 +5918,9 @@ async function playViaStreamProxy(videoId, playerWrapper) {
         
         const videoEl = playerWrapper.querySelector("video");
         if (videoEl) {
+            videoEl.addEventListener("play", () => updateMiniplayerPlayButton(true));
+            videoEl.addEventListener("pause", () => updateMiniplayerPlayButton(false));
+
             // Handle video end -> play next from queue
             videoEl.addEventListener("ended", () => {
                 playNextFromQueue();
@@ -5799,6 +5986,10 @@ function playViaYouTubeEmbed(videoId, playerWrapper) {
                 onStateChange: (event) => {
                     if (event.data === YT.PlayerState.ENDED) {
                         playNextFromQueue();
+                    } else if (event.data === YT.PlayerState.PLAYING) {
+                        updateMiniplayerPlayButton(true);
+                    } else if (event.data === YT.PlayerState.PAUSED) {
+                        updateMiniplayerPlayButton(false);
                     }
                 },
                 onError: (event) => {
@@ -5828,6 +6019,9 @@ function closePlayer() {
     const inlinePlayer = document.getElementById("inline-player");
     if (!inlinePlayer) return;
     document.body.classList.remove("watch-mode");
+    document.body.classList.remove("miniplayer-mode");
+    inlinePlayer.classList.remove("is-miniplayer");
+    state.isMiniplayer = false;
     
     // Reset gridTemplateColumns on close
     const mainContent = document.querySelector(".main-content");
@@ -5837,6 +6031,7 @@ function closePlayer() {
 
     inlinePlayer.classList.add("closing");
     state.currentlyPlayingId = null;
+    state.currentlyPlayingVideo = null;
     setTimeout(() => {
         inlinePlayer.classList.add("hidden");
         inlinePlayer.classList.remove("closing");
@@ -6043,6 +6238,11 @@ function renderQueueUI() {
 function triggerGlobalSearch(query) {
     if (!query) return;
     
+    // If watching a video, minimize to floating miniplayer so search results have full width
+    if (state.currentlyPlayingId && document.body.classList.contains("watch-mode")) {
+        setMiniplayerMode(true);
+    }
+
     // Append to search history, keeping max 10
     state.searchHistory = [query, ...state.searchHistory.filter(q => q.toLowerCase() !== query.toLowerCase())].slice(0, 10);
     saveSearchHistory();
