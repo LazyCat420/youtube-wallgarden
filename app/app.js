@@ -9968,52 +9968,33 @@ async function generateDiscoverChannels(force = false) {
     
     const promises = [];
     
-    // 1. vLLM Suggestion (via prism /chat with corrected port)
+    // 1. vLLM Suggestion through the Wallgarden backend. The browser never
+    // talks to Prism directly: the backend owns Jetson discovery, completion
+    // validation, and stale-model rejection.
     const vllmPromise = (async () => {
         if (state.channels.length === 0) return;
         try {
-            const subscribedNames = state.channels.slice(0, 15).map(c => c.name).join(", ");
-            const messages = [
-                { role: "system", content: `You are a YouTube channel recommendation engine. Recommend 5 high-quality channels that are similar in nature to the channels the user likes. Avoid recommending channels in the user's list. Return a JSON object with a 'channels' array: {"channels": [{"name": "Channel Name", "handle": "@handle", "reason": "1-sentence reason why the user will like it"}]}` },
-                { role: "user", content: `I like these channels: [${subscribedNames}]. Suggest 5 other high-quality YouTube channels.` }
-            ];
-            
-            // This is the ONE call that skips the wallgarden backend and hits
-            // prism directly, so the Jetson pin has to be repeated here.
-            // Sending the saved dropdown value would resurrect the old bug on
-            // any tab whose localStorage still holds a Gold Spark selection.
             const { provider, model } = getPinnedModel();
-
-            // ?stream=false is REQUIRED: prism's /chat streams SSE by
-            // default, and the resp.json() below cannot parse "data: {…}"
-            // frames. Without it this call threw on every run and the catch
-            // swallowed it, so the AI channel suggestion silently never
-            // appeared. Verified against the live gateway: the streaming body
-            // fails JSON.parse at char 0; ?stream=false returns {text:"OK"}.
-            const resp = await fetch("/prism/chat?stream=false", {
+            const resp = await fetch("/api/wallgarden/recommend-channels", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    model: model,
-                    provider: provider,
-                    messages: messages,
-                    temperature: 0.2,
-                    // camelCase — prism /chat silently DROPS snake_case
-                    // max_tokens, so the old cap here was never applied.
-                    maxTokens: 1000,
-                    // Qwen3.6 reasons by default and puts everything in a
-                    // separate `reasoning` field, leaving content empty.
-                    thinkingEnabled: false,
-                    skipConversation: true
+                    channels: state.channels.slice(0, 15).map(c => c.name),
+                    likedVideos: getRecentLikedVideos(15).map(v =>
+                        v.channelName && v.channelName !== "YouTube Curation"
+                            ? `${v.title} (${v.channelName})` : v.title
+                    ).filter(Boolean),
+                    interests: state.topics.filter(t => t.weight > 0)
+                        .sort((a, b) => b.weight - a.weight).slice(0, 15).map(t => t.phrase),
+                    model,
+                    provider
                 })
             });
             
             if (resp.ok) {
                 const data = await resp.json();
-                const content = data.choices?.[0]?.message?.content || data.text;
-                const parsed = parseLlmJsonResponse(content);
-                if (parsed && Array.isArray(parsed.channels)) {
-                    parsed.channels.forEach(ch => {
+                if (Array.isArray(data.channels)) {
+                    data.channels.forEach(ch => {
                         if (ch.name) {
                             addRecommendation({
                                 name: ch.name,
@@ -10026,6 +10007,10 @@ async function generateDiscoverChannels(force = false) {
                         }
                     });
                 }
+            } else if (resp.status === 409) {
+                // An old tab kept a model that is no longer served. Refresh
+                // discovery and let the next explicit refresh retry safely.
+                await fetchWallgardenModels();
             }
         } catch (e) {
             console.error("vLLM channel recommendation failed:", e);
