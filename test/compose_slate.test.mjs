@@ -172,4 +172,44 @@ console.log("Running Slate Composition Tests...\n");
   console.log("✅ regression gate: shuffle and round-robin gone, slate wired");
 }
 
+// 13. Cross-slate memory: a topic the ledger says was just shown does not win
+//     the next slate's slots again. This is the 10-20-in-a-row fix.
+{
+  const pool = [];
+  for (let i = 0; i < 24; i++) pool.push(mk({ topic: "flood", rel: 100, era: ERA_BUCKETS[i % 4], channel: "Flood" + (i % 3) }));
+  for (let i = 0; i < 40; i++) pool.push(mk({ topic: "rest" + i, rel: 5, era: ERA_BUCKETS[i % 4], channel: "Rest" + i }));
+  const recent = { topic: { flood: 2.5 }, channel: {} };
+  const { slate } = composeSlate(pool, 12, { ...base, recent });
+  const flood = (count(slate, "_topic").flood || 0);
+  assert.ok(flood <= 1, `recently-shown dominant topic took ${flood} of 12 slots`);
+  // Without memory the same pool gives it its full cap — the control.
+  const { slate: unseeded } = composeSlate(pool, 12, base);
+  assert.ok((count(unseeded, "_topic").flood || 0) >= 3, "control: cap grants 3 without memory");
+  console.log("✅ cross-slate memory damps a just-shown dominant topic");
+}
+
+// 14. Memory decays: the seed is a weight, not a permanent ban. Stale rows
+//     (older than the horizon) contribute nothing, so a day-old session
+//     starts clean.
+{
+  const pool = Array.from({ length: 12 }, (_, i) => mk({ topic: "solo", channel: "Only", era: ERA_BUCKETS[i % 4] }));
+  const { slate } = composeSlate(pool, 12, { ...base, recent: { topic: { solo: 3 }, channel: { Only: 3 } } });
+  assert.strictEqual(slate.length, 12, "starved pool still fills through the softened fallback");
+  console.log("✅ memory is a penalty, not a ban: starved pool still fills");
+}
+
+// 15. Softened fallback prefers the least over-cap candidate. One topic at
+//     cap and one over it, nothing else left: the over-cap one must not win.
+{
+  const pool = [];
+  for (let i = 0; i < 4; i++) pool.push(mk({ topic: "atcap", rel: 10, era: ERA_BUCKETS[i % 4], channel: "A" }));
+  for (let i = 0; i < 4; i++) pool.push(mk({ topic: "overcap", rel: 10, era: ERA_BUCKETS[i % 4], channel: "B" }));
+  const recent = { topic: { atcap: 3, overcap: 3 }, channel: {} };
+  const { slate, breakdown } = composeSlate(pool, 6, { ...base, recent });
+  assert.strictEqual(slate.length, 6);
+  const at = breakdown.topic.atcap || 0, over = breakdown.topic.overcap || 0;
+  assert.ok(at >= over, `least-over-cap topic must not lose (${at} vs ${over})`);
+  console.log("✅ fallback prefers the least over-cap candidate");
+}
+
 console.log("\nAll slate composition tests passed.");

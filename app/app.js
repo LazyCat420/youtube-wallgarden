@@ -8626,6 +8626,7 @@ const SLATE_DEFAULTS = {
     caps: { channel: 2, topic: 3 },   // per 12 shown; scaled with the slate size
     perSlate: 12,
     repeatPenalty: 0.08,
+    overCapPenalty: 5,         // fallback scan prefers the LEAST over-cap candidate
     exploreSlots: 1
 };
 
@@ -8662,7 +8663,21 @@ function composeSlate(pool, n, ctx) {
 
     const chosen = [];
     const used = new Set();
+    // `cnt` is seeded with RECENT-SLATE memory (o.recent, weights 0..1 built
+    // by buildSlateCtx from the feed-mix ledger): until 2026-10 the repeat
+    // penalty and the caps knew only the current 12, so a dominant topic won
+    // its 3 slots in EVERY consecutive batch — runs of 10-20 identical topics.
+    // Fractional prior counts make both the caps and the penalty sticky across
+    // batches; when the pool is starved the softened fallback below bends the
+    // caps instead of snapping them off. `own` counts this slate only, for the
+    // breakdown the debug output reads.
     const cnt = { era: {}, topic: {}, channel: {} };
+    const own = { topic: {}, channel: {} };
+    const prior = (o.recent && typeof o.recent === "object") ? o.recent : {};
+    ["topic", "channel"].forEach(k => {
+        const src = prior[k] || {};
+        Object.keys(src).forEach(key => { if (src[key] > 0) cnt[k][key] = src[key]; });
+    });
     const calibWith = (era) => {
         const total = chosen.length + 1;
         const mixed = {};
@@ -8673,11 +8688,15 @@ function composeSlate(pool, n, ctx) {
         return -klDivergence(p, mixed);
     };
     const underCaps = (c) => (cnt.channel[c.channel] || 0) < capC && (cnt.topic[c.topic] || 0) < capT;
+    const overCapCount = (c) =>
+        ((cnt.channel[c.channel] || 0) >= capC ? 1 : 0) + ((cnt.topic[c.topic] || 0) >= capT ? 1 : 0);
     const take = (c) => {
         used.add(c.i); chosen.push(c);
         cnt.era[c.era] = (cnt.era[c.era] || 0) + 1;
         cnt.topic[c.topic] = (cnt.topic[c.topic] || 0) + 1;
         cnt.channel[c.channel] = (cnt.channel[c.channel] || 0) + 1;
+        own.topic[c.topic] = (own.topic[c.topic] || 0) + 1;
+        own.channel[c.channel] = (own.channel[c.channel] || 0) + 1;
     };
     const scan = (strict) => {
         let best = null, bestS = -Infinity;
@@ -8685,7 +8704,12 @@ function composeSlate(pool, n, ctx) {
             if (used.has(c.i)) continue;
             if (strict && !underCaps(c)) continue;
             const repeat = (cnt.topic[c.topic] || 0) + (cnt.channel[c.channel] || 0);
-            const sc = (1 - o.lambda) * c.relN + o.lambda * calibWith(c.era) - o.repeatPenalty * repeat;
+            // In the relaxed scan every survivor violates a cap; the over-cap
+            // penalty keeps the choice from being an arbitrary max — the
+            // candidate violating FEWER caps wins, so a flooded pool degrades
+            // to "mostly the dominant topic" instead of "only it".
+            const sc = (1 - o.lambda) * c.relN + o.lambda * calibWith(c.era)
+                - o.repeatPenalty * repeat - (strict ? 0 : o.overCapPenalty * overCapCount(c));
             if (sc > bestS) { bestS = sc; best = c; }
         }
         return best;
@@ -8713,11 +8737,30 @@ function composeSlate(pool, n, ctx) {
     ERA_BUCKETS.forEach(b => { qFinal[b] = (cnt.era[b] || 0) / chosen.length; });
     return {
         slate: chosen.map(c => c.v),
-        breakdown: { era: cnt.era, eraRaw, topic: cnt.topic, channel: cnt.channel, target: p, kl: klDivergence(p, qFinal) }
+        breakdown: { era: cnt.era, eraRaw, topic: own.topic, channel: own.channel, target: p, kl: klDivergence(p, qFinal) }
     };
 }
 
 // Everything composeSlate needs from live state, built once per slate.
+// RECENT_SLATE_HORIZON: how long a shown topic/channel keeps damping new
+// slates. 15 minutes covers a fast scroll session (~4+ slates) and expires on
+// a coffee break; weights decay linearly to zero over the horizon.
+const RECENT_SLATE_HORIZON_MS = 15 * 60e3;
+const RECENT_SLATE_MAX_ROWS = 60;
+function buildRecentSlateCounts(now) {
+    const rows = (state.feedMix && Array.isArray(state.feedMix.shown))
+        ? state.feedMix.shown.slice(-RECENT_SLATE_MAX_ROWS) : [];
+    const topics = {}, channels = {};
+    rows.forEach(r => {
+        const age = now - (r.t || 0);
+        if (age < 0 || age > RECENT_SLATE_HORIZON_MS) return;
+        const w = 1 - age / RECENT_SLATE_HORIZON_MS;
+        if (r.topic) topics[r.topic] = Math.min(2, (topics[r.topic] || 0) + w);
+        if (r.channel) channels[r.channel] = Math.min(2, (channels[r.channel] || 0) + w);
+    });
+    return { topic: topics, channel: channels };
+}
+
 function buildSlateCtx() {
     const now = Date.now();
     const likedChannels = new Set(getLikedChannelAffinity().keys());
@@ -8725,6 +8768,7 @@ function buildSlateCtx() {
         now,
         targetEra: deriveEraPrior(undefined, now),
         likedChannels,
+        recent: buildRecentSlateCounts(now),
         // Fresh rank from CURRENT preferences; written back so the render
         // gate and the debug breakdown read the same number.
         relevance: (v) => {
