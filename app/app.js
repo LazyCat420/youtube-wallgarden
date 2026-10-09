@@ -4022,7 +4022,7 @@ function scoreDiscoveryVideo(video, ctx) {
     if (video.published) {
         const ageDays = (Date.now() - video.published) / 86400e3;
         if (ageDays < 7) maturity = 0.3;
-        else if (ageDays < 90) maturity = 0.7;
+        else if (ageDays < 90) maturity = 0.85;
         else if (ageDays < 8 * 365) maturity = 1.0;
         else if (ageDays < 12 * 365) maturity = 0.85;
         // Past ~12 years, age stops being "proven" and starts being "stale
@@ -4102,19 +4102,13 @@ function getScoreAndMatches(video) {
         });
     }
     
-    // Vintage bonus: pre-AI-slop videos are more likely to be genuine quality
-    // content. Bounded to the 2008-2023 window and worth +1, not +3 — combined
-    // with the discovery scorer's maturity curve, the old +3 meant a 20-year-
-    // old video was rewarded twice over and outranked everything under 90
-    // days regardless of relevance.
-    const JAN_2023 = 1672531200000; // new Date("2023-01-01").getTime()
-    const JAN_2008 = 1199145600000; // new Date("2008-01-01").getTime()
-    if (video.published && video.published < JAN_2023 && video.published > JAN_2008) {
-        score += 1;
-        matches.push("vintage");
-    }
-    
+    // NOTE: no vintage bonus here. The discovery scorer's maturity axis
+    // already rewards 90d–8y videos at 1.0, and the eval bench measured the
+    // old +1 stacking on top of it starving the recent era to 8% of slots
+    // against a 35% target (era KL 0.58) — see plan/algorithm_audit.md §4.
+
     // Viral spam heuristic for post-2023 videos
+    const JAN_2023 = 1672531200000; // new Date("2023-01-01").getTime()
     if (video.published && video.published > JAN_2023 && video.viewCount) {
         const ageMs = getVideoAge(video.published);
         const ageMonths = ageMs / (30 * 24 * 60 * 60 * 1000);
@@ -8676,7 +8670,13 @@ function composeSlate(pool, n, ctx) {
     });
     let lo = Infinity, hi = -Infinity;
     cand.forEach(c => { lo = Math.min(lo, c.rel); hi = Math.max(hi, c.rel); });
-    cand.forEach(c => { c.relN = hi > lo ? (c.rel - lo) / (hi - lo) : 0.5; });
+    // Bounded normalization over a FIXED 10-rank-point span, not pool min-max.
+    // Min-max amplifies any small systematic rank bias (the maturity axis's
+    // recent-era dip, a classification bonus) into a full 1.0 relevance gap,
+    // which the λ·KL calibration term mathematically cannot overcome — the
+    // eval bench measured era KL 0.58 with recent starved to 8% of slots
+    // under min-max. Ordering is preserved; magnitudes stay honest.
+    cand.forEach(c => { c.relN = Math.max(0, Math.min(1, (c.rel - lo) / 10)); });
 
     const chosen = [];
     const used = new Set();

@@ -183,16 +183,19 @@ console.log("Running Video Filter Tests...\n");
   const midB = score(mk(fiveYears), ctxArg).breakdown;
   assert.ok(oldB.maturity < midB.maturity, "20-year-old maturity tapers below the 5-year peak");
   assert.strictEqual(oldB.maturity, 0.6);
-  // Vintage bonus: bounded window and +1.
+  // The vintage legacy bonus is GONE (eval bench measured it starving the
+  // recent era — plan/algorithm_audit.md §4). New contract: no era tag, and
+  // scores identical across the 2008–2023 window.
   const gs = get("getScoreAndMatches");
   const v2015 = { id: "x1", title: "wood ash glaze", published: new Date("2015-06-01").getTime() };
   const v2004 = { id: "x2", title: "wood ash glaze", published: new Date("2004-06-01").getTime() };
+  const v2024 = { id: "x3", title: "wood ash glaze", published: new Date("2024-06-01").getTime() };
   state.topics = [{ phrase: "wood ash glaze", weight: 5, addedAt: Date.now() }];
-  const s2015 = gs(v2015), s2004 = gs(v2004);
-  assert.ok([...s2015.matches].includes("vintage"), "2015 gets the vintage tag");
-  assert.ok(![...s2004.matches].includes("vintage"), "2004 predates the bounded window");
-  assert.strictEqual(s2015.score - s2004.score, 1, "vintage is worth +1, not +3");
-  console.log("✅ stale uploads: maturity tapers past 12y, vintage bounded to 2008-2023 at +1");
+  const s2015 = gs(v2015), s2004 = gs(v2004), s2024 = gs(v2024);
+  assert.ok(![...s2015.matches].includes("vintage"), "no vintage tag: the maturity axis owns era preference");
+  assert.strictEqual(s2015.score, s2004.score, "legacy score is era-blind inside/outside the old window");
+  assert.strictEqual(s2015.score, s2024.score, "legacy score is era-blind vs post-2023");
+  console.log("✅ stale uploads: maturity tapers past 12y, legacy score era-blind");
 }
 
 console.log("\nAll Video Filter tests passed!");
