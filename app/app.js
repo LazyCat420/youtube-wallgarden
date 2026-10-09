@@ -146,6 +146,15 @@ let state = {
 };
 
 const DISCOVER_BATCH_SIZE = 30;
+// Drop ledger for the search render path — why candidates disappeared between
+// "YouTube has 30 results" and "the grid shows 2". Read with wgSearchDrops().
+const _searchDrops = [];
+function wgSearchDrops() {
+    const byWhy = {};
+    _searchDrops.forEach(d => { byWhy[d.why] = (byWhy[d.why] || 0) + 1; });
+    console.log(`search drops (session): ${JSON.stringify(byWhy)}`);
+    return _searchDrops.slice(-100);
+}
 const DISCOVER_MAX_RESULTS = 150;
 
 // Verbose per-video logging in the stream read loop; costs real frame time when on
@@ -6836,8 +6845,12 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
         try {
             if (DEBUG) debug(`[Search Debug] Fetching /scraper/collect stream for "${topicPhrase}" via POST (limit: ${DISCOVER_BATCH_SIZE}, offset: ${offset})...`);
             updateStatusText(`Searching via yt-dlp for "${topicPhrase}"...`);
+            // 30s, not 15s: the scraper queues searches behind a 3-wide gate
+            // and gives each 25s. Aborting at 15s dropped the stream mid-flight
+            // on every queued search and fell back to the HTML scraper — the
+            // "search shows 1-2 videos" bug. Same fix fetchVideosForTopic got.
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 15000);
+            const timeoutId = setTimeout(() => controller.abort(), 30000);
             const resp = await fetch("/scraper/collect", {
                 method: "POST",
                 headers: {
@@ -6955,7 +6968,9 @@ async function fetchTopicSearchDiscovery(topicPhrase, offset) {
             if (DEBUG) debug(`[Search Debug] Executing HTML scraper fallback for: "${topicPhrase}"...`);
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 12000);
-            const resp = await fetch(url, { signal: controller.signal });
+            // sp=CAI%3D (upload-date sort) — was double-encoded as %253D, an
+            // invalid token YouTube would silently ignore or misread.
+            const resp = await fetch(url.replace("sp=CAI%253D", "sp=CAI%3D"), { signal: controller.signal });
             clearTimeout(timeoutId);
             if (!resp.ok) throw new Error("Search request failed.");
             const htmlText = await resp.text();
@@ -7121,6 +7136,8 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
     // Blocked channel/nuke checks
     const isBlockedChannel = isChannelBlocked(enrichedVideo.channelId, enrichedVideo.channelName);
     if (isBlockedChannel || enrichedVideo.score <= -10) {
+        // Counted, not silent: "1-2 results" reports need the drop ledger.
+        _searchDrops.push({ id: enrichedVideo.id, why: isBlockedChannel ? "blocked_channel" : "score_floor" });
         return; // Filtered out
     }
     
@@ -7128,7 +7145,7 @@ function appendStreamedDiscoverVideo(video, topicPhrase) {
     // produces, so the post-stream re-render is no longer needed
     const isShort = isShortVideo(enrichedVideo);
     if (isShort) {
-        if (state.settings.muteShorts) return;
+        if (state.settings.muteShorts) { _searchDrops.push({ id: enrichedVideo.id, why: "short_muted" }); return; }
         const shortsShelf = document.getElementById("shorts-shelf");
         const shortsGrid = document.getElementById("shorts-grid");
         if (shortsShelf) shortsShelf.classList.remove("hidden");
