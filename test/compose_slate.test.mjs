@@ -212,4 +212,24 @@ console.log("Running Slate Composition Tests...\n");
   console.log("✅ fallback prefers the least over-cap candidate");
 }
 
+// 16. Cold-start diversity gate: a single-topic pool never composes the first
+//     batch, and the wiring can't regress silently.
+{
+  const distinctTopicCount = get("distinctTopicCount");
+  assert.strictEqual(distinctTopicCount([]), 0);
+  assert.strictEqual(distinctTopicCount([
+    { _topic: "Kiln Building" }, { discoveryTopic: "kiln building" }, { _topic: "eurorack" },
+  ]), 2, "normalizeTopic must make casing irrelevant");
+  assert.strictEqual(distinctTopicCount([{ title: "orphan" }]), 1, "missing topic counts as one bucket");
+  const src = fs.readFileSync(new URL("../app/app.js", import.meta.url), "utf8");
+  const batch = src.slice(src.indexOf("async function loadNextSmartFeedBatch"));
+  const gate = batch.indexOf("distinctTopicCount");
+  const draw = batch.indexOf("takeSlate(");
+  assert.ok(gate > -1 && draw > -1 && gate < draw, "batch entry must gate on distinct topics before takeSlate");
+  const absorb = src.slice(src.indexOf("const absorb ="), src.indexOf("await Promise.all(fetchPromises"));
+  assert.ok(/distinctTopicCount\(state\.smartFeedSuggestionPool\) >= 2/.test(absorb), "first render waits for two topics");
+  assert.ok(/smartFeedVideos\.length === 0/.test(src.slice(src.indexOf("} finally {", src.indexOf("state.smartFeedPreloadLoading = false")))), "finally re-triggers the gated first render");
+  console.log("✅ cold-start diversity gate wired");
+}
+
 console.log("\nAll slate composition tests passed.");

@@ -8785,6 +8785,15 @@ function buildSlateCtx() {
 
 // Same mutate-and-return contract the old round-robin picker had: the chosen
 // videos leave the pool. Breakdown goes to the console under WG_DEBUG.
+// ── Cold-start diversity ──────────────────────────────────────────────
+// The preloader absorbs topics AS THEY LAND, so for one round trip the pool
+// holds a single topic — and a slate composed from it is the "first 10
+// videos are the same topic" bug. Both the first-render trigger and the
+// batch entry gate on this.
+function distinctTopicCount(pool) {
+    return new Set((pool || []).map(v => normalizeTopic(v._topic || v.discoveryTopic || ""))).size;
+}
+
 function takeSlate(pool, n, ctx) {
     const { slate, breakdown } = composeSlate(pool, n, ctx || buildSlateCtx());
     const ids = new Set(slate.map(v => v.id));
@@ -9412,8 +9421,14 @@ async function fillSmartFeedPreloadBuffer() {
                     totalAdded += limitedVideos.length;
                     if (limitedVideos.length) topicsWithVideos += 1;
 
+                    // First render of a session waits for TWO topics in the
+                    // pool: composing from one topic's videos is a wall of
+                    // that topic. Absorb re-checks on every landing, and the
+                    // post-Promise.all fallback below covers a topic whose
+                    // fetch failed — the feed renders, never stalls.
                     if (limitedVideos.length && state.currentView === "smart-feed" &&
-                        state.smartFeedVideos.length === 0 && !state.smartFeedLoading) {
+                        state.smartFeedVideos.length === 0 && !state.smartFeedLoading &&
+                        distinctTopicCount(state.smartFeedSuggestionPool) >= 2) {
                         loadNextSmartFeedBatch();
                     }
                 } else {
@@ -9421,7 +9436,15 @@ async function fillSmartFeedPreloadBuffer() {
                 }
             };
             await Promise.all(fetchPromises.map(p => p.then(absorb)));
-            
+
+            // If every landing failed to reach two topics (scraper misses,
+            // single-topic queue), render anyway — waiting forever is worse
+            // than one topic's slate. No-op if the first render already fired.
+            if (state.currentView === "smart-feed" && state.smartFeedVideos.length === 0 &&
+                state.smartFeedSuggestionPool.length > 0) {
+                loadNextSmartFeedBatch();
+            }
+
             if (totalAdded > 0) {
                 // No shuffle: the pool is a reservoir and composeSlate orders it.
                 saveSmartFeedSuggestionPool();
@@ -9433,7 +9456,15 @@ async function fillSmartFeedPreloadBuffer() {
         } finally {
             state.smartFeedPreloadLoading = false;
             currentPreloadPromise = null;
-            
+
+            // If the first render was gated on diversity that never arrived,
+            // this is its last trigger — the batch entry gate no longer bounces
+            // once loading is false.
+            if (state.currentView === "smart-feed" && state.smartFeedVideos.length === 0 &&
+                state.smartFeedSuggestionPool.length > 0) {
+                loadNextSmartFeedBatch();
+            }
+
             // Cooldown delay of 1.5 seconds between fetches to protect from rate-limiting
             if (state.smartFeedSuggestionPool.length < targetPreloadCount) {
                 smartFeedPreloadTimeout = setTimeout(() => {
@@ -9459,6 +9490,14 @@ async function loadNextSmartFeedBatch() {
     
     // Check if we have suggestions in our persistent pool
     if (state.smartFeedSuggestionPool.length > 0) {
+        // While the preloader is still landing topics, a single-topic pool
+        // would render a wall of that topic. Wait — absorb or the post-fetch
+        // fallback re-triggers this batch once diversity exists (or fails to).
+        if (state.smartFeedPreloadLoading &&
+            distinctTopicCount(state.smartFeedSuggestionPool) < 2) {
+            state.smartFeedLoading = false;
+            return;
+        }
         // A calibrated slate of 12: ranked, era-balanced, channel/topic-capped
         const videosToRender = takeSlate(state.smartFeedSuggestionPool, 12);
         
