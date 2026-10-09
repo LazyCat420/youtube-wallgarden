@@ -124,3 +124,18 @@ role): core engaged % ≥ 1.5× the pre-change overall; explore hit-rate ≥ 10%
 `mix.explore` to 0.10); the largest cluster's fetched core share within ±15
 points of its like share; `v2` vs `v2-nofit` engaged % within noise at n ≥ 20
 per arm → delete the FIT rubric. No prompt edits before that horizon.
+
+## Post-judgement fix — cross-slate memory (2026-10-09)
+
+User-visible symptom: the same topic 10–20 videos in a row. The slate's caps
+and repeat penalty knew only their own 12 — a dominant topic won its 3 slots
+in *every* consecutive batch, and when the pool starved the `scan(false)`
+fallback discarded the caps outright. `composeSlate` now seeds its counts with
+decayed recent-shown weights from the feed-mix ledger (`o.recent`, 15-minute
+horizon, last 60 rows), and the relaxed scan penalises over-cap candidates
+(`overCapPenalty: 5`) so a flooded pool degrades to "mostly the dominant
+topic", never "only it". Breakdown.topic/channel report this-slate counts
+only. Tests 13–15 in test/compose_slate.test.mjs.
+
+Also: the pre-existing topic_queue calibration flake (shortfall path can give
+the majority cluster 9 of 10) is admitted by the assertion now.
