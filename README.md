@@ -94,6 +94,16 @@ extension/
 2. **Heuristics** — Title analysis (ALL CAPS ratio, punctuation patterns) via MutationObserver
 3. **Smart Blocklist** — Learns from your "Not Interested" / "Don't Recommend" clicks, persists to `chrome.storage.local`
 
+### Vault access (dashboard container)
+
+The dashboard reads one secret, `GOOGLE_API_KEY`, through nginx at
+`/vault/secrets?keys=GOOGLE_API_KEY`. Any other query gets a 403, and no other
+vault route is proxied. The bearer token comes from `VAULT_SERVICE_TOKEN` in the
+container env (staged from `deploy-kit/.env.deploy`); supervisord writes it to
+`/etc/nginx/vault_auth.conf` at start. Never put a token in `nginx.conf`: this
+repo is public. Until 2026-10-12 the file carried the vault token and proxied
+every vault route; that token was rotated the same day.
+
 ---
 
 ## 🔧 How the Smart Blocklist Works

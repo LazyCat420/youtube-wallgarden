@@ -12,3 +12,5 @@ services:
       # A dedicated `wallgarden` DB keeps this isolated from all other data.
       - MONGO_URI=${MONGO_URI}
       - WALLGARDEN_MONGO_DB=${WALLGARDEN_MONGO_DB:-wallgarden}
+      # nginx's /vault/secrets proxy (GOOGLE_API_KEY only) authenticates with this.
+      - VAULT_SERVICE_TOKEN=${VAULT_SERVICE_TOKEN}
