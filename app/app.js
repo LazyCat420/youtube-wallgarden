@@ -111,7 +111,7 @@ let state = {
         muteShorts: false,
         altPlayerInstance: "https://yewtu.be",
         weatherCity: "",
-        llmEndpoint: "/prism/",
+        llmEndpoint: "/agent/",
         llmModel: ""
     },
     discoverBatchIndex: 0,
@@ -1134,8 +1134,9 @@ function loadState() {
     if (!state.settings.discoverySortOrder) {
         state.settings.discoverySortOrder = "relevance";
     }
-    if (!state.settings.llmEndpoint) {
-        state.settings.llmEndpoint = "/prism/";
+    if (!state.settings.llmEndpoint || state.settings.llmEndpoint === "/prism/") {
+        // prism-service was retired 2026-10-15; the gateway is lazy-agent-service.
+        state.settings.llmEndpoint = "/agent/";
     }
     if (!state.settings.llmModel) {
         state.settings.llmModel = "";
@@ -1476,7 +1477,7 @@ function getClientId() {
 
 // ── Instrumentation: the before/after number ────────────────────────
 // There was no historical record of how many LLM calls a browsing session cost
-// (the container's logs reset on deploy and prism's stats need auth), so this
+// (the container's logs reset on deploy and the gateway's stats need auth), so this
 // counter IS the measurement. Read it from the console with wgCallStats().
 function countedFetch(url, opts) {
     const key = String(url).split("?")[0];
@@ -7673,7 +7674,7 @@ const fetchPrismModels = fetchWallgardenModels;
 // Every wallgarden LLM call runs on the Jetson (10.0.0.30:8000). Gold Spark is
 // deliberately not used. The backend enforces this and ignores any client hint
 // to the contrary; this constant exists for the one path that bypasses the
-// backend (the direct /prism/chat channel recommendation below).
+// backend (the direct /agent/chat channel recommendation below).
 //
 // Kept in sync with EXPECTED_JETSON_MODEL in lazy-agent-service
 // src/services/wallgarden/WallgardenService.ts.

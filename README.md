@@ -8,6 +8,16 @@
 
 ---
 
+## 🔌 LLM gateway (2026-10-15)
+
+All LLM traffic goes to **lazy-agent-service** (`http://10.0.0.16:5591`).
+prism-service (`:7777`) was retired: nginx proxies `/agent/` → `:5591`
+(formerly `/prism/` → `:7777`), the client default `llmEndpoint` is
+`"/agent/"`, and stored `"/prism/"` values migrate on load. The
+`/api/wallgarden/*` backend routes already ran natively on the gateway.
+
+---
+
 ## ✨ Features
 
 ### 🧠 Smart Learning Blocklist
