@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Wallgarden — A private, distraction-free YouTube dashboard. Browse curated RSS feeds, discover channels via AI, and manage subscriptions without algorithmic noise.">
     <meta name="robots" content="noindex, nofollow">
+    <meta name="theme-color" content="#ef4444">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="apple-touch-icon" href="/icon-192.png">
     <title>🌿 Wallgarden — Dashboard</title>
 
     <!-- Non-blocking Google Fonts via preload pattern -->
@@ -918,5 +921,14 @@
     <script src="ontology.js?v=20260916-v70" defer></script>
     <script src="ontologyRenderer.js?v=20260916-v70" defer></script>
     <script src="app.min.js?v=20260916-v70" defer></script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/sw.js').catch((err) =>
+                    console.warn('[SW] registration failed:', err)
+                );
+            });
+        }
+    </script>
 </body>
 </html>
