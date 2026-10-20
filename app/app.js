@@ -8463,7 +8463,7 @@ function scheduleMining(delayMs) {
 // videos that were poisoned when the Jetson queue was overloaded by
 // /classify-candidates and /extract-topics timed out.
 function clearFailedLikeExtractionsOnce() {
-    if (getStoredItem("mining_retry_v1")) return 0;
+    if (localStorage.getItem(getProfileKey("mining_retry_v1"))) return 0;
     let cleared = 0;
     Object.entries(state.ratingStates || {}).forEach(([id, st]) => {
         if (!st || st.r !== 5 || !st.v) return;
