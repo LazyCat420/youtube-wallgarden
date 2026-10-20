@@ -173,4 +173,19 @@ applyGroundingVerdict("one man sawmill", "REAL");
 assert.strictEqual(S.topics.find(t => t.phrase === "one man sawmill").weight, 10, "REAL adds +2");
 console.log("✅ grounding REAL: +2 evidence bonus");
 
+// ── 6. newly mined topics unshift to front of queue & failed likes reset once ─
+{
+  reset(fresh());
+  S.smartFeedTopicsQueue = ["older queued 1", "older queued 2"];
+  S.ratingStates.vid1.v.extractionFailed = true;
+  S.ratingStates.vid1.v.extractionAttempts = 3;
+  assert.strictEqual(collectUnminedLikes().some(x => x.id === "vid1"), false, "failed like initially skipped");
+  const cleared = get("clearFailedLikeExtractionsOnce")();
+  assert.strictEqual(cleared, 1, "one-time migration clears extractionFailed");
+  assert.strictEqual(collectUnminedLikes().some(x => x.id === "vid1"), true, "cleared like is eligible again");
+  get("applyMinedTopics")("vid1", [{ topic: "freshly mined topic", tier: "A", weight: 8 }]);
+  assert.strictEqual(S.smartFeedTopicsQueue[0], "freshly mined topic", "mined topic placed at index 0 of queue");
+  console.log("✅ newly mined topics unshift to front of queue; clearFailedLikeExtractionsOnce recovers poisoned likes");
+}
+
 console.log("\nAll mining tests passed.");

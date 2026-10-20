@@ -31,12 +31,19 @@ console.log("Running Feed Latency Tests...\n");
     }
     return { ok: true, json: async () => ({}) };
   };
+  // Default: semanticFilterEnabled is off unless explicitly true
   state.settings = { useYtdlp: true, muteShorts: false };
+  const defaultVideos = await get("fetchVideosForTopic")("kiln");
+  assert.ok(defaultVideos.length > 0, "candidates returned with default settings");
+  assert.strictEqual(classifyStarted.length, 0, "default settings must NOT spam /classify-candidates");
+
+  // Opt-in: when semanticFilterEnabled === true, runs off the render path
+  state.settings = { useYtdlp: true, muteShorts: false, semanticFilterEnabled: true };
   const t0 = Date.now();
   const videos = await get("fetchVideosForTopic")("kiln");
   assert.ok(videos.length > 0, "candidates returned");
   assert.ok(Date.now() - t0 < 2000, "did not wait for the classifier");
-  assert.strictEqual(classifyStarted.length, 1, "classification was scheduled");
+  assert.strictEqual(classifyStarted.length, 1, "classification was scheduled when explicitly enabled");
   state.smartFeedSuggestionPool.push(...videos);
   assert.ok(state.smartFeedSuggestionPool.some(v => v.id === "broad0"));
   resolveClassify();
@@ -57,7 +64,7 @@ console.log("Running Feed Latency Tests...\n");
     }
     return { ok: true, json: async () => ({}) };
   };
-  state.settings = {};
+  state.settings = { semanticFilterEnabled: true };
   const sched = get("scheduleLateClassification");
   for (let i = 0; i < 5; i++) sched("t" + i, [{ id: "x" + i, title: "x", channelName: "c" }]);
   await new Promise(r => setTimeout(r, 20));

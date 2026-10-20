@@ -97,7 +97,20 @@ console.log("Running Signal Gating Tests...\n");
   assert.strictEqual(crossed, true, "3rd play must cross");
   assert.strictEqual(state.agentQueue.length, 1);
   assert.strictEqual(state.agentQueue[0].type, "expand_topic");
-  console.log("✅ play threshold: 2 plays enqueue nothing, the 3rd enqueues one job");
+
+  // Passive impressions ("imp") must NEVER enqueue expand_topic, even at 25 impressions
+  state.agentQueue = [];
+  for (let i = 0; i < 25; i++) {
+    const impCrossed = get("recordTopicSignal")("passive topic", "imp", "impvid" + i);
+    assert.strictEqual(impCrossed, false, "imp must never trigger expand_topic");
+  }
+  assert.strictEqual(state.agentQueue.length, 0, "25 impressions must enqueue 0 expand_topic jobs");
+
+  // Child topic with parent cannot expand via open until it earns a play or like
+  state.topics.push({ phrase: "child topic", weight: 4, role: "adjacent", parent: "raku firing" });
+  for (let i = 0; i < 6; i++) get("recordTopicSignal")("child topic", "open");
+  assert.strictEqual(state.agentQueue.length, 0, "unplayed child topic must not expand on open alone");
+  console.log("✅ play threshold enqueues; imp never enqueues; child topic requires play/like before expanding");
 }
 
 // ── 3. Crossing re-arms instead of firing on every later increment ──

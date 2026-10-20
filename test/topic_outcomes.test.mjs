@@ -201,4 +201,27 @@ console.log("Running Topic Outcome Tests...\n");
   console.log("✅ existing context fields all intact — the block is additive");
 }
 
+// ── 12. 30-day like decay retires a stale single-like topic with 8+ unengaged impressions ─
+{
+  const { get, state } = boot();
+  const DAY = 86400e3;
+  const now = Date.now();
+  state.ratingStates = {
+    oldOklo: { r: 5, t: now - 89 * DAY, v: { id: "oldOklo", title: "Oklo Stock Deep Dive", discoveryTopic: "oklo stock" } },
+    freshAg: { r: 5, t: now - 5 * DAY, v: { id: "freshAg", title: "Soil Biology", discoveryTopic: "regenerative agriculture" } },
+  };
+  state.topicSignals = {
+    "oklo stock": sig({ imp: 20, play: 0, open: 0 }),
+    "regenerative agriculture": sig({ imp: 20, play: 0, open: 0 }),
+  };
+  const likeCounts = get("buildTopicLikeCounts")(now);
+  assert.ok(likeCounts["oklo stock"] < 0.2, `89d-old single like decays < 0.2, got ${likeCounts["oklo stock"]}`);
+  assert.ok(likeCounts["regenerative agriculture"] > 0.8, `5d-old like stays > 0.8, got ${likeCounts["regenerative agriculture"]}`);
+  assert.strictEqual(get("isIgnoredTopic")("oklo stock", likeCounts), true, "89d-old 1-like topic with 20 unengaged impressions is IGNORED");
+  assert.strictEqual(get("isProvenTopic")("oklo stock", likeCounts), false, "89d-old 1-like topic with 0 plays is no longer PROVEN");
+  assert.strictEqual(get("isIgnoredTopic")("regenerative agriculture", likeCounts), false, "freshly liked topic is not ignored");
+  assert.strictEqual(get("isProvenTopic")("regenerative agriculture", likeCounts), true, "freshly liked topic is proven");
+  console.log("✅ 30-day like decay retires 89d-old single-like topic ('oklo stock') after 20 unengaged impressions");
+}
+
 console.log("\nAll Topic Outcome tests passed!");

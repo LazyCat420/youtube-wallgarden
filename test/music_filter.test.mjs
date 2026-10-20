@@ -177,4 +177,30 @@ console.log("Running Music Feed & Anti-DJ Mix Filter Tests...\n");
   console.log("✅ getMusicSeeds derives artist and genre seeds from user curation");
 }
 
+// 4. Rejects non-music hyphenated video titles & integrates music-player seeds
+{
+  const { get, state } = bootHarness();
+  const getMusicSeeds = get("getMusicSeeds");
+  state.likedVideos = [
+    { id: "m1", title: "How Slipcasting Works - Ceramic Process", channelName: "Pottery Studio" },
+    { id: "m2", title: "Soil Biology Impact on Plant Nutrition - John Kempf", channelName: "Regen Ag" },
+    { id: "m3", title: "A Coupla Fat Guys Cooking Show - Episode 4", channelName: "Cooking Channel" },
+  ];
+  state.musicPlayerSeeds = {
+    artists: ["télépopmusik", " massive attack "],
+    tracks: [{ artist: "télépopmusik", title: "Breathe", videoId: "abc123" }],
+    blockedArtists: ["blocked band"],
+    updatedAt: Date.now()
+  };
+  const seeds = getMusicSeeds();
+  assert.ok(seeds.artists.includes("télépopmusik"), "Includes music-player favorite artist");
+  assert.ok(seeds.artists.includes("massive attack"), "Includes trimmed music-player artist");
+  assert.ok(!seeds.artists.some(a => a.includes("slipcasting") || a.includes("soil biology") || a.includes("cooking show")),
+    "Non-music hyphenated video titles must never become music artist seeds");
+  const queries = [...get("getMusicQueryList")()];
+  assert.ok(queries.some(q => q.includes("télépopmusik")), "Music query list includes music-player artists");
+  assert.ok(!queries.some(q => q.includes("slipcasting") || q.includes("soil biology")), "Music query list excludes non-music titles");
+  console.log("✅ music-player seeds integrated and non-music hyphenated titles rejected");
+}
+
 console.log("\nAll Music Feed & Anti-DJ Mix Filter tests passed!");

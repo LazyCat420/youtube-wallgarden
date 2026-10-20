@@ -232,4 +232,30 @@ console.log("Running Slate Composition Tests...\n");
   console.log("✅ cold-start diversity gate wired");
 }
 
+// 17. Gumbel-top-k stochastic sampling (temperature > 0) diversifies top slot
+//     while keeping caps intact; shownIds suppresses 7-day unengaged repeats.
+{
+  const pool = [];
+  for (let i = 0; i < 8; i++) {
+    pool.push(mk({ id: "top" + i, topic: "topic_" + i, channel: "Chan_" + i, rel: 12 - (i * 0.3), era: ERA_BUCKETS[i % 4] }));
+  }
+  for (let i = 8; i < 24; i++) {
+    pool.push(mk({ id: "mid" + i, topic: "topic_" + (i % 8), channel: "Chan_" + i, rel: 9, era: ERA_BUCKETS[i % 4] }));
+  }
+  const slot0Counts = {};
+  for (let r = 0; r < 40; r++) {
+    const { slate } = composeSlate(pool, 12, { ...base, temperature: 0.15 });
+    slot0Counts[slate[0].id] = (slot0Counts[slate[0].id] || 0) + 1;
+  }
+  const maxShare = Math.max(...Object.values(slot0Counts)) / 40;
+  assert.ok(Object.keys(slot0Counts).length >= 3, `expected >= 3 distinct top-slot videos across 40 runs, got ${Object.keys(slot0Counts).length}`);
+  assert.ok(maxShare < 0.75, `no single video should monopolize slot 0 (got ${maxShare})`);
+
+  // 7-day shownIds suppression skips unengaged recently-shown videos when alternatives exist
+  const shownIds = new Set(["top0", "top1"]);
+  const { slate: suppressed } = composeSlate(pool, 6, { ...base, shownIds });
+  assert.ok(!suppressed.some(v => v.id === "top0" || v.id === "top1"), "recently shown unengaged videos suppressed");
+  console.log("✅ stochastic sampling diversifies slot 0 and shownIds suppresses repeats");
+}
+
 console.log("\nAll slate composition tests passed.");

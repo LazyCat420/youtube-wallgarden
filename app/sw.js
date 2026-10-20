@@ -19,9 +19,8 @@ if (
             })
         );
     });
-    // Block ALL fetch interception in dev mode
-    return;
-}
+    // Block ALL fetch interception in dev mode (else branch holds prod listeners)
+} else {
 
 const CACHE_NAME = 'wallgarden-v1';
 const APP_SHELL = [
@@ -57,6 +56,7 @@ self.addEventListener('fetch', (event) => {
         url.origin !== self.location.origin ||
         event.request.method !== 'GET' ||
         url.pathname.startsWith('/sync/') ||
+        url.pathname.startsWith('/music-api/') ||
         url.pathname.startsWith('/youtube-feed/')
     ) {
         return;
@@ -88,3 +88,5 @@ self.addEventListener('fetch', (event) => {
             .catch(() => caches.match(event.request).then((hit) => hit || caches.match('/')))
     );
 });
+
+}

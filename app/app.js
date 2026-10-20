@@ -820,15 +820,20 @@ function pruneTopicPool() {
         // of decaying on sight.
         if (!t.addedAt) { t.addedAt = now; return; }
         const phrase = normalizeTopic(t.phrase);
-        if (likedSet.has(phrase) || isProvenTopic(phrase, likeCounts)) return;
+        const ignored = isIgnoredTopic(phrase, likeCounts);
+        if (isProvenTopic(phrase, likeCounts) || (likedSet.has(phrase) && !ignored)) return;
         // An explore topic that was shown enough to be IGNORED has resolved:
         // the experiment failed. Drop it to the floor so the 21-day eviction
         // below can reach it. Core/adjacent keep the soft retirement only.
-        if (t.role === "explore" && isIgnoredTopic(phrase, likeCounts)) {
+        if (t.role === "explore" && ignored) {
             t.weight = Math.min(t.weight, 0.5);
             return;
         }
-        if (now - topicFreshness(t) > TOPIC_STALE_DECAY_MS) {
+        // Passive impressions on an already-IGNORED topic must not reset its
+        // staleness clock, so decayed old likes can decay down instead of
+        // staying frozen at weight 10 forever.
+        const freshTs = ignored ? (t.addedAt || 0) : topicFreshness(t);
+        if (now - freshTs > TOPIC_STALE_DECAY_MS) {
             t.weight = Math.max(0.5, t.weight - TOPIC_DECAY_PER_PRUNE);
         }
     });
@@ -1232,6 +1237,16 @@ function loadState() {
     if (state.settings.groundingEnabled === undefined) {
         state.settings.groundingEnabled = true;
     }
+    // Candidate LLM classification is disabled by default so the Jetson is
+    // reserved for topic generation/mining instead of per-fetch video spam.
+    if (state.settings.semanticFilterEnabled === undefined) {
+        state.settings.semanticFilterEnabled = false;
+    }
+    const rawMusicSeeds = getStoredItem("music_player_seeds");
+    if (rawMusicSeeds) {
+        try { state.musicPlayerSeeds = JSON.parse(rawMusicSeeds); } catch (e) { state.musicPlayerSeeds = null; }
+    }
+    clearFailedLikeExtractionsOnce();
     
     if (rawCache) {
         state.cache = JSON.parse(rawCache);
@@ -1242,10 +1257,8 @@ function loadState() {
     // One-time flush when the ranking pipeline changes: pool entries fetched
     // under an older strategy (e.g. the date-sorted era queries) would keep
     // serving slop for days. Bump WG_POOL_VERSION to invalidate.
-    // "3": every entry fetched before scraper 2026-09-06 has published=null
-    // (the scraper's date repair was gated on require_transcript). Era
-    // bucketing needs dated rows, so the undated pool goes.
-    const WG_POOL_VERSION = "3";
+    // "4": flush stale 1,000-item reservoir (e.g. decayed "oklo stock" cards).
+    const WG_POOL_VERSION = "4";
     if (getStoredItem("pool_version") !== JSON.stringify(WG_POOL_VERSION) && state.smartFeedSuggestionPool.length > 0) {
         debug(`[Smart Feed] Pool version changed — flushing ${state.smartFeedSuggestionPool.length} pre-ranking suggestions.`);
         state.smartFeedSuggestionPool = [];
@@ -1253,17 +1266,21 @@ function loadState() {
     }
     persistField("pool_version", WG_POOL_VERSION);
 
-    // Discard expired cached suggestions older than 14 days
+    // Discard expired cached suggestions older than 3 days or belonging to ignored topics.
     // Pools saved by the old code carry frozen _score values — strip them so
     // every entry re-scores against CURRENT preferences at render time.
     (state.smartFeedSuggestionPool || []).forEach(v => { delete v._score; delete v._matchedTopics; });
-    const fourteenDaysAgo = Date.now() - (14 * 24 * 60 * 60 * 1000);
+    const threeDaysAgo = Date.now() - (3 * 24 * 60 * 60 * 1000);
+    const poolLikeCounts = buildTopicLikeCounts();
     const initialPoolSize = state.smartFeedSuggestionPool.length;
-    state.smartFeedSuggestionPool = state.smartFeedSuggestionPool.filter(v =>
-        v.crawledAt && v.crawledAt > fourteenDaysAgo
-    );
+    state.smartFeedSuggestionPool = state.smartFeedSuggestionPool.filter(v => {
+        if (!v.crawledAt || v.crawledAt <= threeDaysAgo) return false;
+        const vt = normalizeTopic(v._topic || v.discoveryTopic || "");
+        if (vt && isIgnoredTopic(vt, poolLikeCounts)) return false;
+        return true;
+    });
     if (state.smartFeedSuggestionPool.length !== initialPoolSize) {
-        debug(`[Smart Feed] Discarded ${initialPoolSize - state.smartFeedSuggestionPool.length} expired suggestions older than 14 days.`);
+        debug(`[Smart Feed] Discarded ${initialPoolSize - state.smartFeedSuggestionPool.length} expired/ignored suggestions.`);
         saveSmartFeedSuggestionPool();
     }
 
@@ -1553,12 +1570,32 @@ function recordTopicSignal(topic, kind, dedupeKey) {
     const per = rec.c[cid] || (rec.c[cid] = {});
     per[kind] = (per[kind] || 0) + 1;
     rec.t = Date.now();
+    if (kind === "imp") {
+        rec.impSinceEngage = (rec.impSinceEngage || 0) + 1;
+    } else if (kind === "play" || kind === "open") {
+        rec.impSinceEngage = 0;
+        rec.lastEngagedAt = rec.t;
+    }
 
     const total = topicSignalTotal(phrase, kind);
     const firedAt = (rec.f && rec.f[kind]) || 0;
     const crossed = total >= firedAt + SIGNAL_THRESHOLDS[kind];
 
-    if (crossed) {
+    // Passive impressions ("imp") are recorded for IGNORED-topic detection only
+    // and NEVER spawn child topics via /similar. Furthermore, a child topic
+    // spawned via /similar (t.parent) cannot spawn grandchildren until it has
+    // earned at least 1 play or recent like.
+    const canExpand = kind !== "imp" && (() => {
+        const entry = (state.topics || []).find(t => normalizeTopic(t.phrase) === phrase);
+        if (entry && entry.parent) {
+            const likes = (buildTopicLikeCounts()[phrase] || 0);
+            const plays = topicSignalTotal(phrase, "play");
+            return likes >= 0.5 || plays >= 1;
+        }
+        return true;
+    })();
+
+    if (crossed && canExpand) {
         // Re-arm from the CURRENT total, so the next expansion needs another
         // full threshold of fresh interest rather than firing on every
         // subsequent increment.
@@ -1568,7 +1605,7 @@ function recordTopicSignal(topic, kind, dedupeKey) {
     saveTopicSignals();
     // One deliberate play graduates an explore/adjacent topic to core.
     if (kind === "play") promoteTopicRole(phrase, "play");
-    return crossed;
+    return crossed && canExpand;
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -2204,6 +2241,14 @@ function _wgApplyRemoteFields(fields) {
         }
     } finally {
         _syncApplying = false;
+    }
+    if (fields.ratings) {
+        clearFailedLikeExtractionsOnce();
+        const unminedCount = collectUnminedLikes().length;
+        if (unminedCount > 0) {
+            enqueueAgentJob("mine_likes", "likes", { pending: unminedCount });
+            scheduleMining(1500);
+        }
     }
     // Refresh views only when not in smart-feed (smart-feed reconciles in-place)
     if (state.currentView !== "smart-feed") {
@@ -4062,8 +4107,14 @@ function getScoreAndMatches(video) {
     const title = video.title.toLowerCase();
     const matches = [];
     
+    const ownTopic = normalizeTopic(video.discoveryTopic || video._topic || "");
     state.topics.forEach(topic => {
         const phrase = topic.phrase.toLowerCase();
+        // Do not double-count a video's own discoveryTopic in legacy keyword
+        // scoring — scoreDiscoveryVideo's intent axis already scores title match
+        // against discoveryTopic, and adding topic.weight here gave weight-10
+        // topics a permanent +4.0 rankScore edge over weight-4 topics.
+        if (ownTopic && normalizeTopic(phrase) === ownTopic) return;
         let matched = false;
         
         if (phrase.length <= 3) {
@@ -7278,24 +7329,194 @@ function isDjMixOrCompilation(video) {
 }
 
 const WG_MUSIC_GENRE_RE = /\b(synthwave|ambient|techno|house|electronic|hip hop|rap|jazz|funk|soul|indie|rock|metal|reggae|pop|r&b|disco|shoegaze|idm|lofi|folk|classical|punk|trap|edm|dreampop|synthpop|post-punk|downtempo|trance|drum & bass|dnb|garage|dubstep)\b/i;
+const WG_MUSIC_TITLE_HINT_RE = /\b(official\s+(audio|music\s+video|video|lyric\s+video)|lyric\s+video|full\s+album)\b|\((official|audio|video|lyric)[^)]*\)/i;
+const WG_NON_MUSIC_PREFIX_RE = /\b(how\s+to|how\s+|what\s+is|why\s+|slipcasting|soil\s+biology|cooking\s+show|episode\s*\d+|ep\.?\s*\d+|tutorial|explained|documentary|stock|podcast|interview|lecture|review)\b/i;
+
+// Client-side scraper concurrency gate shared across Music Feed (priority 0)
+// and Discovery Feed preload (priority 1). Capped at 4 concurrent requests so
+// one 4-form topic fetch completes without self-deadlocking while preventing
+// multi-topic bursts (12-20 concurrent yt-dlp subprocesses) from overflowing
+// scraper-service's 3-worker queue.
+const SCRAPER_MAX_CONCURRENT = 4;
+let _scraperInFlight = 0;
+const _scraperWaitQueue = [];
+
+function withScraperSlot(priority, fn) {
+    return new Promise((resolve, reject) => {
+        const run = () => {
+            _scraperInFlight += 1;
+            Promise.resolve()
+                .then(fn)
+                .then(resolve, reject)
+                .finally(() => {
+                    _scraperInFlight = Math.max(0, _scraperInFlight - 1);
+                    if (_scraperWaitQueue.length > 0 && _scraperInFlight < SCRAPER_MAX_CONCURRENT) {
+                        const next = _scraperWaitQueue.shift();
+                        next();
+                    }
+                });
+        };
+        if (_scraperInFlight < SCRAPER_MAX_CONCURRENT) {
+            run();
+        } else {
+            run.priority = typeof priority === "number" ? priority : 1;
+            const idx = _scraperWaitQueue.findIndex(w => w.priority > run.priority);
+            if (idx === -1) _scraperWaitQueue.push(run);
+            else _scraperWaitQueue.splice(idx, 0, run);
+        }
+    });
+}
+
+let _musicPlayerHydratePromise = null;
+
+async function hydrateMusicPlayerSeeds(force) {
+    const cached = state.musicPlayerSeeds;
+    if (!force && cached && cached.updatedAt && (Date.now() - cached.updatedAt) < 5 * 60e3) {
+        return cached;
+    }
+    if (_musicPlayerHydratePromise) return _musicPlayerHydratePromise;
+
+    _musicPlayerHydratePromise = (async () => {
+        const fetchJson = async (url) => {
+            const controller = new AbortController();
+            const tid = setTimeout(() => controller.abort(), 4000);
+            try {
+                const resp = await fetch(url, { signal: controller.signal });
+                clearTimeout(tid);
+                if (resp && resp.ok) return await resp.json();
+            } catch (e) {
+                clearTimeout(tid);
+            }
+            return null;
+        };
+
+        try {
+            const [favorites, recent, popular, artistStats, discovered] = await Promise.all([
+                fetchJson("/music-api/favorites"),
+                fetchJson("/music-api/music/history/recent?limit=40"),
+                fetchJson("/music-api/music/history/popular?limit=40"),
+                fetchJson("/music-api/artists/stats"),
+                fetchJson("/music-api/graph/discovered?limit=30")
+            ]);
+
+            const blockedArtists = new Set();
+            const artists = new Set();
+            const tracks = [];
+            const seenTracks = new Set();
+
+            const cleanArtist = (raw) => {
+                if (!raw || typeof raw !== "string") return "";
+                const a = raw.replace(/\s*-\s*Topic$/i, "").trim().toLowerCase();
+                if (!a || a.length < 2 || a.length > 45) return "";
+                if (a === "unknown" || a === "unknown artist" || a === "various artists" || a === "youtube curation") return "";
+                if (WG_NON_MUSIC_PREFIX_RE.test(a)) return "";
+                return a;
+            };
+
+            if (Array.isArray(artistStats)) {
+                artistStats.forEach(row => {
+                    if (!row || !row.name) return;
+                    const a = cleanArtist(row.name);
+                    if (!a) return;
+                    if (row.is_blocked) blockedArtists.add(a);
+                    else if ((row.play_count || 0) > 0 || (row.track_count || 0) > 0) artists.add(a);
+                });
+            }
+
+            const addTrackRow = (row) => {
+                if (!row) return;
+                const a = cleanArtist(row.artist || row.channel || row.source_artist || "");
+                if (a && !blockedArtists.has(a)) artists.add(a);
+                const title = (row.title || "").trim();
+                const vid = row.video_id || row.id || "";
+                if (a && title && !blockedArtists.has(a) && !WG_NON_MUSIC_PREFIX_RE.test(title)) {
+                    const key = `${a}::${title.toLowerCase()}`;
+                    if (!seenTracks.has(key)) {
+                        seenTracks.add(key);
+                        tracks.push({ artist: a, title, videoId: vid });
+                    }
+                }
+            };
+
+            if (Array.isArray(favorites)) favorites.forEach(addTrackRow);
+            if (Array.isArray(popular)) popular.forEach(addTrackRow);
+            if (Array.isArray(recent)) recent.forEach(addTrackRow);
+            const discList = discovered && Array.isArray(discovered.tracks) ? discovered.tracks : (Array.isArray(discovered) ? discovered : []);
+            discList.forEach(addTrackRow);
+
+            if (artists.size > 0 || tracks.length > 0) {
+                state.musicPlayerSeeds = {
+                    artists: Array.from(artists),
+                    tracks: tracks.slice(0, 40),
+                    blockedArtists: Array.from(blockedArtists),
+                    updatedAt: Date.now()
+                };
+                persistField("music_player_seeds", state.musicPlayerSeeds);
+                debug(`[Music Feed] Hydrated ${state.musicPlayerSeeds.artists.length} artists and ${state.musicPlayerSeeds.tracks.length} tracks from music-player.`);
+            }
+        } catch (err) {
+            debug("[Music Feed] music-player seed hydration skipped:", err && err.message);
+        } finally {
+            _musicPlayerHydratePromise = null;
+        }
+        return state.musicPlayerSeeds;
+    })();
+
+    return _musicPlayerHydratePromise;
+}
 
 function getMusicSeeds() {
     const artists = new Set();
     const genres = new Set();
+    const tracks = [];
+    const blockedArtists = new Set(
+        (state.musicPlayerSeeds && Array.isArray(state.musicPlayerSeeds.blockedArtists))
+            ? state.musicPlayerSeeds.blockedArtists.map(a => String(a).toLowerCase())
+            : []
+    );
 
-    // Extract artists from liked videos
-    (state.likedVideos || []).forEach(v => {
+    if (state.musicPlayerSeeds) {
+        (state.musicPlayerSeeds.artists || []).forEach(a => {
+            const clean = String(a || "").trim().toLowerCase();
+            if (clean && !blockedArtists.has(clean) && !WG_NON_MUSIC_PREFIX_RE.test(clean)) {
+                artists.add(clean);
+            }
+        });
+        (state.musicPlayerSeeds.tracks || []).forEach(t => {
+            if (t && t.artist && t.title && !blockedArtists.has(String(t.artist).toLowerCase())) {
+                tracks.push(t);
+            }
+        });
+    }
+
+    // Extract authentic music artists from liked videos (strictly requiring
+    // "- Topic" channels or explicit music video markers so non-music lectures
+    // with hyphens in their titles never pollute music seeds).
+    const likedSource = [
+        ...(state.likedVideos || []),
+        ...Object.values(state.ratingStates || {}).filter(st => st && st.r === 5 && st.v).map(st => st.v)
+    ];
+    likedSource.forEach(v => {
         if (!v) return;
         const ch = (v.channelName || "").trim();
+        const title = (v.title || "").trim();
         if (ch.endsWith(" - Topic")) {
-            artists.add(ch.replace(/\s*-\s*Topic$/i, "").toLowerCase());
-        } else if (v.title && (v.title.includes(" - ") || /\((official|audio|video|lyric)\)/i.test(v.title))) {
-            if (ch && !ch.toLowerCase().includes("records") && !ch.toLowerCase().includes("music")) {
-                artists.add(ch.toLowerCase());
+            const a = ch.replace(/\s*-\s*Topic$/i, "").trim().toLowerCase();
+            if (a && !blockedArtists.has(a) && !WG_NON_MUSIC_PREFIX_RE.test(a)) artists.add(a);
+        } else if (title && WG_MUSIC_TITLE_HINT_RE.test(title)) {
+            if (ch && !ch.toLowerCase().includes("records") && !ch.toLowerCase().includes("music") && !ch.toLowerCase().includes("youtube curation")) {
+                const ca = ch.toLowerCase();
+                if (!blockedArtists.has(ca) && !WG_NON_MUSIC_PREFIX_RE.test(ca)) artists.add(ca);
             }
-            const parts = v.title.split(/\s+-\s+/);
-            if (parts.length >= 2 && parts[0].trim().length > 1 && parts[0].trim().length < 40) {
-                artists.add(parts[0].trim().toLowerCase());
+            const parts = title.split(/\s+-\s+/);
+            if (parts.length >= 2) {
+                const candidate = parts[0].trim().toLowerCase();
+                if (candidate.length > 1 && candidate.length < 36 &&
+                    candidate.split(/\s+/).length <= 5 &&
+                    !blockedArtists.has(candidate) &&
+                    !WG_NON_MUSIC_PREFIX_RE.test(candidate)) {
+                    artists.add(candidate);
+                }
             }
         }
     });
@@ -7304,32 +7525,120 @@ function getMusicSeeds() {
     (state.topics || []).forEach(t => {
         if (!t || !t.phrase || t.weight <= 0) return;
         const phrase = t.phrase.toLowerCase();
-        if (WG_MUSIC_GENRE_RE.test(phrase)) {
+        if (WG_MUSIC_GENRE_RE.test(phrase) && !WG_NON_MUSIC_PREFIX_RE.test(phrase)) {
             genres.add(phrase);
         }
     });
 
     return {
         artists: Array.from(artists),
-        genres: Array.from(genres)
+        genres: Array.from(genres),
+        tracks
     };
 }
 
 function getMusicQueryList() {
-    const { artists, genres } = getMusicSeeds();
+    const { artists, genres, tracks } = getMusicSeeds();
     const list = [];
+    const seen = new Set();
+    const addQ = (q, artistHint) => {
+        const key = String(q || "").trim().toLowerCase();
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        list.push(artistHint ? { query: q, artist: artistHint } : q);
+    };
+
+    // Interleave artist queries, favorite track queries, and genre queries so
+    // no single artist dominates the seed list.
     artists.forEach(a => {
-        list.push(`${a} official audio`);
-        list.push(`${a} song`);
+        addQ(`${a} official audio`, a);
+    });
+    (tracks || []).slice(0, 16).forEach(t => {
+        addQ(`${t.artist} ${t.title} official audio`, t.artist);
     });
     genres.forEach(g => {
-        list.push(`${g} music`);
-        list.push(`${g} tracks`);
+        addQ(`${g} official audio`, "");
     });
     if (list.length === 0) {
-        list.push("synthwave song", "chillwave music", "ambient music", "indie song", "electronic music", "idm track");
+        ["synthwave official audio", "chillwave official audio", "ambient electronic official audio", "indie rock official audio", "electronic idm official audio", "downtempo official audio"].forEach(q => addQ(q, ""));
     }
-    return list;
+    return list.map(item => typeof item === "string" ? item : item.query);
+}
+
+function extractMusicArtistKey(video) {
+    if (!video) return "unknown";
+    const ch = (video.channelName || "").trim();
+    if (ch.endsWith(" - Topic")) {
+        return ch.replace(/\s*-\s*Topic$/i, "").trim().toLowerCase();
+    }
+    const title = (video.title || "").trim();
+    const parts = title.split(/\s+-\s+/);
+    if (parts.length >= 2 && parts[0].trim().length > 1 && parts[0].trim().length < 40) {
+        return parts[0].trim().toLowerCase();
+    }
+    return (ch || video.channelId || "unknown").toLowerCase();
+}
+
+function scoreMusicVideo(video, knownArtistsSet) {
+    if (!video) return -100;
+    let score = 0;
+    const ch = (video.channelName || "").trim();
+    const title = (video.title || "").toLowerCase();
+    const artistKey = extractMusicArtistKey(video);
+    if (ch.endsWith(" - Topic")) score += 4;
+    if (/\b(official\s+audio|official\s+music\s+video|official\s+video|lyric\s+video)\b/i.test(title)) score += 3;
+    if (knownArtistsSet && knownArtistsSet.has(artistKey)) score += 5;
+    const dur = typeof video.duration === "number" ? video.duration : 0;
+    if (dur >= 120 && dur <= 480) score += 2; // 2-8 min standalone song sweet spot
+    if (state.videoRatings && state.videoRatings[video.id] === 5) score += 10;
+    return score;
+}
+
+async function fetchMusicVideosForQuery(rawQuery) {
+    const query = typeof rawQuery === "string" ? rawQuery : (rawQuery && rawQuery.query) || "";
+    if (!query) return [];
+    return withScraperSlot(0, async () => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 20000);
+        try {
+            const resp = await fetch("/scraper/collect", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    source: "youtube",
+                    query,
+                    limit: 10,
+                    days_back: 0,
+                    require_transcript: false,
+                    sort: "relevance"
+                }),
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            if (!resp || !resp.ok) return [];
+            const data = await resp.json();
+            const items = (data && Array.isArray(data.items)) ? data.items : [];
+            return items.filter(item => item && item.video_id).map((item, idx) => ({
+                id: item.video_id,
+                title: item.title || "",
+                channelName: item.channel || "",
+                channelId: item.channel_id || "",
+                published: item.published_at ? Date.parse(item.published_at) : null,
+                publishedEstimated: !!item.published_at_estimated,
+                description: item.description || "",
+                duration: item.duration_secs,
+                viewCount: item.view_count,
+                isDiscover: true,
+                discoveryTopic: query,
+                _form: "music",
+                _fetchRank: idx
+            }));
+        } catch (err) {
+            clearTimeout(timeoutId);
+            console.warn(`[Music Feed] Scraper fetch failed for "${query}":`, err && err.message);
+            return [];
+        }
+    });
 }
 
 function initMusicFeed() {
@@ -7351,6 +7660,17 @@ function initMusicFeed() {
         }
         grid.appendChild(fragment);
     }
+    // Hydrate from music-player in parallel and refresh seeds when ready
+    hydrateMusicPlayerSeeds(false).then(seeds => {
+        if (seeds && Array.isArray(seeds.artists) && seeds.artists.length > 0) {
+            const updated = getMusicQueryList();
+            updated.sort(() => Math.random() - 0.5);
+            state.musicFeedSeeds = updated;
+            if (state.currentView === "music-feed" && state.musicFeedVideos.length === 0 && !state.musicFeedLoading) {
+                loadNextMusicFeedBatch();
+            }
+        }
+    }).catch(() => {});
     loadNextMusicFeedBatch();
 }
 
@@ -7377,12 +7697,18 @@ async function loadNextMusicFeedBatch() {
         return;
     }
 
+    if (!state.musicPlayerSeeds) {
+        try { await hydrateMusicPlayerSeeds(false); } catch (e) {}
+    }
+
     if (!state.musicFeedSeeds || state.musicFeedSeeds.length === 0) {
         state.musicFeedSeeds = getMusicQueryList();
+        state.musicFeedSeeds.sort(() => Math.random() - 0.5);
     }
 
     const queriesToFetch = [];
-    for (let i = 0; i < 2; i++) {
+    const batchQueryCount = Math.min(3, state.musicFeedSeeds.length);
+    for (let i = 0; i < batchQueryCount; i++) {
         const q = state.musicFeedSeeds[state.musicFeedSeedIndex % state.musicFeedSeeds.length];
         state.musicFeedSeedIndex++;
         queriesToFetch.push(q);
@@ -7390,30 +7716,40 @@ async function loadNextMusicFeedBatch() {
 
     try {
         const results = await Promise.all(
-            queriesToFetch.map(q => fetchVideosForTopic(q).catch(() => []))
+            queriesToFetch.map(q => fetchMusicVideosForQuery(q).catch(() => []))
         );
         const candidates = results.flat();
         const existingIds = new Set(state.musicFeedVideos.map(v => v.id));
+        const knownArtists = new Set(getMusicSeeds().artists);
 
         const allowed = candidates.filter(v => {
             if (!v || !v.id || existingIds.has(v.id)) return false;
             if (isChannelBlocked(v.channelId, v.channelName)) return false;
             if (isAvoidedVideo(v)) return false;
             if (isDjMixOrCompilation(v)) return false; // Strictly reject DJ sets, full mixes, compilations, >14min
+            if (isSpamShapedVideo(v, knownArtists)) return false;
+            if (WG_NON_MUSIC_PREFIX_RE.test(v.title || "")) return false;
             if (state.videoRatings && state.videoRatings[v.id] === -5) return false;
+            v._musicScore = scoreMusicVideo(v, knownArtists);
             return true;
         });
+
+        allowed.sort((a, b) => (b._musicScore || 0) - (a._musicScore || 0));
 
         grid.querySelectorAll(".skeleton-card").forEach(s => s.remove());
 
         if (allowed.length > 0) {
             const deduped = [];
             const seen = new Set();
+            const artistCounts = Object.create(null);
             for (const v of allowed) {
-                if (!seen.has(v.id)) {
-                    seen.add(v.id);
-                    deduped.push(v);
-                }
+                if (seen.has(v.id)) continue;
+                const aKey = extractMusicArtistKey(v);
+                if ((artistCounts[aKey] || 0) >= 2) continue; // Max 2 tracks per artist per batch
+                seen.add(v.id);
+                artistCounts[aKey] = (artistCounts[aKey] || 0) + 1;
+                deduped.push(v);
+                if (deduped.length >= 12) break;
             }
             state.musicFeedVideos.push(...deduped);
             const fragment = document.createDocumentFragment();
@@ -7678,7 +8014,7 @@ const fetchPrismModels = fetchWallgardenModels;
 //
 // Kept in sync with EXPECTED_JETSON_MODEL in lazy-agent-service
 // src/services/wallgarden/WallgardenService.ts.
-const JETSON_PIN = { provider: "vllm", model: "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit" };
+const JETSON_PIN = { provider: "vllm", model: "nemotron35" };
 
 // Prefer whatever the backend actually reports for the Jetson (it discovers the
 // live model from /v1/models, so a re-provisioned box heals itself); fall back
@@ -7843,10 +8179,19 @@ const OUTCOME_PROVEN_MAX = 12;
 const OUTCOME_IGNORED_MAX = 10;
 const OUTCOME_IGNORED_MIN_IMPRESSIONS = 8;  // shown this often…
 const OUTCOME_PROVEN_MIN_PLAYS = 2;
+const LIKE_DECAY_HALF_LIFE_MS = 30 * 86400e3; // 30-day half-life for likes
+const OUTCOME_PROVEN_MIN_LIKE_WEIGHT = 0.5;   // 1 like stays >= 0.5 for 30 days
 
-/** Likes attributable to each topic, via the mined/matched topics on the rating record. */
-function buildTopicLikeCounts() {
+/**
+ * Likes attributable to each topic, via the mined/matched topics on the rating
+ * record. Each like decays with a 30-day half-life (0.5^(ageDays/30)) so a
+ * single old like from months ago does not permanently immunize an ignored
+ * topic from retirement. Synthetic small-integer test timestamps (<= 1e11) do
+ * not decay so deterministic unit fixtures keep exact integer counts.
+ */
+function buildTopicLikeCounts(now) {
     const counts = Object.create(null);
+    const refNow = typeof now === "number" ? now : Date.now();
     Object.entries(state.ratingStates || {}).forEach(([id, st]) => {
         if (!st || st.r !== 5) return;
         const labels = new Set();
@@ -7857,7 +8202,14 @@ function buildTopicLikeCounts() {
             if (typeof t === "string" && !t.startsWith("disliked:")) labels.add(normalizeTopic(t));
         });
         ((state.minedVideos || {})[id] || {}).topics?.forEach(t => labels.add(normalizeTopic(t)));
-        labels.forEach(l => { if (l) counts[l] = (counts[l] || 0) + 1; });
+        let weight = 1;
+        if (typeof st.t === "number" && st.t > 1e11) {
+            const ageMs = Math.max(0, refNow - st.t);
+            weight = Math.pow(0.5, ageMs / LIKE_DECAY_HALF_LIFE_MS);
+        }
+        labels.forEach(l => {
+            if (l) counts[l] = Math.round(((counts[l] || 0) + weight) * 1000) / 1000;
+        });
     });
     return counts;
 }
@@ -7869,23 +8221,29 @@ function buildTopicLikeCounts() {
 /**
  * The IGNORED verdict, shared by the prompt (buildTopicOutcomes) and by feed
  * selection (getWeightedRandomTopics) so the two can never drift: shown
- * repeatedly, never once acted on. One open, play or like makes this false —
- * that IS the revival path, no separate mechanism needed.
+ * repeatedly, never once acted on (or likes/engagements have decayed past
+ * 30 days while accumulating 8+ unengaged impressions). One fresh open, play
+ * or like makes this false — that IS the revival path.
  */
 function isIgnoredTopic(phrase, likeCounts) {
     const t = normalizeTopic(phrase);
     if (!t) return false;
-    if (likeCounts && (likeCounts[t] || 0) > 0) return false;
+    if (likeCounts && (likeCounts[t] || 0) >= OUTCOME_PROVEN_MIN_LIKE_WEIGHT) return false;
+    const rec = (state.topicSignals || {})[t];
+    if (rec && (rec.impSinceEngage || 0) >= OUTCOME_IGNORED_MIN_IMPRESSIONS &&
+        (!rec.lastEngagedAt || (Date.now() - rec.lastEngagedAt) > LIKE_DECAY_HALF_LIFE_MS)) {
+        return true;
+    }
     return topicSignalTotal(t, "imp") >= OUTCOME_IGNORED_MIN_IMPRESSIONS &&
         topicSignalTotal(t, "play") === 0 &&
         topicSignalTotal(t, "open") === 0;
 }
 
-/** The PROVEN verdict — liked, or deliberately played enough to trust. */
+/** The PROVEN verdict — recently liked (decayed weight >= 0.5), or deliberately played enough to trust. */
 function isProvenTopic(phrase, likeCounts) {
     const t = normalizeTopic(phrase);
     if (!t) return false;
-    if (likeCounts && (likeCounts[t] || 0) > 0) return true;
+    if (likeCounts && (likeCounts[t] || 0) >= OUTCOME_PROVEN_MIN_LIKE_WEIGHT) return true;
     return topicSignalTotal(t, "play") >= OUTCOME_PROVEN_MIN_PLAYS;
 }
 
@@ -8101,6 +8459,31 @@ function scheduleMining(delayMs) {
     }, delayMs);
 }
 
+// One-time migration: clear extractionFailed / extractionAttempts on liked
+// videos that were poisoned when the Jetson queue was overloaded by
+// /classify-candidates and /extract-topics timed out.
+function clearFailedLikeExtractionsOnce() {
+    if (getStoredItem("mining_retry_v1")) return 0;
+    let cleared = 0;
+    Object.entries(state.ratingStates || {}).forEach(([id, st]) => {
+        if (!st || st.r !== 5 || !st.v) return;
+        if ((state.minedVideos || {})[id]) return;
+        if (st.v.extractionFailed || st.v.extractionAttempts) {
+            delete st.v.extractionFailed;
+            delete st.v.extractionAttempts;
+            cleared++;
+        }
+    });
+    if (cleared > 0 || Object.keys(state.ratingStates || {}).length > 0) {
+        persistField("mining_retry_v1", Date.now());
+        if (cleared > 0) {
+            persistField("rating_states", state.ratingStates);
+            debug(`[Mining] Cleared extractionFailed on ${cleared} liked videos for retry.`);
+        }
+    }
+    return cleared;
+}
+
 function collectUnminedLikes() {
     return Object.entries(state.ratingStates || {})
         .filter(([id, st]) => st && st.r === 5 && st.v && st.v.title &&
@@ -8141,10 +8524,17 @@ function applyMinedTopics(videoId, ratedTopics, opts) {
             // A like just got mined into this topic: that is core evidence.
             promoteTopicRole(phrase, "like mined");
         }
-        const inQueue = state.smartFeedTopicsQueue.includes(phrase);
-        const inUsed = state.smartFeedUsedTopics.includes(phrase);
-        if (!inQueue && !inUsed) {
-            state.smartFeedTopicsQueue.push(phrase);
+        // Place newly mined topics at the FRONT of smartFeedTopicsQueue so
+        // fresh likes shape the very next preload pass instead of waiting behind
+        // 30+ older queued topics.
+        const existingQueueIdx = state.smartFeedTopicsQueue.indexOf(phrase);
+        if (existingQueueIdx > 0) {
+            state.smartFeedTopicsQueue.splice(existingQueueIdx, 1);
+            state.smartFeedTopicsQueue.unshift(phrase);
+        } else if (existingQueueIdx === -1) {
+            const usedIdx = state.smartFeedUsedTopics.indexOf(phrase);
+            if (usedIdx !== -1) state.smartFeedUsedTopics.splice(usedIdx, 1);
+            state.smartFeedTopicsQueue.unshift(phrase);
         }
 
         // Sink 2: likedTopics — revives graph-based discovery. A-tier only,
@@ -8216,24 +8606,23 @@ async function mineLikedVideosIntoTopics() {
                     totalAdded += applyMinedTopics(e.id, e.topics);
                 }
             });
-            // The backend answered but gave some videos nothing usable. Count
-            // the strike per video; after MAX_EXTRACTION_ATTEMPTS strikes stop
-            // re-sending it forever. Network/HTTP failures throw before this
-            // point and deliberately do NOT count — that failure is ours, not
-            // the video's. (Does not bump st.t — see applyMinedTopics sink 3.)
-            const extractedIds = new Set((data.extractions || []).map(e => e && e.id));
-            chunk.forEach(({ id, st }) => {
-                if (extractedIds.has(id)) {
-                    if (st.v.extractionAttempts) { delete st.v.extractionAttempts; attemptsChanged = true; }
-                    return;
-                }
-                st.v.extractionAttempts = (st.v.extractionAttempts || 0) + 1;
-                if (st.v.extractionAttempts >= MAX_EXTRACTION_ATTEMPTS) {
-                    st.v.extractionFailed = true;
-                    debug(`[Mining] ${id}: giving up after ${st.v.extractionAttempts} failed extraction attempts`);
-                }
-                attemptsChanged = true;
-            });
+            // Do not count strikes when the backend reports `failed: true` (LLM
+            // timeout/overload) — that failure is infrastructure, not the video.
+            if (!data || !data.failed) {
+                const extractedIds = new Set((data.extractions || []).map(e => e && e.id));
+                chunk.forEach(({ id, st }) => {
+                    if (extractedIds.has(id)) {
+                        if (st.v.extractionAttempts) { delete st.v.extractionAttempts; attemptsChanged = true; }
+                        return;
+                    }
+                    st.v.extractionAttempts = (st.v.extractionAttempts || 0) + 1;
+                    if (st.v.extractionAttempts >= MAX_EXTRACTION_ATTEMPTS) {
+                        st.v.extractionFailed = true;
+                        debug(`[Mining] ${id}: giving up after ${st.v.extractionAttempts} failed extraction attempts`);
+                    }
+                    attemptsChanged = true;
+                });
+            }
         }
 
         if (totalAdded > 0 || attemptsChanged || unmined.some(({ id }) => state.minedVideos[id])) {
@@ -8247,6 +8636,9 @@ async function mineLikedVideosIntoTopics() {
             debug(`[Mining] Done: ${totalAdded} new topics entered the pool.`);
             if (totalAdded > 0) {
                 showToast(`Mined ${totalAdded} topics from your liked videos`, "success");
+                if (state.currentView === "smart-feed") {
+                    fillSmartFeedPreloadBuffer();
+                }
             }
         }
     } catch (err) {
@@ -8450,7 +8842,8 @@ async function generateTopicsForSeeds(seeds, budget, strongestReason) {
             if (!state.topics.some(t => normalizeTopic(t.phrase) === phrase)) {
                 state.topics.push({
                     phrase, weight: (r && r.weight) || 4, addedAt: Date.now(), src: _lastContextVariant,
-                    role: bornRole, bornRole, fit: (r && r.fit) || undefined, tier: (r && r.tier) || undefined, gen
+                    role: bornRole, bornRole, parent: query,
+                    fit: (r && r.fit) || undefined, tier: (r && r.tier) || undefined, gen
                 });
             }
             if (!state.smartFeedTopicsQueue.includes(phrase) && !state.smartFeedUsedTopics.includes(phrase)) {
@@ -8614,24 +9007,26 @@ function rankScoreFor(v, ctx) {
     else if (v._classification === "OFF_TOPIC") semanticBonus = -40;
     const legacy = (ctx && typeof ctx.legacyScore === "number") ? ctx.legacyScore
         : (typeof v.score === "number" ? v.score : 0);
-    const rankScore = axis.score * 10 + semanticBonus + Math.max(-15, Math.min(15, legacy)) * 0.4;
+    const rankScore = axis.score * 10 + semanticBonus + Math.max(-15, Math.min(15, legacy)) * 0.2;
     return {
         rankScore,
         breakdown: { ...axis.breakdown, classification: v._classification || "heuristic", reason: v._classificationReason }
     };
 }
 
-// ── Slate composition: calibrated, capped, deterministic ──────────────
+// ── Slate composition: calibrated, capped, stochastic-optional ────────
 // The pool is a candidate RESERVOIR, not an order. Until 2026-09-06 the ranked
 // candidates were shuffled into it and a topic round-robin drew from it, so
 // the rank never reached the screen and one channel could fill a batch.
 //
 // composeSlate is Steck's calibrated re-ranking (RecSys'18) with an MMR-style
-// repeat penalty: each slot takes the candidate maximising
-//   (1 - λ) · relevance  −  λ · KL(p_era ‖ q_era with this candidate)  −  penalty · repeats
+// repeat penalty and optional Gumbel-top-k stochastic sampling (temperature > 0
+// in buildSlateCtx, 0 in SLATE_DEFAULTS for deterministic callers/tests): each
+// slot takes the candidate maximising
+//   (1 - λ) · (relevance + Gumbel(0, τ))  −  λ · KL(p_era ‖ q_era)  −  penalty · repeats
 // under per-channel and per-topic caps that relax only when nothing else is
 // left. One explore slot mid-slate takes the best candidate from a topic the
-// user has never been shown. Pure: no Math.random, ties go to pool order.
+// user has never been shown.
 const SLATE_DEFAULTS = {
     lambda: 0.6,               // KL term is bounded ~ln(1/β); relevance is [0,1]
     beta: 0.01,                // Steck's smoothing so an empty bucket is finite
@@ -8639,7 +9034,8 @@ const SLATE_DEFAULTS = {
     perSlate: 12,
     repeatPenalty: 0.08,
     overCapPenalty: 5,         // fallback scan prefers the LEAST over-cap candidate
-    exploreSlots: 1
+    exploreSlots: 1,
+    temperature: 0             // 0 = deterministic; buildSlateCtx sets 0.15 for live slates
 };
 
 function composeSlate(pool, n, ctx) {
@@ -8659,6 +9055,10 @@ function composeSlate(pool, n, ctx) {
     const scale = size / SLATE_DEFAULTS.perSlate;
     const capC = Number.isFinite(caps.channel) ? Math.max(1, Math.ceil(caps.channel * scale)) : Infinity;
     const capT = Number.isFinite(caps.topic) ? Math.max(1, Math.ceil(caps.topic * scale)) : Infinity;
+    const temp = (typeof o.temperature === "number" && o.temperature > 0) ? o.temperature : 0;
+    const rng = typeof o.rng === "function" ? o.rng : Math.random;
+    const shownIds = (o.shownIds && typeof o.shownIds.has === "function") ? o.shownIds : null;
+    const lastTopTopic = o.lastTopTopic ? normalizeTopic(o.lastTopTopic) : "";
 
     const cand = items.map((v, i) => {
         const raw = eraOf(v);
@@ -8667,28 +9067,25 @@ function composeSlate(pool, n, ctx) {
                  // An undated row is a clock that starts now: it competes as
                  // "recent" and can never satisfy an older bucket's share.
                  era: raw === "unknown" ? "recent" : raw,
-                 topic: topicOf(v), channel: channelOf(v) };
+                 topic: topicOf(v), channel: channelOf(v),
+                 shownRecently: !!(shownIds && v && v.id && shownIds.has(v.id)) };
     });
     let lo = Infinity, hi = -Infinity;
     cand.forEach(c => { lo = Math.min(lo, c.rel); hi = Math.max(hi, c.rel); });
     // Bounded normalization over a FIXED 10-rank-point span, not pool min-max.
-    // Min-max amplifies any small systematic rank bias (the maturity axis's
-    // recent-era dip, a classification bonus) into a full 1.0 relevance gap,
-    // which the λ·KL calibration term mathematically cannot overcome — the
-    // eval bench measured era KL 0.58 with recent starved to 8% of slots
-    // under min-max. Ordering is preserved; magnitudes stay honest.
-    cand.forEach(c => { c.relN = Math.max(0, Math.min(1, (c.rel - lo) / 10)); });
+    cand.forEach(c => {
+        const baseRelN = Math.max(0, Math.min(1, (c.rel - lo) / 10));
+        if (temp > 0) {
+            const u = Math.min(1 - 1e-12, Math.max(1e-12, rng()));
+            const gumbel = -Math.log(-Math.log(u));
+            c.relN = baseRelN + temp * gumbel;
+        } else {
+            c.relN = baseRelN;
+        }
+    });
 
     const chosen = [];
     const used = new Set();
-    // `cnt` is seeded with RECENT-SLATE memory (o.recent, weights 0..1 built
-    // by buildSlateCtx from the feed-mix ledger): until 2026-10 the repeat
-    // penalty and the caps knew only the current 12, so a dominant topic won
-    // its 3 slots in EVERY consecutive batch — runs of 10-20 identical topics.
-    // Fractional prior counts make both the caps and the penalty sticky across
-    // batches; when the pool is starved the softened fallback below bends the
-    // caps instead of snapping them off. `own` counts this slate only, for the
-    // breakdown the debug output reads.
     const cnt = { era: {}, topic: {}, channel: {} };
     const own = { topic: {}, channel: {} };
     const prior = (o.recent && typeof o.recent === "object") ? o.recent : {};
@@ -8705,9 +9102,11 @@ function composeSlate(pool, n, ctx) {
         });
         return -klDivergence(p, mixed);
     };
-    const underCaps = (c) => (cnt.channel[c.channel] || 0) < capC && (cnt.topic[c.topic] || 0) < capT;
+    const underCaps = (c) => (cnt.channel[c.channel] || 0) < capC && (cnt.topic[c.topic] || 0) < capT && !c.shownRecently;
     const overCapCount = (c) =>
-        ((cnt.channel[c.channel] || 0) >= capC ? 1 : 0) + ((cnt.topic[c.topic] || 0) >= capT ? 1 : 0);
+        ((cnt.channel[c.channel] || 0) >= capC ? 1 : 0) +
+        ((cnt.topic[c.topic] || 0) >= capT ? 1 : 0) +
+        (c.shownRecently ? 1 : 0);
     const take = (c) => {
         used.add(c.i); chosen.push(c);
         cnt.era[c.era] = (cnt.era[c.era] || 0) + 1;
@@ -8716,18 +9115,15 @@ function composeSlate(pool, n, ctx) {
         own.topic[c.topic] = (own.topic[c.topic] || 0) + 1;
         own.channel[c.channel] = (own.channel[c.channel] || 0) + 1;
     };
-    const scan = (strict) => {
+    const scan = (strict, slotIdx) => {
         let best = null, bestS = -Infinity;
         for (const c of cand) {
             if (used.has(c.i)) continue;
             if (strict && !underCaps(c)) continue;
             const repeat = (cnt.topic[c.topic] || 0) + (cnt.channel[c.channel] || 0);
-            // In the relaxed scan every survivor violates a cap; the over-cap
-            // penalty keeps the choice from being an arbitrary max — the
-            // candidate violating FEWER caps wins, so a flooded pool degrades
-            // to "mostly the dominant topic" instead of "only it".
+            const topRepeatPen = (slotIdx === 0 && lastTopTopic && c.topic === lastTopTopic) ? 0.35 : 0;
             const sc = (1 - o.lambda) * c.relN + o.lambda * calibWith(c.era)
-                - o.repeatPenalty * repeat - (strict ? 0 : o.overCapPenalty * overCapCount(c));
+                - o.repeatPenalty * repeat - topRepeatPen - (strict ? 0 : o.overCapPenalty * overCapCount(c));
             if (sc > bestS) { bestS = sc; best = c; }
         }
         return best;
@@ -8744,7 +9140,7 @@ function composeSlate(pool, n, ctx) {
             }
             if (best) { take(best); exploreLeft -= 1; continue; }
         }
-        const best = scan(true) || scan(false);
+        const best = scan(true, slot) || scan(false, slot);
         if (!best) break;
         take(best);
     }
@@ -8760,11 +9156,12 @@ function composeSlate(pool, n, ctx) {
 }
 
 // Everything composeSlate needs from live state, built once per slate.
-// RECENT_SLATE_HORIZON: how long a shown topic/channel keeps damping new
-// slates. 15 minutes covers a fast scroll session (~4+ slates) and expires on
-// a coffee break; weights decay linearly to zero over the horizon.
-const RECENT_SLATE_HORIZON_MS = 15 * 60e3;
-const RECENT_SLATE_MAX_ROWS = 60;
+// RECENT_SLATE_HORIZON: 24 hours so returning across sessions within the same
+// day damps recently-shown topics/channels instead of resetting after 15 min.
+const RECENT_SLATE_HORIZON_MS = 24 * 3600e3;
+const RECENT_SLATE_MAX_ROWS = 200;
+const SHOWN_VIDEO_SUPPRESS_MS = 7 * 86400e3;
+
 function buildRecentSlateCounts(now) {
     const rows = (state.feedMix && Array.isArray(state.feedMix.shown))
         ? state.feedMix.shown.slice(-RECENT_SLATE_MAX_ROWS) : [];
@@ -8773,24 +9170,51 @@ function buildRecentSlateCounts(now) {
         const age = now - (r.t || 0);
         if (age < 0 || age > RECENT_SLATE_HORIZON_MS) return;
         const w = 1 - age / RECENT_SLATE_HORIZON_MS;
-        if (r.topic) topics[r.topic] = Math.min(2, (topics[r.topic] || 0) + w);
-        if (r.channel) channels[r.channel] = Math.min(2, (channels[r.channel] || 0) + w);
+        if (r.topic) topics[r.topic] = Math.min(2.5, (topics[r.topic] || 0) + w);
+        if (r.channel) channels[r.channel] = Math.min(2.5, (channels[r.channel] || 0) + w);
     });
     return { topic: topics, channel: channels };
+}
+
+function buildRecentShownVideoIds(now) {
+    const rows = (state.feedMix && Array.isArray(state.feedMix.shown)) ? state.feedMix.shown : [];
+    const ids = new Set();
+    let lastTopTopic = "";
+    for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r || !r.id) continue;
+        const age = now - (r.t || 0);
+        if (age >= 0 && age <= SHOWN_VIDEO_SUPPRESS_MS && !r.play && !r.like) {
+            ids.add(r.id);
+        }
+        if (age >= 0 && age <= RECENT_SLATE_HORIZON_MS && r.topic) {
+            lastTopTopic = r.topic;
+        }
+    }
+    return { ids, lastTopTopic };
 }
 
 function buildSlateCtx() {
     const now = Date.now();
     const likedChannels = new Set(getLikedChannelAffinity().keys());
+    const shownInfo = buildRecentShownVideoIds(now);
+    const likeCounts = buildTopicLikeCounts(now);
     return {
         now,
+        temperature: 0.15,
         targetEra: deriveEraPrior(undefined, now),
         likedChannels,
         recent: buildRecentSlateCounts(now),
+        shownIds: shownInfo.ids,
+        lastTopTopic: shownInfo.lastTopTopic,
         // Fresh rank from CURRENT preferences; written back so the render
         // gate and the debug breakdown read the same number.
         relevance: (v) => {
             const topic = v._topic || v.discoveryTopic || "";
+            if (topic && isIgnoredTopic(topic, likeCounts)) {
+                v._rankScore = -10;
+                return -10;
+            }
             const legacy = getScoreAndMatches(v).score;
             const r = rankScoreFor(v, { topic, likedChannels, legacyScore: legacy });
             v._rankScore = r.rankScore;
@@ -8832,7 +9256,9 @@ let _lateClassifyInFlight = 0;
 
 function scheduleLateClassification(topic, candidates) {
     if (!candidates || !candidates.length) return;
-    if (state.settings.semanticFilterEnabled === false) return;
+    // Default OFF: only run LLM candidate classification when explicitly enabled
+    // in settings (semanticFilterEnabled === true).
+    if (!state.settings || state.settings.semanticFilterEnabled !== true) return;
     _lateClassifyQueue.push({ topic, candidates });
     pumpLateClassification();
 }
@@ -8885,41 +9311,43 @@ async function fetchVideosForTopic(topic) {
             debug(`[Smart Feed Fetch] 4-way parallel for "${topic}" — recent(this year) + broad(relevance) + depth(${depthQuery}) + proven(popularity)`);
 
             const fetchOne = async (query, how, label, limit = fetchCountPerRequest) => {
-                const controller = new AbortController();
-                // The scraper queues searches behind a 3-wide gate and gives
-                // each one 25 s; abort a little above that so a queued form
-                // returns instead of being dropped at 15 s and re-asked.
-                const timeoutId = setTimeout(() => controller.abort(), 30000);
-                try {
-                    // The scraper's raw `sp` (YouTube results-filter token) wins
-                    // over `sort` when both are sent, so send exactly one.
-                    const body = {
-                        source: "youtube",
-                        query: query,
-                        limit: limit,
-                        days_back: 0,
-                        require_transcript: false
-                    };
-                    if (how && how.sp) body.sp = how.sp; else body.sort = (how && how.sort) || "relevance";
-                    const resp = await fetch("/scraper/collect", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(body),
-                        signal: controller.signal
-                    });
-                    clearTimeout(timeoutId);
-                    if (resp.ok) {
-                        const data = await resp.json();
-                        if (data && Array.isArray(data.items)) {
-                            debug(`[Smart Feed Fetch] ${label} returned ${data.items.length} videos`);
-                            return data.items;
+                return withScraperSlot(1, async () => {
+                    const controller = new AbortController();
+                    // The scraper queues searches behind a 3-wide gate and gives
+                    // each one 25 s; abort a little above that so a queued form
+                    // returns instead of being dropped at 15 s and re-asked.
+                    const timeoutId = setTimeout(() => controller.abort(), 30000);
+                    try {
+                        // The scraper's raw `sp` (YouTube results-filter token) wins
+                        // over `sort` when both are sent, so send exactly one.
+                        const body = {
+                            source: "youtube",
+                            query: query,
+                            limit: limit,
+                            days_back: 0,
+                            require_transcript: false
+                        };
+                        if (how && how.sp) body.sp = how.sp; else body.sort = (how && how.sort) || "relevance";
+                        const resp = await fetch("/scraper/collect", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(body),
+                            signal: controller.signal
+                        });
+                        clearTimeout(timeoutId);
+                        if (resp.ok) {
+                            const data = await resp.json();
+                            if (data && Array.isArray(data.items)) {
+                                debug(`[Smart Feed Fetch] ${label} returned ${data.items.length} videos`);
+                                return data.items;
+                            }
                         }
+                    } catch (err) {
+                        clearTimeout(timeoutId);
+                        console.warn(`[Smart Feed Fetch] ${label} request failed:`, err.message);
                     }
-                } catch (err) {
-                    clearTimeout(timeoutId);
-                    console.warn(`[Smart Feed Fetch] ${label} request failed:`, err.message);
-                }
-                return [];
+                    return [];
+                });
             };
 
             // Four forms, fired in parallel. Each is one yt-dlp subprocess on
@@ -9152,7 +9580,7 @@ async function fetchVideosForTopic(topic) {
 // a topic whose top results are unrelated listicle slop gets pulled from
 // the queue; one that fronts a real niche gets a weight bump. Fail-open —
 // any error just leaves topics ungated.
-const GROUNDING_LOOKAHEAD = 5;
+const GROUNDING_LOOKAHEAD = 1;
 let _groundingInProgress = false;
 let _groundingTimer = null;
 
@@ -9233,9 +9661,18 @@ function applyGroundingVerdict(topic, verdict) {
 
 async function groundNextQueuedTopics() {
     if (_groundingInProgress || !state.settings.groundingEnabled) return;
-    // Next K queue topics without a live verdict
+    // Next K queue topics without a live verdict; skip core/mined topics that
+    // already carry direct user evidence.
+    const likedSet = new Set((state.likedTopics || []).map(normalizeTopic));
     const pending = state.smartFeedTopicsQueue
-        .filter(t => !state.groundingVerdicts[normalizeTopic(t)])
+        .filter(t => {
+            const norm = normalizeTopic(t);
+            if (!norm || state.groundingVerdicts[norm]) return false;
+            if (likedSet.has(norm)) return false;
+            const entry = (state.topics || []).find(x => normalizeTopic(x.phrase) === norm);
+            if (entry && entry.role === "core") return false;
+            return true;
+        })
         .slice(0, GROUNDING_LOOKAHEAD);
     if (pending.length === 0) return;
     _groundingInProgress = true;
@@ -9323,14 +9760,20 @@ async function fillSmartFeedPreloadBuffer() {
     if (state.smartFeedPreloadLoading) {
         return currentPreloadPromise || Promise.resolve();
     }
+    // Pause background Discovery preloading while the user is browsing the
+    // Music Feed so Music Feed queries get 100% of scraper capacity.
+    if (state.currentView === "music-feed" || state.musicFeedLoading) {
+        return Promise.resolve();
+    }
     
     // Do not pre-load if there are no positive topics added yet
     if (state.topics.filter(t => t.weight > 0).length === 0) {
         return Promise.resolve();
     }
     
-    // Keep a larger buffer (1000 suggestions) for instant zero-lag loading
-    const targetPreloadCount = 1000;
+    // Keep a compact 200-suggestion reservoir so newly mined topics and freshly
+    // fetched candidates reach the screen quickly instead of sitting behind 1000 old cards.
+    const targetPreloadCount = 200;
     if (state.smartFeedSuggestionPool.length >= targetPreloadCount) {
         return Promise.resolve();
     }
