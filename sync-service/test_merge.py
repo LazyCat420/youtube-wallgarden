@@ -233,13 +233,13 @@ def test_rank_brain_topics_decays_stale_likes_and_excludes_ignored():
                 "v": {"discoveryTopic": "ceramic glaze chemistry", "matchedTopics": ["ceramic glaze chemistry", "kiln firing"]},
             },
         },
+        "mined": {
+            "v_fresh": {"t": now_ms, "topics": ["ceramic glaze chemistry", "kiln glaze"]},
+        },
         "topicSignals": {
             "oklo stock": {"t": now_ms, "c": {"cA": {"imp": 20, "play": 0, "open": 0}}, "f": {}},
             "ceramic glaze chemistry": {"t": now_ms, "c": {"cA": {"imp": 4, "play": 3, "open": 1}}, "f": {}},
             "ash glaze": {"t": now_ms, "c": {"cA": {"imp": 0, "play": 0, "open": 0}}, "f": {}},
-        },
-        "mined": {
-            "v_fresh": {"t": now_ms, "topics": ["ceramic glaze chemistry", "ash glaze"]},
         },
     }
     res = rank_brain_topics(doc, n=10, now_ms=now_ms, deterministic=True)
