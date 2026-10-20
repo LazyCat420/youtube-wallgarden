@@ -128,6 +128,7 @@ let state = {
     smartFeedPreloadLoading: false,
     smartFeedSuggestionPool: [],
     burnedQueries: [], // Rolling list of nuked topic queries the LLM should avoid re-suggesting
+    rejectedFacets: {}, // Map of facet -> { facet, fromTopic, protectedAnchors, aliases, t, permanent }
     // ── Signal ledger + agent work queue (see plan/signal_gated_topics.md) ──
     // Browsing no longer generates topics. Interest is COUNTED here, and only a
     // count crossing its threshold enqueues work for the agent.
@@ -603,6 +604,165 @@ function topicSignature(phrase) {
 // load path canonicalises.
 const BURN_PAROLE_BASE_MS = 6 * 30 * 86400e3;
 
+// Curated association clusters for polarizing modifiers. When a user burns a
+// compound topic like "vegan bbq", the positive anchor ("bbq") is protected
+// while the discriminating modifier ("vegan") and its semantic association
+// cluster ("plant-based", "meatless", "seitan", "tofu", ...) are permanently
+// blocked across topic pools and video titles.
+const FACET_ASSOCIATION_GRAPH = {
+    "vegan": ["vegan", "plant-based", "plant based", "meatless", "seitan", "tofu", "tempeh", "veganism", "dairy-free"],
+    "plant-based": ["plant-based", "plant based", "vegan", "meatless", "seitan", "tofu", "tempeh"],
+    "vegetarian": ["vegetarian", "meatless", "ovo-lacto", "plant-based"],
+    "meatless": ["meatless", "vegan", "plant-based", "plant based", "seitan"],
+    "keto": ["keto", "ketogenic", "carnivore diet", "low carb keto"],
+    "asmr": ["asmr", "whispering", "tingles", "mukbang asmr"],
+    "mukbang": ["mukbang", "eating show", "food challenge"],
+    "prank": ["prank", "pranks", "social experiment prank"],
+    "reaction": ["reaction", "reacts to", "first time reacting"],
+    "reacts": ["reacts", "reaction", "reacts to"],
+    "unboxing": ["unboxing", "haul", "mystery box"],
+    "crypto": ["crypto", "cryptocurrency", "bitcoin", "altcoin", "web3", "memecoin", "nft"],
+    "nft": ["nft", "nfts", "web3", "crypto art", "metaverse"],
+    "forex": ["forex", "day trading", "binary options", "scalping signals"],
+    "astrology": ["astrology", "horoscope", "zodiac sign", "natal chart", "tarot"],
+    "tarot": ["tarot", "tarot reading", "astrology", "horoscope", "manifestation"],
+    "manifestation": ["manifestation", "law of attraction", "subliminal", "chakra"],
+    "chakra": ["chakra", "chakras", "reiki", "crystal healing", "aura cleansing"],
+    "roblox": ["roblox", "brookhaven", "robux", "blox fruits"],
+    "fortnite": ["fortnite", "vbucks", "battle royale montage"]
+};
+
+function collectPositiveAnchorTokens(excludePhrase) {
+    const pos = new Set();
+    const excl = normalizeTopic(excludePhrase);
+    const addWords = (text) => {
+        if (!text) return;
+        const norm = normalizeTopic(text);
+        if (!norm || norm === excl) return;
+        norm.split(/[^a-z0-9-]+/).forEach(w => {
+            if (w.length > 2 && !TOPIC_STOPWORDS.has(w)) pos.add(w);
+        });
+    };
+
+    (state.likedTopics || []).forEach(addWords);
+    (state.likedVideos || []).forEach(v => {
+        if (!v) return;
+        if (v.title && v.title !== "Liked Video (Synced)") addWords(v.title);
+        if (v.discoveryTopic) addWords(v.discoveryTopic);
+        (v.matchedTopics || []).forEach(t => {
+            if (typeof t === "string" && !t.startsWith("disliked:")) addWords(t);
+        });
+    });
+    const likeCounts = typeof buildTopicLikeCounts === "function" ? buildTopicLikeCounts() : {};
+    Object.entries(state.ratingStates || {}).forEach(([id, st]) => {
+        if (!st || st.r !== 5 || !st.v) return;
+        if (st.v.title && st.v.title !== "Liked Video (Synced)") addWords(st.v.title);
+        if (st.v.discoveryTopic) addWords(st.v.discoveryTopic);
+        (st.v.matchedTopics || []).forEach(t => {
+            if (typeof t === "string" && !t.startsWith("disliked:")) addWords(t);
+        });
+        (((state.minedVideos || {})[id] || {}).topics || []).forEach(addWords);
+    });
+    (state.topics || []).forEach(t => {
+        if (!t || !t.phrase || t.weight <= 0) return;
+        const p = normalizeTopic(t.phrase);
+        if (p === excl) return;
+        // Only topics with explicit user engagement (liked, played, or core role)
+        // act as positive anchors for contrastive facet splitting.
+        const engaged = (likeCounts[p] || 0) >= 0.5 ||
+            (typeof topicSignalTotal === "function" && (topicSignalTotal(p, "play") > 0 || topicSignalTotal(p, "open") >= 2)) ||
+            t.role === "core";
+        if (engaged) addWords(p);
+    });
+    return pos;
+}
+
+/**
+ * Contrastive discriminating-facet extraction when burning a phrase.
+ * If `phrase` is a compound topic containing a positive anchor (e.g. "bbq")
+ * alongside an unprotected modifier (e.g. "vegan"), or contains a known
+ * polarizing modifier from FACET_ASSOCIATION_GRAPH, the positive anchor is
+ * spared while the discriminating modifier and its association cluster are
+ * permanently added to `state.rejectedFacets`.
+ */
+function extractRejectedFacets(burnedPhrase) {
+    const norm = normalizeTopic(burnedPhrase);
+    if (!norm) return { protectedAnchors: [], extracted: {} };
+    const tokens = norm.split(/[^a-z0-9-]+/).filter(w => w.length > 2 && !TOPIC_STOPWORDS.has(w));
+    if (tokens.length === 0) return { protectedAnchors: [], extracted: {} };
+
+    const posTokens = collectPositiveAnchorTokens(norm);
+    const protectedAnchors = tokens.filter(w => posTokens.has(w));
+    const unprotected = tokens.filter(w => !posTokens.has(w));
+    const hasPositiveAnchor = protectedAnchors.length > 0;
+    const extracted = {};
+    const now = Date.now();
+
+    if (!state.rejectedFacets || typeof state.rejectedFacets !== "object") {
+        state.rejectedFacets = {};
+    }
+
+    unprotected.forEach(w => {
+        const isKnownModifier = Object.prototype.hasOwnProperty.call(FACET_ASSOCIATION_GRAPH, w);
+        // Only extract a single-token permanent facet block when:
+        //  (a) it is a known polarizing modifier in FACET_ASSOCIATION_GRAPH, OR
+        //  (b) the burned phrase contrasts a confirmed positive anchor ("bbq")
+        //      with a discriminating modifier ("vegan").
+        if (hasPositiveAnchor || isKnownModifier) {
+            const rawAliases = FACET_ASSOCIATION_GRAPH[w] || [w];
+            const safeAliases = [];
+            rawAliases.forEach(al => {
+                const alNorm = normalizeTopic(al);
+                const alTokens = alNorm.split(/[^a-z0-9-]+/).filter(tok => tok.length > 2);
+                if (alNorm && !alTokens.some(tok => posTokens.has(tok))) {
+                    if (!safeAliases.includes(alNorm)) safeAliases.push(alNorm);
+                }
+            });
+            if (!safeAliases.includes(w)) safeAliases.unshift(w);
+            const rec = {
+                facet: w,
+                fromTopic: norm,
+                protectedAnchors,
+                aliases: safeAliases,
+                t: now,
+                permanent: true
+            };
+            state.rejectedFacets[w] = rec;
+            extracted[w] = rec;
+        }
+    });
+
+    if (Object.keys(extracted).length > 0) {
+        saveRejectedFacets();
+    }
+    return { protectedAnchors, extracted };
+}
+
+/**
+ * Returns the rejected facet key if `text` contains any active rejected facet
+ * or one of its association aliases on word boundaries; otherwise null.
+ */
+function isRejectedByFacet(text) {
+    if (!text || !state.rejectedFacets || typeof state.rejectedFacets !== "object") return null;
+    const norm = normalizeTopic(text);
+    if (!norm) return null;
+    const facets = Object.entries(state.rejectedFacets);
+    if (facets.length === 0) return null;
+
+    for (const [facet, rec] of facets) {
+        if (!rec || rec.deleted) continue;
+        const aliases = Array.isArray(rec.aliases) && rec.aliases.length ? rec.aliases : [facet];
+        for (const al of aliases) {
+            const alNorm = normalizeTopic(String(al || ""));
+            if (!alNorm) continue;
+            const escaped = alNorm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const re = new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, "i");
+            if (re.test(norm)) return facet;
+        }
+    }
+    return null;
+}
+
 function burnRecord(b) {
     if (typeof b === "string") return { q: normalizeTopic(b), t: Date.now(), strikes: 1 };
     return { q: normalizeTopic(b.q), t: b.t || Date.now(), strikes: b.strikes || 1 };
@@ -658,6 +818,7 @@ function isBurned(phrase) {
     if (!normalized) return false;
     const { exact, sigs } = getBurnedSignatures();
     if (exact.has(normalized)) return true;
+    if (isRejectedByFacet(normalized)) return true;
 
     const sig = topicSignature(normalized);
     if (sig.length === 0) return false;
@@ -695,6 +856,11 @@ function burnTopic(phrase) {
     }
     invalidateBurnedSignatures();
     saveBurnedQueries();
+
+    // 1b. Contrastive discriminating-facet extraction: if burning "vegan bbq"
+    //     while "bbq" is a positive anchor, protect "bbq" and permanently block
+    //     "vegan" + its association cluster ("plant-based", "meatless", "seitan", ...).
+    extractRejectedFacets(normalized);
 
     // 2. Make it an actual negative signal. Without this the topic kept its
     //    positive weight everywhere except the suggestion list. Entries added
@@ -736,13 +902,18 @@ function burnTopic(phrase) {
         });
     }
 
-    // 5. Now forget it everywhere it could still surface.
-    state.likedTopics = (state.likedTopics || []).filter(t => t.toLowerCase() !== normalized);
+    // 5. Now forget it everywhere it could still surface, along with any topic
+    //    that matches a newly extracted rejected facet.
+    const shouldDropTopic = (p) => {
+        const normP = normalizeTopic(p);
+        return normP === normalized || !!isRejectedByFacet(normP);
+    };
+    state.likedTopics = (state.likedTopics || []).filter(t => !shouldDropTopic(t));
     saveLikedTopics();
-    state.searchHistory = (state.searchHistory || []).filter(q => q.toLowerCase() !== normalized);
+    state.searchHistory = (state.searchHistory || []).filter(q => !shouldDropTopic(q));
     saveSearchHistory();
-    state.smartFeedTopicsQueue = (state.smartFeedTopicsQueue || []).filter(t => t.toLowerCase() !== normalized);
-    state.topics = (state.topics || []).filter(t => t.phrase.toLowerCase() !== normalized);
+    state.smartFeedTopicsQueue = (state.smartFeedTopicsQueue || []).filter(t => !shouldDropTopic(t));
+    state.topics = (state.topics || []).filter(t => !shouldDropTopic(t.phrase));
     saveTopics();
     invalidateScoreCache();
 
@@ -751,7 +922,10 @@ function burnTopic(phrase) {
     //    pool (only the manual nuke path open-coded this cleanup), plus a
     //    ledger record and a grounding verdict for a topic that no longer
     //    exists.
-    const matchesBurned = v => ((v.discoveryTopic || v._topic || v.topic || "").trim().toLowerCase() === normalized);
+    const matchesBurned = v => {
+        const vt = (v.discoveryTopic || v._topic || v.topic || "").trim().toLowerCase();
+        return vt === normalized || !!isRejectedByFacet(vt) || !!isRejectedByFacet(v.title || "");
+    };
     if (Array.isArray(state.smartFeedSuggestionPool)) {
         const beforePool = state.smartFeedSuggestionPool.length;
         state.smartFeedSuggestionPool = state.smartFeedSuggestionPool.filter(v => !matchesBurned(v));
@@ -1172,6 +1346,8 @@ function loadState() {
     state.playlistStates = rawPlaylistStates ? JSON.parse(rawPlaylistStates) : {};
     const rawAvoided = getStoredItem("avoided_videos");
     state.avoidedVideos = rawAvoided ? JSON.parse(rawAvoided) : {};
+    const rawRejectedFacets = getStoredItem("rejected_facets");
+    state.rejectedFacets = rawRejectedFacets ? JSON.parse(rawRejectedFacets) : {};
     state.discoveredChannels = rawDiscovered ? JSON.parse(rawDiscovered) : [];
     state.smartFeedSuggestionPool = rawPool ? JSON.parse(rawPool) : [];
     // Canonicalise legacy bare-string burns into {q,t,strikes} records. The
@@ -1717,6 +1893,7 @@ function saveCandidateClassificationCache() { persistField("candidate_classifica
 function saveCache()          { persistField("cache", state.cache); }
 function saveVideoRatings()   { persistField("video_ratings", state.videoRatings); schedulePushRemoteState(); }
 function saveAvoidedVideos()  { persistField("avoided_videos", state.avoidedVideos); schedulePushRemoteState(); }
+function saveRejectedFacets() { persistField("rejected_facets", state.rejectedFacets); schedulePushRemoteState(); }
 function saveNewsRatings()    { persistField("news_ratings", state.newsSourceRatings); }
 function saveLikedVideos()    {
     persistField("liked_videos", state.likedVideos);
@@ -2059,7 +2236,8 @@ function _wgSyncSnapshot() {
         watched: state.watchedHistory || {},
         mined: state.minedVideos || {},
         topicSignals: state.topicSignals || {},
-        avoided: state.avoidedVideos || {}
+        avoided: state.avoidedVideos || {},
+        rejectedFacets: state.rejectedFacets || {}
     };
     // Only ship a profile that exists — an empty object would fight the
     // server's LWW merge for no reason.
@@ -2198,6 +2376,12 @@ function _wgApplyRemoteFields(fields) {
             if (!state.avoidedVideos) state.avoidedVideos = {};
             if (_wgMergeLwwInto(state.avoidedVideos, fields.avoided)) {
                 saveAvoidedVideos();
+            }
+        }
+        if (fields.rejectedFacets) {
+            if (!state.rejectedFacets) state.rejectedFacets = {};
+            if (_wgMergeLwwInto(state.rejectedFacets, fields.rejectedFacets)) {
+                persistField("rejected_facets", state.rejectedFacets);
             }
         }
         if (fields.watched) {
@@ -9526,17 +9710,18 @@ async function fetchVideosForTopic(topic) {
             const isWatched = state.watchedHistory && state.watchedHistory[v.id];
             const isDisliked = state.videoRatings && state.videoRatings[v.id] < 0;
 
-            // Deterministic hard exclusion: if title matches topic's excludeFacets or novelty pattern
+            // Deterministic hard exclusion: if title matches topic's excludeFacets, rejectedFacets, or novelty pattern
             const titleLower = (v.title || "").toLowerCase();
             const isExcludedFacet = policy.excludeFacets && policy.excludeFacets.some(f => titleLower.includes(f.toLowerCase()));
+            const rejectedFacetHit = isRejectedByFacet(v.title || "") || isRejectedByFacet(topic);
             const isHardNovelty = WG_NOVELTY_RE.test(v.title || "") && !/\b(lego|minecraft|roblox|toy|brick)\b/i.test(topic);
 
-            if (isExcludedFacet || isHardNovelty) {
+            if (isExcludedFacet || rejectedFacetHit || isHardNovelty) {
                 v._classification = "NOVELTY";
-                v._classificationReason = isExcludedFacet ? "excluded facet match" : "novelty pattern match";
+                v._classificationReason = rejectedFacetHit ? `rejected facet (${rejectedFacetHit})` : (isExcludedFacet ? "excluded facet match" : "novelty pattern match");
             }
 
-            return !isBlockedChannel && !isWatched && !isDisliked && v.score > -10;
+            return !isBlockedChannel && !isWatched && !isDisliked && !rejectedFacetHit && v.score > -10;
         });
 
         if (Object.keys(spamDropped).length) {
@@ -9659,6 +9844,62 @@ function applyGroundingVerdict(topic, verdict) {
     }
 }
 
+function groundTopicItemLocally(item) {
+    if (!item || !item.topic) return { topic: "", verdict: "MIXED" };
+    const topic = normalizeTopic(item.topic);
+    if (isRejectedByFacet(topic)) {
+        return { topic: item.topic, verdict: "SLOP", reason: "rejected facet" };
+    }
+    const results = Array.isArray(item.results) ? item.results : [];
+    const titles = Array.isArray(item.titles) && item.titles.length
+        ? item.titles
+        : results.map(r => r && r.title).filter(Boolean);
+    if (titles.length === 0) {
+        return { topic: item.topic, verdict: "DEAD", reason: "no results" };
+    }
+    const topicTokens = topicSignature(topic);
+    const channels = new Set((item.channels || []).map(c => String(c || "").toLowerCase()).filter(Boolean));
+    const views = [];
+    const years = [];
+    let spamHits = 0;
+    let tokenMatches = 0;
+
+    titles.forEach((tStr, idx) => {
+        if (WG_CLICKBAIT_RE.test(tStr) || WG_NOVELTY_RE.test(tStr) || isRejectedByFacet(tStr)) {
+            spamHits += 1;
+        }
+        const tSig = new Set(topicSignature(tStr));
+        if (topicTokens.length === 0 || topicTokens.some(w => tSig.has(w))) {
+            tokenMatches += 1;
+        }
+        const r = results[idx];
+        if (r) {
+            if (r.channel) channels.add(String(r.channel).toLowerCase());
+            if (typeof r.views === "number") views.push(r.views);
+            if (typeof r.year === "number") years.push(r.year);
+        }
+    });
+
+    const n = titles.length;
+    const spamRatio = spamHits / n;
+    const matchRatio = tokenMatches / n;
+    const sortedViews = views.slice().sort((a, b) => a - b);
+    const medianViews = sortedViews.length ? sortedViews[Math.floor(sortedViews.length / 2)] : 5000;
+    const currentYear = new Date().getUTCFullYear();
+    const maxYear = years.length ? Math.max(...years) : currentYear;
+
+    if (maxYear < currentYear - 10 && medianViews < 300) {
+        return { topic: item.topic, verdict: "DEAD", reason: "dormant low-view results" };
+    }
+    if (spamRatio >= 0.5 || matchRatio < 0.2) {
+        return { topic: item.topic, verdict: "SLOP", reason: "high spam or low token match" };
+    }
+    if (matchRatio >= 0.5 && spamRatio <= 0.25 && (channels.size >= 2 || n < 3)) {
+        return { topic: item.topic, verdict: "REAL", reason: "strong lexical match and channel diversity" };
+    }
+    return { topic: item.topic, verdict: "MIXED", reason: "mixed signal" };
+}
+
 async function groundNextQueuedTopics() {
     if (_groundingInProgress || !state.settings.groundingEnabled) return;
     // Next K queue topics without a live verdict; skip core/mined topics that
@@ -9682,24 +9923,31 @@ async function groundNextQueuedTopics() {
         for (const topic of pending) {
             // One cheap relevance search per topic — sequential, kind to yt-dlp.
             try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 15000);
-                const resp = await fetch("/scraper/collect", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        source: "youtube",
-                        query: topic,
-                        limit: 8,
-                        days_back: 0,
-                        require_transcript: false,
-                        sort: "relevance"
-                    }),
-                    signal: controller.signal
+                const results = await withScraperSlot(1, async () => {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 15000);
+                    try {
+                        const resp = await fetch("/scraper/collect", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                source: "youtube",
+                                query: topic,
+                                limit: 8,
+                                days_back: 0,
+                                require_transcript: false,
+                                sort: "relevance"
+                            }),
+                            signal: controller.signal
+                        });
+                        clearTimeout(timeoutId);
+                        const data = resp.ok ? await resp.json() : null;
+                        return (data && Array.isArray(data.items)) ? data.items : [];
+                    } catch (e) {
+                        clearTimeout(timeoutId);
+                        throw e;
+                    }
                 });
-                clearTimeout(timeoutId);
-                const data = resp.ok ? await resp.json() : null;
-                const results = (data && Array.isArray(data.items)) ? data.items : [];
                 if (results.length === 0) {
                     applyGroundingVerdict(topic, "DEAD");
                 } else {
@@ -9707,8 +9955,6 @@ async function groundNextQueuedTopics() {
                         topic,
                         titles: results.map(r => r.title).filter(Boolean).slice(0, 8),
                         channels: [...new Set(results.map(r => r.channel).filter(Boolean))].slice(0, 8),
-                        // Views + upload year let the judge tell a dead scene
-                        // from a live one (verdict DEAD); older backends ignore it.
                         results: results.filter(r => r && r.title).slice(0, 8).map(r => ({
                             title: r.title,
                             channel: r.channel || undefined,
@@ -9723,18 +9969,29 @@ async function groundNextQueuedTopics() {
         }
 
         if (items.length > 0) {
-            const resp = await countedFetch("/api/wallgarden/judge-topics", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ items }),
-                signal: AbortSignal.timeout(120000)
-            });
-            if (resp.ok) {
-                const data = await resp.json();
-                (data.verdicts || []).forEach(v => {
-                    if (v && v.topic && v.verdict) applyGroundingVerdict(v.topic, v.verdict);
+            // Algorithmic grounding on NAS CPU (/sync/brain/ground) with local
+            // deterministic fallback — 0 LLM calls on the Jetson.
+            let verdicts = null;
+            try {
+                const resp = await fetch("/sync/brain/ground", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ items, rejectedFacets: state.rejectedFacets || {} }),
+                    signal: AbortSignal.timeout(5000)
                 });
+                if (resp && resp.ok) {
+                    const data = await resp.json();
+                    if (data && Array.isArray(data.verdicts)) verdicts = data.verdicts;
+                }
+            } catch (e) {
+                // Fall back to deterministic in-browser scorer
             }
+            if (!verdicts) {
+                verdicts = items.map(groundTopicItemLocally);
+            }
+            verdicts.forEach(v => {
+                if (v && v.topic && v.verdict) applyGroundingVerdict(v.topic, v.verdict);
+            });
         }
         saveGroundingVerdicts();
         saveTopics();
@@ -9971,11 +10228,12 @@ async function loadNextSmartFeedBatch() {
             v.matchedTopics = evaluation.matches;
             
             const isBlockedChannel = isChannelBlocked(v.channelId, v.channelName);
+            const rejectedFacetHit = isRejectedByFacet(v.title || "") || isRejectedByFacet(v.discoveryTopic || v._topic || "");
             
             // Both scales gate here: the legacy keyword score (-10 floor) and
             // the unified rank the slate was composed on (-5 floor).
             const rankOk = typeof v._rankScore !== "number" || v._rankScore > -5;
-            return !isBlockedChannel && v.score > -10 && rankOk;
+            return !isBlockedChannel && !rejectedFacetHit && v.score > -10 && rankOk;
         });
         
         const existingIds = new Set(state.smartFeedVideos.map(v => v.id));

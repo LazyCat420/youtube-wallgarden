@@ -36,6 +36,12 @@ from fastapi import Body, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 
+from brain_graph import (
+    extract_discriminating_facets,
+    ground_topics_algorithmically,
+    rank_brain_topics,
+)
+
 MONGO_URI = os.environ.get("MONGO_URI")
 DB_NAME = os.environ.get("WALLGARDEN_MONGO_DB", "wallgarden")
 DOC_ID = "global"  # single monolithic document
@@ -71,7 +77,19 @@ app.add_middleware(
 #   _merge_topic_signals.
 # * `avoided`: { videoId: { t, channelName, title, reason } } — unclicked
 #   YouTube FYP recommendations or rejected videos to avoid in feeds.
-SYNC_FIELDS = ["ratings", "queue", "playlists", "watched", "mined", "profile", "topicSignals", "avoided"]
+# * `rejectedFacets`: { facet: { facet, fromTopic, protectedAnchors, aliases, t, permanent } } —
+#   discriminating negative modifiers extracted when burning compound topics.
+SYNC_FIELDS = [
+    "ratings",
+    "queue",
+    "playlists",
+    "watched",
+    "mined",
+    "profile",
+    "topicSignals",
+    "avoided",
+    "rejectedFacets",
+]
 
 
 def _merge_lww_map(base, incoming):
@@ -189,6 +207,7 @@ _MERGERS = {
     "topicSignals": _merge_topic_signals,
     "profile": _merge_profile,
     "avoided": _merge_lww_map,
+    "rejectedFacets": _merge_lww_map,
 }
 
 
@@ -204,6 +223,43 @@ def health():
         return {"ok": True, "db": DB_NAME}
     except Exception as exc:  # noqa: BLE001 — report, don't crash the probe
         return {"ok": False, "error": str(exc)}
+
+
+@app.get("/sync/brain/recommendations")
+def get_brain_recommendations(n: int = 30):
+    doc = _state.find_one({"_id": DOC_ID}) or {}
+    return rank_brain_topics(doc, n=n)
+
+
+@app.post("/sync/brain/ground")
+def post_brain_ground(body: dict = Body(default={})):
+    doc = _state.find_one({"_id": DOC_ID}) or {}
+    items = (body or {}).get("items") or []
+    rejected_facets = (body or {}).get("rejectedFacets") or doc.get("rejectedFacets") or {}
+    verdicts = ground_topics_algorithmically(items, rejected_facets=rejected_facets)
+    return {"verdicts": verdicts, "count": len(verdicts), "failed": False}
+
+
+@app.post("/sync/brain/reject-facet")
+def post_brain_reject_facet(body: dict = Body(default={})):
+    phrase = (body or {}).get("phrase") or ""
+    positive_phrases = (body or {}).get("positivePhrases") or []
+    doc = _state.find_one({"_id": DOC_ID}) or {}
+    res = extract_discriminating_facets(phrase, doc=doc, extra_positive_phrases=positive_phrases)
+    if res.get("rejectedFacets"):
+        merged_facets = _merge_lww_map(doc.get("rejectedFacets") or {}, res["rejectedFacets"])
+        _state.update_one(
+            {"_id": DOC_ID},
+            {
+                "$set": {
+                    "rejectedFacets": merged_facets,
+                    "updatedAt": datetime.now(timezone.utc).isoformat(),
+                }
+            },
+            upsert=True,
+        )
+        res["mergedRejectedFacets"] = merged_facets
+    return res
 
 
 # The {profile} segment is accepted for URL/nginx compatibility but ignored:

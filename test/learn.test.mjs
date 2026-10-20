@@ -178,4 +178,31 @@ pruneTopicPool();
 assert.strictEqual(w("Raku Firing"), 6, "a recent signal keeps a mixed-case topic fresh");
 console.log("✅ freshness lookup matches ledger keys case-insensitively");
 
+// ── 9. burning 'vegan bbq' protects 'bbq' and blocks 'vegan' + aliases ──
+const isRejectedByFacet = get("isRejectedByFacet");
+reset(fresh());
+S.likedTopics = ["texas brisket bbq"];
+S.topics.push(
+  { phrase: "texas brisket bbq", weight: 10, role: "core", addedAt: Date.now() },
+  { phrase: "offset smoker bbq", weight: 8, role: "core", addedAt: Date.now() },
+  { phrase: "vegan bbq", weight: 5, addedAt: Date.now() },
+  { phrase: "vegan ribs", weight: 5, addedAt: Date.now() },
+  { phrase: "plant-based brisket", weight: 5, addedAt: Date.now() }
+);
+burnTopic("vegan bbq");
+assert.strictEqual(w("texas brisket bbq"), 10, "positive BBQ anchor retains full weight");
+assert.strictEqual(w("offset smoker bbq"), 8, "sibling BBQ topic retains full weight");
+assert.ok(!isBurned("texas brisket bbq"), "texas brisket bbq is not burned");
+assert.ok(!isBurned("offset smoker bbq"), "offset smoker bbq is not burned");
+assert.ok(!isBurned("bbq"), "general bbq is not burned");
+assert.ok(isBurned("vegan bbq"), "exact phrase burned");
+assert.ok(isBurned("vegan"), "discriminating facet 'vegan' permanently blocked");
+assert.ok(isBurned("vegan ribs"), "vegan sibling blocked via rejectedFacet");
+assert.ok(isBurned("plant-based brisket"), "semantic alias 'plant-based' blocked via FACET_ASSOCIATION_GRAPH");
+assert.ok(isBurned("seitan smoker"), "semantic alias 'seitan' blocked via FACET_ASSOCIATION_GRAPH");
+assert.strictEqual(isRejectedByFacet("How to make seitan ribs"), "vegan", "video title matching alias is rejected");
+assert.strictEqual(isRejectedByFacet("Texas Brisket BBQ Smoking Guide"), null, "BBQ video title is allowed");
+console.log("✅ burning 'vegan bbq' protects 'bbq' and blocks 'vegan' + association cluster");
+
+
 console.log("\nAll learning tests passed.");

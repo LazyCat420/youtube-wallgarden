@@ -20,6 +20,12 @@ from main import (  # noqa: E402
     _merge_topic_signals,
     _merge_watched,
 )
+from brain_graph import (  # noqa: E402
+    extract_discriminating_facets,
+    ground_topics_algorithmically,
+    is_rejected_by_facets,
+    rank_brain_topics,
+)
 
 
 # ── ratings / queue: per-key last-write-wins ────────────────────────────────
@@ -184,6 +190,92 @@ def test_signals_fired_marks_take_max():
 def test_signals_tolerate_garbage():
     assert _merge_topic_signals({}, {"x": "not a dict"}) == {}
     assert _merge_topic_signals({}, {"x": {"c": {"cA": "nope"}}})["x"]["c"] == {}
+
+
+# ── brain_graph: discriminating facets, PPR + Thompson, algorithmic grounding ──
+
+def test_vegan_bbq_extracts_vegan_and_protects_bbq():
+    doc = {
+        "ratings": {
+            "v1": {
+                "r": 5,
+                "t": 1700000000000,
+                "v": {"title": "Texas Brisket BBQ Smoking Guide", "discoveryTopic": "texas brisket bbq"},
+            }
+        }
+    }
+    res = extract_discriminating_facets("vegan bbq", doc=doc, now_ms=1700000000000)
+    assert res["protectedAnchors"] == ["bbq"]
+    assert "vegan" in res["rejectedFacets"]
+    assert "bbq" not in res["rejectedFacets"]
+    facets = res["rejectedFacets"]
+    assert is_rejected_by_facets("vegan bbq", facets) == "vegan"
+    assert is_rejected_by_facets("vegan ribs", facets) == "vegan"
+    assert is_rejected_by_facets("plant-based brisket", facets) == "vegan"
+    assert is_rejected_by_facets("seitan smoker", facets) == "vegan"
+    assert is_rejected_by_facets("texas brisket bbq", facets) is None
+    assert is_rejected_by_facets("offset smoker bbq", facets) is None
+
+
+def test_rank_brain_topics_decays_stale_likes_and_excludes_ignored():
+    now_ms = 1700000000000
+    ninety_days_ago = now_ms - 90 * 86400 * 1000
+    doc = {
+        "ratings": {
+            "v_stale": {
+                "r": 5,
+                "t": ninety_days_ago,
+                "v": {"discoveryTopic": "oklo stock", "matchedTopics": ["oklo stock"]},
+            },
+            "v_fresh": {
+                "r": 5,
+                "t": now_ms - 86400 * 1000,
+                "v": {"discoveryTopic": "ceramic glaze chemistry", "matchedTopics": ["ceramic glaze chemistry", "kiln firing"]},
+            },
+        },
+        "topicSignals": {
+            "oklo stock": {"t": now_ms, "c": {"cA": {"imp": 20, "play": 0, "open": 0}}, "f": {}},
+            "ceramic glaze chemistry": {"t": now_ms, "c": {"cA": {"imp": 4, "play": 3, "open": 1}}, "f": {}},
+            "ash glaze": {"t": now_ms, "c": {"cA": {"imp": 0, "play": 0, "open": 0}}, "f": {}},
+        },
+        "mined": {
+            "v_fresh": {"t": now_ms, "topics": ["ceramic glaze chemistry", "ash glaze"]},
+        },
+    }
+    res = rank_brain_topics(doc, n=10, now_ms=now_ms, deterministic=True)
+    rec_topics = [r["topic"] for r in res["recommendations"]]
+    assert "oklo stock" not in rec_topics, "stale 90d single-like topic with 20 unplayed impressions must be excluded"
+    assert rec_topics[0] == "ceramic glaze chemistry"
+    frontier_topics = [r["topic"] for r in res["exploreFrontier"]]
+    assert "ash glaze" in frontier_topics, "co-mined unshown topic should appear in exploreFrontier via PPR"
+
+
+def test_ground_topics_algorithmically_classifies_real_dead_slop():
+    verdicts = ground_topics_algorithmically([
+        {
+            "topic": "ceramic glaze chemistry",
+            "results": [
+                {"title": "Understanding Ceramic Glaze Chemistry", "channel": "Pottery Lab", "views": 15000, "year": 2025},
+                {"title": "Ceramic Glaze Chemistry: Silica and Alumina", "channel": "Kiln Craft", "views": 8200, "year": 2024},
+                {"title": "Glaze Chemistry Basics for Potters", "channel": "Earth Studio", "views": 24000, "year": 2025},
+            ],
+        },
+        {
+            "topic": "empty niche xyz",
+            "results": [],
+        },
+        {
+            "topic": "shocking clickbait",
+            "results": [
+                {"title": "YOU WON'T BELIEVE WHAT HAPPENED!!! GONE WRONG", "channel": "SlopCh", "views": 90000, "year": 2025},
+                {"title": "TOP 10 INSANE SHOCKING MOMENTS EXPOSED!!!", "channel": "SlopCh2", "views": 50000, "year": 2025},
+            ],
+        },
+    ])
+    by_topic = {v["topic"]: v["verdict"] for v in verdicts}
+    assert by_topic["ceramic glaze chemistry"] == "REAL"
+    assert by_topic["empty niche xyz"] == "DEAD"
+    assert by_topic["shocking clickbait"] == "SLOP"
 
 
 def _run_all():
