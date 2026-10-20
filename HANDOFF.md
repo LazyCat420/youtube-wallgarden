@@ -1,3 +1,30 @@
+# Handoff — Discovery Feed Decay & Stochastic Slate, Smart Brain Graph (PPR + Thompson Sampling), Contrastive Facet Burn, Jetson Gate (`nemotron35`) & Music-Player Integration (2026-10-20)
+
+Fixes the Discovery Feed stagnation (`"oklo stock"` monopoly and unresponsiveness to likes/watches), builds a server-side algorithmic Smart Brain Graph (`sync-service/brain_graph.py`) so the Jetson (`nemotron35`) is reserved strictly for creative topic generation, implements contrastive discriminating-facet blocking so burning `"vegan bbq"` blocks `"vegan"` + its cluster while protecting `"bbq"`, and repairs the Music Feed (`sw.js` syntax error, nginx `502 Bad Gateway` buffer overflow, `music-player` API integration, and single-query throttled fetching). Assets bumped to `?v=20261020-v71`.
+
+## What changed
+- **Discovery Feed Engagement Responsiveness & Decay (`app/app.js`, commits `37f827a`, `646c284`)**:
+  - **30-Day Exponential Like Decay**: `getTopicEngagement(topic)` computes `decayedLikes` with a 30-day half-life (`0.5^(ageDays / 30)`). `isIgnoredTopic(topic, eng)` uses `(eng.decayedLikes ?? eng.likes) < 0.25` so stale 1-like topics (`"oklo stock"`, 89 days old with 20 unplayed impressions) lose permanent `PROVEN` immunity and retire after 6 unengaged impressions.
+  - **Self-Match Double-Bonus Removal**: `getScoreAndMatches()` skips `vTopic === normTopic` so an unliked `discoveryTopic` tag no longer awards a synthetic `+30` match score.
+  - **Stochastic Slate Sampling & 24h Cross-Slate Memory**: `composeSlate()` adds Gumbel-top-$k$ noise (`temperature: 0.15` in `buildSlateCtx`), enforces `lastTopTopic` anti-repeat on slot 0, widens cross-slate topic decay to `RECENT_SLATE_HORIZON_MS = 24h`, and suppresses unengaged shown videos for 7 days (`SHOWN_VIDEO_SUPPRESS_MS`).
+  - **Fast Pool Turnover & Priority-0 Mined Topics**: `smartFeedSuggestionPool` shrunk from `1000` (14d TTL) to `200` (3d TTL), `WG_POOL_VERSION = "4"` flushes stale pool state, and newly mined topics from watched/liked videos are `unshift`ed to index 0 of `smartFeedTopicsQueue` with immediate incremental pool eviction.
+  - **Engagement-Gated Expansion**: `recordTopicOutcome(topic, "imp")` never triggers `expandLovedTopic`; child topics with `parentTopic` require $\ge 1$ play or like before spawning grandchildren.
+- **Contrastive Discriminating-Facet Blocking (`app/app.js`, commit `4cbbd2b`)**:
+  - Burning a compound topic (e.g. `"vegan bbq"`) calls `computeContrastiveFacetBlock(topic, ctx)`, extracting protected positive heads (`"bbq"`, `"grilling"`, `"smoking"`, `"brisket"`) from liked/custom/played history and blocking only the discriminating modifier (`"vegan"`) plus its semantic cluster (`"plant-based"`, `"meatless"`, `"seitan"`, `"tofu"`, `"tempeh"`, `"veganism"`, `"dairy-free"`) in `blockedFacets` (synced via `sync-service/main.py`).
+- **Music Feed Repair & `music-player` Integration (`app/sw.js`, `nginx.conf`, `app/app.js`, commit `e5b547e`)**:
+  - Fixed top-level `return;` syntax error in `app/sw.js`.
+  - Fixed nginx `502 Bad Gateway` (`upstream sent too big header`) on `/youtube/results` by adding `proxy_buffer_size 32k; proxy_buffers 8 32k; proxy_busy_buffers_size 64k;`, and added `/music-api/` reverse proxy to `music-player` (`http://10.0.0.16:5009/api/`).
+  - Hydrates music seeds from `music-player` (`/music-api/favorites`, `/music-api/music/history/recent`, `/music-api/music/history/popular`, `/music-api/artists/stats`, `/music-api/graph/discovered`), tightens hyphenated video title splits so non-music titles (`"How Slipcasting Works"`, `"A Coupla Fat Guys Cooking Show"`) are rejected, replaces 4-way `fetchVideosForTopic` with single-query `fetchMusicVideosForQuery` through a shared 4-slot client semaphore (`withScraperSlot`), and caps each artist at 2 tracks per batch.
+- **Smart Brain Graph (`sync-service/brain_graph.py`, `sync-service/main.py`, `Dockerfile`, commit `bc27cd9`)**:
+  - Runs Personalized PageRank ($\alpha = 0.85$) over a multi-edge co-engagement/lineage/token-Jaccard topic graph combined with Beta-Bernoulli Thompson Sampling ($\text{Beta}(1 + \text{plays} + 2\cdot\text{likes}_{\text{decayed}}, 1 + 0.35\cdot\text{ignored\_imps})$), deterministic `<5ms` grounding (`POST /sync/brain/ground`), and frontier novelty detection (`GET /sync/brain/recommendations`, `GET /sync/brain/frontier-seeds`).
+- **Jetson `nemotron35` Gate (`lazy-agent-service@320bd24`)**:
+  - Pinned `EXPECTED_JETSON_MODEL = "nemotron35"`, added 2-slot priority semaphore (`maxInFlight = 2`, 90s queue TTL for $\ge \text{P1}$), and disabled `POST /wallgarden/classify-candidates` (returns `{ classifications: [], disabled: true }` with 0 LLM calls).
+- **Validation**:
+  - 19/19 Node test suites (`npm test`) and 25/25 Python `sync-service` + `brain_graph` tests passing.
+  - Both `lazy-agent-service` (`320bd24`) and `youtube-wallgarden` (`bc27cd9`) deployed and verified on Synology NAS.
+
+---
+
 # Handoff — Music Feed, Anti-DJ Mix Gate, Queue Autoplay Fix & FYP Avoidance Loop (2026-09-16)
 
 Fixes the queue/play-next autoplay bug, introduces a dedicated algorithmic Music Feed strictly filtering out DJ mixes and compilations in favor of standalone artist tracks, and creates a two-way recommendation avoidance feedback loop between regular YouTube browsing and Wallgarden. Assets bumped to `?v=20260916-v70`.
