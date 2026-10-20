@@ -25,7 +25,7 @@ RUN apt-get update \
 WORKDIR /app/sync
 COPY sync-service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY sync-service/main.py .
+COPY sync-service/main.py sync-service/brain_graph.py ./
 
 # nginx site config (its /sync/ location proxies to 127.0.0.1:8017)
 COPY nginx.conf /etc/nginx/conf.d/default.conf
