@@ -1,3 +1,15 @@
+# Handoff — Dependency security refresh of the sync-service Python pins (2026-10-22)
+
+**Dependency security refresh 2026-10-22.** `sync-service/requirements.txt` is what the Docker image installs
+(`python:3.12-slim`). `pip-audit` on the old pins reported 18 advisories: `starlette` 0.41.3 (14, pulled in by
+`fastapi==0.115.6`) and `pymongo` 4.10.1 (4). New pins: `fastapi` 0.115.6 -> 0.161.0, `starlette` 1.9.0 (now pinned
+explicitly), `uvicorn[standard]` 0.34.0 -> 0.54.0, `pymongo` 4.10.1 -> 4.19.0. The set resolves under Python 3.11 and 3.12,
+`pip-audit -r sync-service/requirements.txt` reports no known vulnerabilities, and `sync-service/test_merge.py` passes
+25/25 before and after. `main.py` uses only `FastAPI`, `Body` and `CORSMiddleware`, so no code change was needed.
+Needs a NAS redeploy to reach the container.
+
+---
+
 # Handoff — Discovery Feed Decay & Stochastic Slate, Smart Brain Graph (PPR + Thompson Sampling), Contrastive Facet Burn, Jetson Gate (`nemotron35`) & Music-Player Integration (2026-10-20)
 
 Fixes the Discovery Feed stagnation (`"oklo stock"` monopoly and unresponsiveness to likes/watches), builds a server-side algorithmic Smart Brain Graph (`sync-service/brain_graph.py`) so the Jetson (`nemotron35`) is reserved strictly for creative topic generation, implements contrastive discriminating-facet blocking so burning `"vegan bbq"` blocks `"vegan"` + its cluster while protecting `"bbq"`, and repairs the Music Feed (`sw.js` syntax error, nginx `502 Bad Gateway` buffer overflow, `music-player` API integration, and single-query throttled fetching). Assets bumped to `?v=20261020-v71`.
