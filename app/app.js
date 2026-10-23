@@ -11056,6 +11056,31 @@ async function fetchWeather() {
     }
 }
 
+// RSS fields are attacker-controlled: any feed (or the allorigins relay) can
+// put markup in <title>, <link> or <description>. Only http(s) links become
+// anchors; everything else renders as plain text.
+function safeHttpUrl(link) {
+    const trimmed = String(link ?? "").trim();
+    return /^https?:\/\//i.test(trimmed) ? trimmed : "";
+}
+
+function newsDescriptionText(raw) {
+    // Tag-strip for readability only; the result is still escaped on render.
+    return String(raw ?? "").replace(/<[^>]*>?/g, '').substring(0, 200) + "...";
+}
+
+function newsCardHeaderHTML(news) {
+    const href = safeHttpUrl(news.link);
+    const title = escapeHTML(news.title);
+    const titleHtml = href
+        ? `<a href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer" style="color: var(--text-primary); text-decoration: none;">${title}</a>`
+        : title;
+    return `<div class="video-title" style="margin-bottom: 0.5rem;">${titleHtml}</div>
+                    <div class="video-channel" style="color: var(--accent); margin-bottom: 0.5rem;">${escapeHTML(news.channelName)}</div>
+                    <div class="video-meta" style="margin-bottom: 0.5rem;">${escapeHTML(getRelativeTime(news.published))}</div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; margin-bottom: 0.75rem;">${escapeHTML(news.description)}</div>`;
+}
+
 async function renderNewsFeed() {
     const newsGrid = document.getElementById("news-feed-grid");
     if (!newsGrid) return;
@@ -11113,7 +11138,7 @@ async function renderNewsFeed() {
                     channelId: source.name,
                     published: pubDate,
                     thumbnailUrl: "",
-                    description: description.replace(/<[^>]+>/g, '').substring(0, 200) + "...",
+                    description: newsDescriptionText(description),
                     link: link,
                     isNews: true
                 });
@@ -11134,16 +11159,13 @@ async function renderNewsFeed() {
             card.className = "video-card fade-in";
             card.innerHTML = `
                 <div class="video-info" style="padding: 1rem;">
-                    <div class="video-title" style="margin-bottom: 0.5rem;"><a href="${news.link}" target="_blank" style="color: var(--text-primary); text-decoration: none;">${news.title}</a></div>
-                    <div class="video-channel" style="color: var(--accent); margin-bottom: 0.5rem;">${news.channelName}</div>
-                    <div class="video-meta" style="margin-bottom: 0.5rem;">${getRelativeTime(news.published)}</div>
-                    <div style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; margin-bottom: 0.75rem;">${news.description}</div>
+                    ${newsCardHeaderHTML(news)}
                     <div class="news-actions" style="display: flex; gap: 0.5rem;">
-                        <button class="btn btn-sm btn-news-like ${state.newsSourceRatings[news.channelName] === 1 ? 'active' : ''}" data-source="${news.channelName}">
+                        <button class="btn btn-sm btn-news-like ${state.newsSourceRatings[news.channelName] === 1 ? 'active' : ''}" data-source="${escapeHTML(news.channelName)}">
                             <svg class="icon-svg" style="width: 12px; height: 12px; margin-right: 4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"></path></svg>
                             Like Source
                         </button>
-                        <button class="btn btn-sm btn-news-dislike" data-source="${news.channelName}">
+                        <button class="btn btn-sm btn-news-dislike" data-source="${escapeHTML(news.channelName)}">
                             <svg class="icon-svg" style="width: 12px; height: 12px; margin-right: 4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm12-3h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"></path></svg>
                             Dislike Source
                         </button>
@@ -11180,7 +11202,7 @@ async function renderNewsFeed() {
         });
         newsGrid.appendChild(fragment);
     } catch (e) {
-        newsGrid.innerHTML = `<div class="empty-state"><h3>Error fetching news</h3><p>${e.message}</p></div>`;
+        newsGrid.innerHTML = `<div class="empty-state"><h3>Error fetching news</h3><p>${escapeHTML(e.message)}</p></div>`;
     }
 }
 
