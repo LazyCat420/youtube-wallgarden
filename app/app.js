@@ -11065,8 +11065,17 @@ function safeHttpUrl(link) {
 }
 
 function newsDescriptionText(raw) {
-    // Tag-strip for readability only; the result is still escaped on render.
-    return String(raw ?? "").replace(/<[^>]*>?/g, '').substring(0, 200) + "...";
+    // Plain text for display; the result is still escaped on render. A
+    // DOMParser document is inert (no script, no image loads) and decodes
+    // entities such as &amp; and &nbsp; that innerHTML used to decode.
+    const str = String(raw ?? "");
+    let text;
+    if (typeof DOMParser !== "undefined") {
+        text = new DOMParser().parseFromString(str, "text/html").body?.textContent ?? "";
+    } else {
+        text = str.replace(/<[^>]*>?/g, '');
+    }
+    return text.substring(0, 200) + "...";
 }
 
 function newsCardHeaderHTML(news) {

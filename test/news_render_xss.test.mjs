@@ -48,4 +48,22 @@ console.log("✅ title, link, channel and description are escaped");
 assert.strictEqual(newsDescriptionText("<b>bold</b> text <img src=x onerror=alert(1)//"), "bold text ...");
 console.log("✅ description strip handles unclosed tags");
 
+// 5. In the browser path, DOMParser text is used (entities decoded), and the
+//    decoded text is still escaped on render.
+{
+  const { get, ctx } = boot();
+  ctx.DOMParser = class {
+    parseFromString(html) {
+      const text = html.replace(/<[^>]*>?/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+      return { body: { textContent: text } };
+    }
+  };
+  const desc = get("newsDescriptionText")("<p>Tom &amp; Jerry &lt;script&gt;</p>");
+  assert.strictEqual(desc, "Tom & Jerry <script>...");
+  const html = get("newsCardHeaderHTML")({ title: "t", link: "https://e.x", channelName: "s", published: 0, description: desc });
+  assert.ok(html.includes("Tom &amp; Jerry &lt;script&gt;..."));
+  assert.ok(!html.includes("<script>"));
+}
+console.log("✅ DOMParser path decodes entities and output stays escaped");
+
 console.log("\nAll news render XSS tests passed.");
