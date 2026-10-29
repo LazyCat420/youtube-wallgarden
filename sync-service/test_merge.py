@@ -21,7 +21,9 @@ from main import (  # noqa: E402
     _merge_watched,
 )
 from brain_graph import (  # noqa: E402
+    classify_music_video,
     extract_discriminating_facets,
+    extract_music_likes_feed,
     ground_topics_algorithmically,
     is_rejected_by_facets,
     rank_brain_topics,
@@ -276,6 +278,136 @@ def test_ground_topics_algorithmically_classifies_real_dead_slop():
     assert by_topic["ceramic glaze chemistry"] == "REAL"
     assert by_topic["empty niche xyz"] == "DEAD"
     assert by_topic["shocking clickbait"] == "SLOP"
+
+
+def test_classify_topic_channel_is_music():
+    item = classify_music_video("vid1", {
+        "r": 5,
+        "t": 1000,
+        "v": {"title": "Weightless", "channelName": "Marconi Union - Topic", "duration": 300},
+    })
+    assert item["isMusic"] is True
+    assert item["reason"] == "topic_or_ytm"
+    assert item["isTopicChannel"] is True
+    assert item["artist"] == "Marconi Union"
+    assert item["artistKey"] == "marconi union"
+    assert item["isDjMix"] is False
+
+
+def test_classify_artist_dash_title_official_video():
+    item = classify_music_video("vid2", {
+        "r": 5,
+        "t": 1000,
+        "v": {"title": "Bonobo - Kerala (Official Video)", "channelName": "Bonobo", "duration": 230},
+    })
+    assert item["isMusic"] is True
+    assert item["reason"] == "title_hint"
+    assert item["artist"] == "Bonobo"
+    assert item["title"] == "Kerala", item["title"]
+    assert item["isDjMix"] is False
+
+
+def test_classify_artist_dash_title_without_hint():
+    item = classify_music_video("vid3", {
+        "r": 5,
+        "t": 1000,
+        "v": {"title": "Khruangbin - August 10", "channelName": "Khruangbin", "duration": 250},
+    })
+    assert item["isMusic"] is True
+    assert item["reason"] == "artist_dash_title"
+    assert item["artist"] == "Khruangbin"
+    assert item["title"] == "August 10"
+
+
+def test_classify_rejects_tutorial():
+    item = classify_music_video("vid4", {
+        "r": 5,
+        "t": 1000,
+        "v": {"title": "How to make a ceramic mug", "channelName": "Pottery Lab", "duration": 900},
+    })
+    assert item["isMusic"] is False
+    assert item["reason"] == "non_music_marker"
+
+
+def test_classify_rejects_coding_vlog():
+    item = classify_music_video("vid5", {
+        "r": 5,
+        "t": 1000,
+        "v": {"title": "Building a Rust parser from scratch", "channelName": "Devlog", "duration": 1200},
+    })
+    assert item["isMusic"] is False
+    assert item["reason"] == "non_music_marker"
+
+
+def test_classify_detects_dj_mix_by_duration_and_title():
+    long_item = classify_music_video("vid6", {
+        "r": 5,
+        "t": 1000,
+        "v": {"title": "Bonobo - Late Night Tales", "channelName": "Bonobo", "duration": 3600},
+    })
+    assert long_item["isDjMix"] is True, "over 14 minutes is a mix"
+
+    titled = classify_music_video("vid7", {
+        "r": 5,
+        "t": 1000,
+        "v": {"title": "Kerri Chandler - Boiler Room Set", "channelName": "Kerri Chandler", "duration": 700},
+    })
+    assert titled["isDjMix"] is True, "Boiler Room in the title is a DJ mix"
+    assert titled["isMusic"] is True
+
+
+def test_classify_ytm_surface_and_credits():
+    item = classify_music_video("vid8", {
+        "r": 5,
+        "t": 1000,
+        "v": {
+            "title": "Anything At All",
+            "channelName": "Some Uploader",
+            "duration": 200,
+            "surface": "ytm",
+            "musicCredits": {"song": "Redbone", "artist": "Childish Gambino", "album": "Awaken"},
+        },
+    })
+    assert item["isMusic"] is True
+    assert item["reason"] == "topic_or_ytm"
+    assert item["artist"] == "Childish Gambino"
+    assert item["title"] == "Redbone"
+
+
+def test_extract_music_likes_feed_since_cursor_and_tombstones():
+    doc = {
+        "ratings": {
+            "old": {"r": 5, "t": 100, "v": {"title": "Weightless", "channelName": "Marconi Union - Topic", "duration": 300}},
+            "unliked": {"r": 0, "t": 200, "v": {"title": "Random clip", "channelName": "Someone", "duration": 60}},
+            "tutorial": {"r": 5, "t": 300, "v": {"title": "How to glaze a bowl", "channelName": "Pottery Lab", "duration": 800}},
+        },
+    }
+    feed = extract_music_likes_feed(doc, since=150)
+    assert feed["count"] == 1, feed
+    assert feed["items"][0]["videoId"] == "unliked"
+    assert feed["items"][0]["rating"] == 0
+    assert feed["cursor"] == 300
+
+    # The tombstone can be suppressed when only live likes are wanted.
+    no_tombstones = extract_music_likes_feed(doc, since=150, include_unliked=False)
+    assert no_tombstones["count"] == 0
+
+    # since=0 returns the music like, ordered by ratedAt.
+    full = extract_music_likes_feed(doc)
+    assert [it["videoId"] for it in full["items"]] == ["old", "unliked"]
+    assert full["cursor"] == 300
+
+
+def test_extract_music_likes_feed_tombstone_of_music_video():
+    doc = {
+        "ratings": {
+            "song": {"r": 0, "t": 500, "v": {"title": "Kerala", "channelName": "Bonobo - Topic", "duration": 230}},
+        },
+    }
+    feed = extract_music_likes_feed(doc)
+    assert feed["count"] == 1
+    assert feed["items"][0]["isMusic"] is True
+    assert feed["items"][0]["rating"] == 0
 
 
 def _run_all():

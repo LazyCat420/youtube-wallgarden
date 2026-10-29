@@ -29,7 +29,10 @@ Merge model — signals are EVENTS, not a set:
 * `watched`: additive map, max-timestamp.
 """
 
+import json
 import os
+import threading
+import urllib.request
 from datetime import datetime, timezone
 
 from fastapi import Body, FastAPI
@@ -37,7 +40,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 
 from brain_graph import (
+    classify_music_video,
     extract_discriminating_facets,
+    extract_music_likes_feed,
     ground_topics_algorithmically,
     rank_brain_topics,
 )
@@ -45,6 +50,12 @@ from brain_graph import (
 MONGO_URI = os.environ.get("MONGO_URI")
 DB_NAME = os.environ.get("WALLGARDEN_MONGO_DB", "wallgarden")
 DOC_ID = "global"  # single monolithic document
+
+# The music player's sync webhook: called after ratings change so the player
+# pulls the new likes without waiting for its own poll interval.
+MUSIC_PLAYER_SYNC_URL = os.environ.get(
+    "MUSIC_PLAYER_SYNC_URL", "http://10.0.0.16:8002/api/youtube/wallgarden/sync"
+)
 
 if not MONGO_URI:
     raise RuntimeError("MONGO_URI is required (set it in the deploy env)")
@@ -63,6 +74,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _notify_music_player_async(updated_at: int) -> None:
+    """Tell the music player that ratings changed, off the request thread.
+
+    Fire-and-forget: the player is a separate service and may be down or
+    restarting, and a failed ping must never fail the sync write itself (the
+    player also polls on its own).
+    """
+    def _post():
+        try:
+            req = urllib.request.Request(
+                MUSIC_PLAYER_SYNC_URL,
+                data=json.dumps({"updatedAt": updated_at}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=3).read()
+        except Exception:
+            pass
+
+    threading.Thread(target=_post, daemon=True).start()
+
 
 # Fields we sync. Anything not listed here stays browser-local by design
 # (e.g. the ontology graph, which each browser rebuilds from merged ratings).
@@ -271,6 +305,16 @@ def get_state(profile: str = "global"):
     return {"fields": _project(doc), "updatedAt": doc.get("updatedAt")}
 
 
+# Music-player feed: only the ratings that classify as music, with the artist /
+# title split the player needs. Declared before the generic /sync/{profile}
+# route so "/sync/music/likes" is not swallowed as profile="music".
+@app.get("/sync/music/likes")
+@app.get("/sync/{profile}/music/likes")
+def get_music_likes(profile: str = "global", since: int = 0, include_unliked: bool = True):
+    doc = _state.find_one({"_id": DOC_ID}) or {}
+    return extract_music_likes_feed(doc, since=since, include_unliked=include_unliked)
+
+
 # PUT is the normal path; POST is accepted too so the dashboard's unload-flush
 # via navigator.sendBeacon() (which can only POST) lands as well.
 @app.api_route("/sync/{profile}", methods=["PUT", "POST"])
@@ -287,5 +331,9 @@ def put_state(profile: str = "global", body: dict = Body(default={})):
 
     merged["updatedAt"] = datetime.now(timezone.utc).isoformat()
     _state.update_one({"_id": DOC_ID}, {"$set": merged}, upsert=True)
+
+    # A like landed: nudge the music player so it re-reads the feed now.
+    if "ratings" in incoming and incoming["ratings"]:
+        _notify_music_player_async(int(datetime.now(timezone.utc).timestamp() * 1000))
 
     return {"fields": _project(merged), "updatedAt": merged["updatedAt"]}

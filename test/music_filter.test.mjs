@@ -203,4 +203,112 @@ console.log("Running Music Feed & Anti-DJ Mix Filter Tests...\n");
   console.log("✅ music-player seeds integrated and non-music hyphenated titles rejected");
 }
 
+// 5. Extension background: music metadata survives slimVideo + LIKED_SYNC_BATCH
+{
+  const bgSrc = fs.readFileSync(new URL("../extension/scripts/background.js", import.meta.url), "utf8");
+
+  function bootBackgroundHarness() {
+    const ctx = {
+      console,
+      setTimeout: () => 0,
+      clearTimeout: () => {},
+      setInterval: () => 0,
+      clearInterval: () => {},
+      fetch: async () => ({ ok: true, json: async () => ({}) }),
+      chrome: {
+        storage: {
+          local: {
+            get: async () => ({}),
+            set: async () => {}
+          }
+        },
+        action: { setBadgeText: () => {}, setBadgeBackgroundColor: () => {} },
+        alarms: { create: () => {}, onAlarm: { addListener: () => {} } },
+        runtime: {
+          onStartup: { addListener: () => {} },
+          onInstalled: { addListener: () => {} },
+          onMessage: { addListener: () => {} }
+        },
+        tabs: { query: () => {}, sendMessage: async () => {} }
+      }
+    };
+    ctx.globalThis = ctx;
+    vm.createContext(ctx);
+    vm.runInContext(bgSrc, ctx);
+    return { get: (name) => vm.runInContext(name, ctx) };
+  }
+
+  const { get } = bootBackgroundHarness();
+  const slimVideo = get("slimVideo");
+  const buildSyncFields = get("buildSyncFields");
+  assert.ok(typeof slimVideo === "function", "slimVideo must be defined");
+  assert.ok(typeof buildSyncFields === "function", "buildSyncFields must be defined");
+
+  // Music classification inputs must not be dropped on the way to the server.
+  const slim = slimVideo({
+    videoId: "abc12345678",
+    title: "Kerala",
+    channelName: "Bonobo - Topic",
+    duration: 230,
+    isTopicChannel: true,
+    surface: "ytm",
+    musicCredits: { song: "Kerala", artist: "Bonobo", album: "Migration" },
+    src: "ll_playlist"
+  });
+  assert.strictEqual(slim.isTopicChannel, true, "isTopicChannel preserved");
+  assert.strictEqual(slim.surface, "ytm", "surface preserved");
+  assert.deepStrictEqual(slim.musicCredits, { song: "Kerala", artist: "Bonobo", album: "Migration" },
+    "musicCredits preserved");
+  assert.strictEqual(slim.src, "ll_playlist", "src preserved");
+
+  // Absent metadata falls back to the watch-page defaults, not undefined.
+  const plain = slimVideo({ videoId: "def12345678", title: "Some Video" });
+  assert.strictEqual(plain.isTopicChannel, false);
+  assert.strictEqual(plain.surface, "watch");
+  assert.strictEqual(plain.musicCredits, null);
+  assert.strictEqual(plain.src, null);
+
+  // The Liked Videos playlist batch becomes r=5 ratings with full metadata.
+  const fields = buildSyncFields({
+    action: "LIKED_SYNC_BATCH",
+    syncedAt: 1700000000000,
+    videos: [
+      { id: "abc12345678", title: "Kerala", channelName: "Bonobo - Topic", duration: 230,
+        isTopicChannel: true, src: "ll_playlist",
+        thumbnailUrl: "https://i.ytimg.com/vi/abc12345678/hqdefault.jpg" },
+      { id: "xyz12345678", title: "Weird Fishes", channelName: "Radiohead", duration: 318,
+        isTopicChannel: false, src: "ll_playlist" },
+      { title: "no id — must be skipped" }
+    ]
+  });
+  assert.ok(fields && fields.ratings, "batch produces ratings");
+  assert.deepStrictEqual(Object.keys(fields.ratings).sort(), ["abc12345678", "xyz12345678"],
+    "only rows with an id land");
+  assert.strictEqual(fields.ratings.abc12345678.r, 5, "playlist rows are likes");
+  assert.strictEqual(fields.ratings.abc12345678.t, 1700000000000, "batch timestamp applied");
+  assert.strictEqual(fields.ratings.abc12345678.v.isTopicChannel, true, "batch keeps isTopicChannel");
+  assert.strictEqual(fields.ratings.abc12345678.v.src, "ll_playlist", "batch keeps src");
+  assert.strictEqual(fields.ratings.abc12345678.v.id, "abc12345678", "batch keeps the id");
+  assert.strictEqual(fields.ratings.xyz12345678.v.surface, "watch", "batch defaults surface");
+
+  // An empty scrape must not send an empty ratings map.
+  assert.strictEqual(buildSyncFields({ action: "LIKED_SYNC_BATCH", videos: [] }), null);
+
+  // A plain like keeps the music fields too.
+  const likeFields = buildSyncFields({
+    action: "LIKE",
+    videoId: "abc12345678",
+    syncedAt: 5,
+    title: "Kerala",
+    channelName: "Bonobo - Topic",
+    isTopicChannel: true,
+    surface: "ytm"
+  });
+  assert.strictEqual(likeFields.ratings.abc12345678.r, 5);
+  assert.strictEqual(likeFields.ratings.abc12345678.v.surface, "ytm");
+  assert.strictEqual(likeFields.ratings.abc12345678.v.isTopicChannel, true);
+
+  console.log("✅ LIKED_SYNC_BATCH builds ratings and slimVideo preserves music metadata");
+}
+
 console.log("\nAll Music Feed & Anti-DJ Mix Filter tests passed!");

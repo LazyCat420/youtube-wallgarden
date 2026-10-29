@@ -450,3 +450,237 @@ def ground_topics_algorithmically(items: list[dict], rejected_facets: dict | Non
         })
 
     return verdicts
+
+
+# ── Music classification: which likes belong in the music player ───────────
+#
+# The sync document is a flat ratings map — a like is a like, whether it was a
+# jazz track or a woodworking tutorial. The music player needs only the music,
+# so the server decides per video from the metadata the extension sends
+# (surface, topic channels, title shape, credits) plus mined topics.
+
+WG_MUSIC_GENRE_RE = re.compile(
+    r"\b(hip hop|rap|boom bap|lo-fi|lofi|jazz|bebop|soul|funk|r&b|neo-soul|electronic|"
+    r"synthwave|house|techno|ambient|downtempo|drum and bass|jungle|breakbeat|idm|dubstep|"
+    r"garage|trance|disco|rock|indie|post-punk|shoegaze|metal|punk|grunge|math rock|"
+    r"midwest emo|folk|acoustic|bluegrass|country|americana|classical|piano|orchestral|"
+    r"cello|violin|soundtrack|ost|score|reggae|dub|ska|afrobeat|bossa nova|samba|salsa|"
+    r"cumbia|flamenco|city pop|k-pop|j-pop|vaporwave|chillwave|phonk|beats|instrumental|"
+    r"tiny desk|kexp|boiler room|colorsxstudios|mahogany session|audiotree)\b",
+    re.I,
+)
+
+WG_NON_MUSIC_PREFIX_RE = re.compile(
+    r"(?:^(?:how to|why |what |when |where |who |review|unboxing|tutorial|lecture|course|"
+    r"podcast|interview|debate|explained|documentary|history of|building |making |fixing |"
+    r"restoring |testing |i tried|i built|i bought|my |day in the life|vlog))"
+    r"|(?:\b(?:recipe|cooking|baking|gardening|woodworking|welding|machining|3d print|arduino|"
+    r"raspberry pi|linux|programming|coding|python|rust|javascript|workout|exercise|"
+    r"stretching|yoga|meditation|news|politics|economy|stock market|crypto|gameplay|"
+    r"walkthrough|speedrun|let's play|patch notes|tier list)\b)",
+    re.I,
+)
+
+WG_MUSIC_TITLE_HINT_RE = re.compile(
+    r"\b(official (music )?video|official audio|lyric video|visualizer|audio|full album|"
+    r"live at|live session|tiny desk|kexp|colors show|in the studio|boiler room|remix|"
+    r"bootleg|flip|edit|vip mix|prod\.?\s*by|feat\.?|ft\.?)\b",
+    re.I,
+)
+
+WG_DJ_MIX_RE = re.compile(
+    r"\b(full set|dj set|live set|mixtape|megamix|continuous mix|hour mix|1 hour|2 hours|"
+    r"3 hours|boiler room|hor berlin|hör berlin|cercle|lot radio|nts radio|rinse fm|"
+    r"essential mix|tracklist|compilation|best of|non-stop|24/7|radio stream|study beats|"
+    r"sleep music|relaxing music)\b",
+    re.I,
+)
+
+WG_TITLE_JUNK_RE = re.compile(
+    r"\s*[\(\[](?:official\s*(?:music\s*)?(?:video|audio|lyric\s*video|visualizer)|lyrics?|"
+    r"audio|hd|hq|4k|remastered.*?|visualiser|explicit|clean|prod\.?.*?)[\)\]]",
+    re.I,
+)
+
+MUSIC_TITLE_MAX_ARTIST_DASH_LEN = 110
+MAX_SONG_DURATION_SECONDS = 840  # 14 minutes — longer is a mix / compilation
+
+
+def clean_channel_artist(channel_name: str) -> str:
+    """Turn a YouTube channel name into an artist name.
+
+    Topic channels ("Bonobo - Topic"), VEVO channels ("BonoboVEVO") and label
+    uploads ("Bonobo Official", "Ninja Tune Records") all carry the artist in
+    the channel name with a suffix that is not part of it.
+    """
+    name = (channel_name or "").strip()
+    name = re.sub(r"\s*-\s*Topic$", "", name, flags=re.I)
+    name = re.sub(r"\s*(?:VEVO|Official|Music|Records|Recordings)$", "", name, flags=re.I)
+    return name.strip(" -–—")
+
+
+def normalize_artist_key(name: str) -> str:
+    """Collapse an artist name to a comparison key (dedupe across channels)."""
+    key = (name or "").lower()
+    key = re.split(r"\s+(?:feat\.?|ft\.?|featuring)\s+", key)[0]
+    key = re.sub(r"[^a-z0-9\s]+", " ", key)
+    key = re.sub(r"\s+", " ", key).strip()
+    if key.startswith("the "):
+        key = key[4:]
+    return key.strip()
+
+
+def _as_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def classify_music_video(video_id: str, rec: dict, mined_entry: dict | None = None) -> dict:
+    """Decide whether one liked video belongs in the music player, and split it
+    into artist / title.
+
+    The signals, strongest first:
+      * YouTube Music surface or a music credits card — always music.
+      * Topic / VEVO channels and "Provided to YouTube by" — licensed music.
+      * Mined topics containing a music genre.
+      * Title markers ("Official Audio", "Lyric Video", ...).
+      * "Artist - Title" shape within a plausible song duration.
+    A non-music marker (tutorial, vlog, programming, ...) vetoes everything
+    except the definitive signals above.
+    """
+    rec = rec if isinstance(rec, dict) else {}
+    v = rec.get("v") or {}
+    if not isinstance(v, dict):
+        v = {}
+    mined_entry = mined_entry if isinstance(mined_entry, dict) else {}
+
+    rating = _as_int(rec.get("r"), 0)
+    rated_at = _as_int(rec.get("t"), 0)
+
+    raw_title = (v.get("title") or "").strip()
+    channel_name = (v.get("channelName") or "").strip()
+    duration = _as_int(v.get("duration"), 0)
+
+    topics: list = []
+    if isinstance(v.get("discoveryTopic"), str):
+        topics.append(v["discoveryTopic"])
+    if isinstance(v.get("matchedTopics"), list):
+        topics.extend(v["matchedTopics"])
+    if isinstance(mined_entry.get("topics"), list):
+        topics.extend(mined_entry["topics"])
+
+    is_topic_channel = (
+        bool(v.get("isTopicChannel"))
+        or channel_name.lower().endswith(" - topic")
+        or bool(re.search(r"vevo$", channel_name, re.I))
+    )
+    has_non_music_marker = bool(WG_NON_MUSIC_PREFIX_RE.search(raw_title))
+    has_music_hint = bool(WG_MUSIC_TITLE_HINT_RE.search(raw_title))
+    has_artist_dash_title = (
+        (" - " in raw_title or " – " in raw_title or " — " in raw_title)
+        and len(raw_title) < MUSIC_TITLE_MAX_ARTIST_DASH_LEN
+    )
+    has_music_topic = any(WG_MUSIC_GENRE_RE.search(t) for t in topics if isinstance(t, str))
+    credits = v.get("musicCredits") if isinstance(v.get("musicCredits"), dict) else None
+    is_ytm = (v.get("surface") == "ytm") or bool(credits)
+
+    is_music = False
+    reason = "unclassified"
+    if has_non_music_marker and not is_topic_channel and not is_ytm:
+        is_music = False
+        reason = "non_music_marker"
+    elif is_ytm or is_topic_channel:
+        is_music = True
+        reason = "topic_or_ytm"
+    elif has_music_topic:
+        is_music = True
+        reason = "music_topic"
+    elif has_music_hint:
+        is_music = True
+        reason = "title_hint"
+    elif has_artist_dash_title and (duration == 0 or 60 <= duration <= MAX_SONG_DURATION_SECONDS):
+        is_music = True
+        reason = "artist_dash_title"
+
+    is_dj_mix = bool(
+        (duration and duration > MAX_SONG_DURATION_SECONDS) or WG_DJ_MIX_RE.search(raw_title)
+    )
+
+    # Artist / title: the credits card is authoritative; otherwise the
+    # "Artist - Title" shape, with a Topic channel beating a noisy left side.
+    artist = ""
+    clean_title = raw_title
+    if credits:
+        artist = str(credits.get("artist") or "").strip()
+        clean_title = str(credits.get("song") or "").strip() or raw_title
+    if not artist and has_artist_dash_title:
+        for sep in (" - ", " – ", " — "):
+            if sep in raw_title:
+                left, right = raw_title.split(sep, 1)
+                artist = left.strip()
+                clean_title = right.strip()
+                break
+        if is_topic_channel:
+            topic_artist = clean_channel_artist(channel_name)
+            if topic_artist:
+                artist = topic_artist
+
+    clean_title = WG_TITLE_JUNK_RE.sub("", clean_title)
+    clean_title = clean_title.strip().strip("\"'“”‘’").strip()
+    if not artist:
+        artist = clean_channel_artist(channel_name) or "Unknown Artist"
+
+    return {
+        "videoId": video_id,
+        "rating": rating,
+        "ratedAt": rated_at,
+        "isMusic": is_music,
+        "isDjMix": is_dj_mix,
+        "artist": artist,
+        "artistKey": normalize_artist_key(artist),
+        "title": clean_title or raw_title,
+        "rawTitle": raw_title,
+        "channelName": channel_name,
+        "channelId": v.get("channelId") or "",
+        "duration": duration,
+        "isTopicChannel": is_topic_channel,
+        "thumbnailUrl": v.get("thumbnailUrl") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+        "topics": [t for t in topics if isinstance(t, str)],
+        "reason": reason,
+    }
+
+
+def extract_music_likes_feed(doc: dict, since: int = 0, include_unliked: bool = True) -> dict:
+    """Project a sync document's ratings map into a music-player feed.
+
+    `since` is an exclusive ratedAt cursor (ms): only entries changed after it
+    are returned, so the player can poll incrementally. Unliked tombstones
+    (rating <= 0) are included by default so a removed like disappears from the
+    player too.
+    """
+    doc = doc or {}
+    ratings = doc.get("ratings") or {}
+    mined = doc.get("mined") or {}
+    if not isinstance(ratings, dict):
+        ratings = {}
+    if not isinstance(mined, dict):
+        mined = {}
+
+    items = []
+    cursor = _as_int(since, 0)
+    for vid, rec in ratings.items():
+        if not isinstance(rec, dict):
+            continue
+        rated_at = _as_int(rec.get("t"), 0)
+        if rated_at > cursor:
+            cursor = rated_at
+        if rated_at <= since:
+            continue
+        item = classify_music_video(vid, rec, mined.get(vid))
+        if item["isMusic"] or (include_unliked and item["rating"] <= 0):
+            items.append(item)
+
+    items.sort(key=lambda it: it["ratedAt"])
+    return {"items": items, "cursor": cursor, "count": len(items)}
