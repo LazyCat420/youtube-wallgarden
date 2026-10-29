@@ -641,9 +641,13 @@ def classify_music_video(video_id: str, rec: dict, mined_entry: dict | None = No
     # "Artist - Title" shape, with a Topic channel beating a noisy left side.
     artist = ""
     clean_title = raw_title
+    m_quote = re.match(r'^([A-Za-z0-9 .&\'_-]{2,40}?)\s+["“]([^"”]{2,80})["”](.*)$', raw_title)
     if credits:
         artist = str(credits.get("artist") or "").strip()
         clean_title = str(credits.get("song") or "").strip() or raw_title
+    elif m_quote and is_music:
+        artist = m_quote.group(1).strip()
+        clean_title = m_quote.group(2).strip()
     if not artist and has_artist_dash_title:
         for sep in (" - ", " – ", " — "):
             if sep in raw_title:
@@ -655,12 +659,6 @@ def classify_music_video(video_id: str, rec: dict, mined_entry: dict | None = No
             topic_artist = clean_channel_artist(channel_name)
             if topic_artist:
                 artist = topic_artist
-    elif not artist and is_music:
-        # Handle 'Artist "Song Title" (Official Video)' shape
-        m_quote = re.match(r'^([A-Za-z0-9 .&\'_-]{2,40}?)\s+["“]([^"”]{2,80})["”](.*)$', raw_title)
-        if m_quote:
-            artist = m_quote.group(1).strip()
-            clean_title = m_quote.group(2).strip()
 
     clean_title = WG_TITLE_JUNK_RE.sub("", clean_title)
     clean_title = clean_title.strip().strip("\"'“”‘’").strip()
