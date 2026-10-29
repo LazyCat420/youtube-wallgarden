@@ -64,15 +64,17 @@ const WG_DASHBOARD_URL = "http://10.0.0.16:8007";
 let appState = {
     playlists: [],        // [{ id, name, count }]
     savedVideoIds: new Set(),
-    watchedIds: new Set()
+    watchedIds: new Set(),
+    likedVideoIds: []     // videos whose like button we already saw pressed
 };
 
 function normalizeAppState(raw) {
-    if (!raw) return { playlists: [], savedVideoIds: new Set(), watchedIds: new Set() };
+    if (!raw) return { playlists: [], savedVideoIds: new Set(), watchedIds: new Set(), likedVideoIds: [] };
     return {
         playlists: Array.isArray(raw.playlists) ? raw.playlists : [],
         savedVideoIds: new Set(raw.savedVideoIds || []),
-        watchedIds: new Set(raw.watchedIds || [])
+        watchedIds: new Set(raw.watchedIds || []),
+        likedVideoIds: Array.isArray(raw.likedVideoIds) ? raw.likedVideoIds : []
     };
 }
 
@@ -149,6 +151,14 @@ document.addEventListener('yt-navigate-finish', () => {
     setTimeout(ensureWatchPageButton, 300);
     setTimeout(ensureWatchPageButton, 900);
     setTimeout(ensureWatchPageButton, 1800);
+    // A like already present on the newly opened watch page has no click event
+    // to observe, so read the button state once the metadata has settled.
+    setTimeout(probeInitialWatchPageLikeState, 1500);
+    // Landing on the Liked Videos playlist: scrape what is rendered so the
+    // music player receives the user's likes without a popup click.
+    if (window.location.pathname === '/playlist' && window.location.search.includes('list=LL')) {
+        setTimeout(syncLikedPlaylistPage, 2000);
+    }
 });
 
 // ============================================================
@@ -1749,12 +1759,12 @@ const SYNC_DEDUP_MS = 1500;
 
 function sendSyncEvent(action, data = {}) {
     const videoId = data.videoId || getVideoIdFromUrl() || (action === 'BLOCK_CHANNEL' ? (data.channelName || '') : '');
-    if (!videoId && action !== 'FYP_AVOID_BATCH') {
+    if (!videoId && action !== 'FYP_AVOID_BATCH' && action !== 'LIKED_SYNC_BATCH') {
         console.warn("[Wallgarden Sync] sendSyncEvent failed: no videoId (not on a watch page and no card context)");
         return;
     }
-    const dedupKey = action === 'FYP_AVOID_BATCH'
-        ? `FYP_AVOID_BATCH:${Date.now()}`
+    const dedupKey = (action === 'FYP_AVOID_BATCH' || action === 'LIKED_SYNC_BATCH')
+        ? `${action}:${Date.now()}`
         : `${action}:${videoId}:${data.playlistId || data.playlistName || ''}`;
     const now = Date.now();
     const last = _recentSync.get(dedupKey);
@@ -1791,6 +1801,11 @@ function sendSyncEvent(action, data = {}) {
 }
 
 function scrapeVideoMetadata() {
+    // Which YouTube surface we're on decides both the fallback selectors and
+    // how the server classifies the video as music (ytm = definite music).
+    const host = window.location.hostname || '';
+    const surface = host.includes('music.youtube.com') ? 'ytm' : (window.location.pathname.startsWith('/shorts/') ? 'shorts' : 'watch');
+
     let title = '';
     const titleEl = document.querySelector(
         'ytd-watch-metadata h1 yt-formatted-string, ' +
@@ -1800,6 +1815,9 @@ function scrapeVideoMetadata() {
     );
     if (titleEl) {
         title = titleEl.textContent.trim();
+    }
+    if (!title && surface === 'ytm') {
+        title = document.querySelector('ytmusic-player-bar yt-formatted-string.title')?.textContent?.trim() || '';
     }
     if (!title) {
         title = document.title.replace(/\s*-\s*YouTube$/, '').trim();
@@ -1821,6 +1839,9 @@ function scrapeVideoMetadata() {
         } else if (href.startsWith('/@')) {
             channelId = href.replace('/', '');
         }
+    }
+    if (!channelName && surface === 'ytm') {
+        channelName = document.querySelector('ytmusic-player-bar .byline a')?.textContent?.trim() || '';
     }
 
     // Extract duration if available
@@ -1845,14 +1866,133 @@ function scrapeVideoMetadata() {
         }
     }
 
+    // YouTube's auto-generated artist channels are suffixed " - Topic", and the
+    // description of a licensed upload starts with "Provided to YouTube by".
+    const descText = document.querySelector('#description-inline-expander, ytd-text-inline-expander')?.textContent || '';
+    const isTopicChannel = / - Topic$/i.test(channelName) || /Provided to YouTube by/i.test(descText);
+
+    // The music attribution card lists Song / Artist / Album for licensed music.
+    let musicCredits = null;
+    const attributeRows = document.querySelectorAll(
+        'ytd-structured-description-content-renderer yt-video-attribute-view-model'
+    );
+    const musicCard = document.querySelector('ytd-music-card-shelf-renderer');
+    if (attributeRows.length || musicCard) {
+        const credits = { song: '', artist: '', album: '' };
+        const labels = ['song', 'artist', 'album'];
+        attributeRows.forEach(row => {
+            const parts = Array.from(row.querySelectorAll('yt-formatted-string, a, span'))
+                .map(el => (el.textContent || '').trim())
+                .filter(Boolean);
+            const labelIdx = parts.findIndex(p => labels.includes(p.toLowerCase()));
+            if (labelIdx === -1) return;
+            const value = parts.slice(labelIdx + 1).find(p => !labels.includes(p.toLowerCase())) || '';
+            if (!value) return;
+            credits[labels[parts[labelIdx].toLowerCase()]] = value;
+        });
+        if (musicCard) {
+            if (!credits.song) credits.song = (musicCard.querySelector('#title, .title')?.textContent || '').trim();
+            if (!credits.artist) credits.artist = (musicCard.querySelector('#subtitle, .subtitle, #byline')?.textContent || '').trim();
+        }
+        if (credits.song || credits.artist || credits.album) musicCredits = credits;
+    }
+
     return {
+        id: getVideoIdFromUrl() || '',
         title,
         channelName,
         channelId,
         duration,
-        viewCount
+        viewCount,
+        surface,
+        isTopicChannel,
+        musicCredits
     };
 }
+
+// Same button the click handler resolves to, reused by the initial-state probe.
+const WATCH_LIKE_BUTTON_SELECTOR =
+    'ytd-watch-metadata segmented-like-dislike-button-view-model like-button-view-model button, ' +
+    'segmented-like-dislike-button-view-model like-button-view-model button, ' +
+    'like-button-view-model button';
+
+/**
+ * A like that happened BEFORE the extension was installed, or while the content
+ * script was not injected, never fires a click we can observe. So on every watch
+ * page load, read the like button's pressed state and sync it once per video.
+ */
+function probeInitialWatchPageLikeState() {
+    if (!window.location.pathname.startsWith('/watch')) return;
+    const likeBtn = document.querySelector(WATCH_LIKE_BUTTON_SELECTOR);
+    if (!likeBtn) return;
+    const pressed = likeBtn.getAttribute('aria-pressed') === 'true' ||
+        likeBtn.classList.contains('yt-spec-button-shape-next--selected');
+    if (!pressed) return;
+
+    const video = scrapeVideoMetadata();
+    if (video.id && !appState.likedVideoIds.includes(video.id)) {
+        appState.likedVideoIds.push(video.id);
+        sendSyncEvent('LIKE', { videoId: video.id, ...video, src: 'state_probe' });
+    }
+}
+
+/** Parse "MM:SS" / "HH:MM:SS" / "1:02:03" into seconds. */
+function parseDurationText(text) {
+    const parts = (text || '').trim().split(':').map(Number);
+    if (parts.some(isNaN)) return 0;
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    return 0;
+}
+
+/**
+ * Scrape the visible rows of the Liked Videos playlist (/playlist?list=LL).
+ * YouTube only renders a window of the list, so the caller may need to scroll;
+ * what is rendered is what we return.
+ */
+function scrapeLikedVideosPlaylistPage() {
+    const videos = [];
+    const renderers = document.querySelectorAll('ytd-playlist-video-renderer');
+    renderers.forEach(renderer => {
+        const link = renderer.querySelector('a#video-title[href*="v="]');
+        if (!link) return;
+        const m = (link.getAttribute('href') || '').match(/[?&]v=([\w-]{5,})/);
+        if (!m) return;
+        const id = m[1];
+
+        const titleEl = renderer.querySelector('#video-title');
+        const title = titleEl ? titleEl.textContent.trim() : '';
+        const channelEl = renderer.querySelector('ytd-channel-name a, #channel-name #text');
+        const channelName = channelEl ? channelEl.textContent.trim() : '';
+        const durationEl = renderer.querySelector('ytd-thumbnail-overlay-time-status-renderer #text');
+        const duration = parseDurationText(durationEl ? durationEl.textContent : '');
+
+        videos.push({
+            id,
+            title,
+            channelName,
+            duration,
+            isTopicChannel: / - Topic$/i.test(channelName),
+            thumbnailUrl: 'https://i.ytimg.com/vi/' + id + '/hqdefault.jpg',
+            src: 'll_playlist'
+        });
+    });
+    return videos;
+}
+
+function syncLikedPlaylistPage() {
+    const videos = scrapeLikedVideosPlaylistPage();
+    if (videos.length > 0) sendSyncEvent('LIKED_SYNC_BATCH', { videos });
+    return videos.length;
+}
+
+// The popup asks for a scrape of the open Liked Videos playlist page.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg?.type === 'WG_SCRAPE_LIKED_PLAYLIST') {
+        const count = syncLikedPlaylistPage();
+        sendResponse({ ok: true, count });
+    }
+});
 
 function startSyncObservers() {
     // 1. Watch Progress (Video Element)
@@ -1937,6 +2077,21 @@ function startSyncObservers() {
             }
         }
 
+        // Path 4: YouTube Music renders its own like button renderer instead of
+        // the view-model wrappers, so none of the paths above match there.
+        if (!hasLike && !hasDislike && (window.location.hostname || '').includes('music.youtube.com')) {
+            const ytmBtn = e.target.closest(
+                'ytmusic-like-button-renderer #button-shape-like button, ' +
+                'ytmusic-like-button-renderer button[aria-label*="like" i]'
+            );
+            if (ytmBtn) {
+                // "Dislike" also contains "like" — resolve which one was hit.
+                const aria = (ytmBtn.getAttribute('aria-label') || '').toLowerCase();
+                if (aria.includes('dislike') || e.target.closest('ytmusic-like-button-renderer #button-shape-dislike')) hasDislike = true;
+                else hasLike = true;
+            }
+        }
+
         const isSubscribeElement = (el) => {
             if (!el || !el.tagName) return false;
             const tag = el.tagName.toLowerCase();
@@ -2008,6 +2163,9 @@ function startSyncObservers() {
 
     // 3. YouTube Feed / FYP Suggestion Avoidance Tracker
     startFypAvoidanceTracker();
+
+    // 4. Catch likes made before the content script was watching this page.
+    setTimeout(probeInitialWatchPageLikeState, 1500);
 }
 
 // ── FYP / Recommendation Feed Avoidance Tracker ──

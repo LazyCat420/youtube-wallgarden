@@ -36,6 +36,36 @@ document.addEventListener('DOMContentLoaded', () => {
         chrome.tabs.create({ url: WG_DASHBOARD_URL });
     });
 
+    // Liked Videos playlist → sync service → music player. If a YouTube tab is
+    // already showing the LL playlist we scrape it in place (it is the only page
+    // where YouTube renders the liked rows); otherwise open it and let the
+    // content script's on-load auto-scrape do the work.
+    const syncMusicLikesBtn = document.getElementById('syncMusicLikesBtn');
+    const LIKED_PLAYLIST_URL = 'https://www.youtube.com/playlist?list=LL';
+    syncMusicLikesBtn.addEventListener('click', () => {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            const tab = tabs && tabs[0];
+            const url = tab && tab.url ? tab.url : '';
+            const onLikedPlaylist = /^https?:\/\/(www\.)?youtube\.com\/playlist\?/.test(url) &&
+                url.includes('list=LL');
+
+            if (onLikedPlaylist && tab.id !== undefined) {
+                chrome.tabs.sendMessage(tab.id, { type: 'WG_SCRAPE_LIKED_PLAYLIST' }, (res) => {
+                    if (chrome.runtime.lastError || !res || !res.ok) {
+                        saveStatus.textContent = '⚠️ Could not read this page — reload it and retry';
+                    } else {
+                        saveStatus.textContent = `✓ Synced ${res.count} liked video${res.count === 1 ? '' : 's'}`;
+                    }
+                    setTimeout(() => { saveStatus.textContent = ''; }, 2500);
+                });
+            } else {
+                chrome.tabs.create({ url: LIKED_PLAYLIST_URL });
+                saveStatus.textContent = 'Opened your Liked Videos — syncing…';
+                setTimeout(() => { saveStatus.textContent = ''; }, 2500);
+            }
+        });
+    });
+
     function renderSyncStatus(data) {
         const appStateData = data.wg_app_state || {};
         const pending = data.wg_pending_sync || [];

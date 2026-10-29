@@ -72,6 +72,12 @@ function slimVideo(ev) {
     if (ev.channelId) v.channelId = ev.channelId;
     if (ev.duration) v.duration = ev.duration;
     if (ev.viewCount) v.viewCount = ev.viewCount;
+    // Music classification inputs: the sync service decides "is this music?"
+    // from these, so they must survive the trip to the server.
+    v.isTopicChannel = !!ev.isTopicChannel;
+    v.surface = ev.surface || 'watch';
+    v.musicCredits = ev.musicCredits || null;
+    v.src = ev.src || null;
     return v;
 }
 
@@ -112,6 +118,18 @@ function buildSyncFields(ev) {
                 }
             });
             return Object.keys(avoided).length ? { avoided } : null;
+        }
+        case "LIKED_SYNC_BATCH": {
+            // The Liked Videos playlist scrape: every visible row is a like, so
+            // it lands as r=5 with its full metadata (no per-video timestamps
+            // available — one batch timestamp for all).
+            const ratings = {};
+            for (const v of (ev.videos || [])) {
+                if (v && v.id) {
+                    ratings[v.id] = { r: 5, t, v: slimVideo({ ...v, videoId: v.id }) };
+                }
+            }
+            return Object.keys(ratings).length ? { ratings } : null;
         }
         case "UNLIKE":
         case "UNDISLIKE":
