@@ -471,13 +471,15 @@ WG_MUSIC_GENRE_RE = re.compile(
 )
 
 WG_NON_MUSIC_PREFIX_RE = re.compile(
-    r"(?:^(?:how to|why |what |when |where |who |review|unboxing|tutorial|lecture|course|"
+    r"(?:^(?:how to|why |what |when |where |who |if you |review|unboxing|tutorial|lecture|course|"
     r"podcast|interview|debate|explained|documentary|history of|building |making |fixing |"
-    r"restoring |testing |i tried|i built|i bought|my |day in the life|vlog))"
+    r"restoring |testing |i tried|i built|i bought|my |day in the life|vlog|easy ))"
     r"|(?:\b(?:recipe|cooking|baking|gardening|woodworking|welding|machining|3d print|arduino|"
     r"raspberry pi|linux|programming|coding|python|rust|javascript|workout|exercise|"
-    r"stretching|yoga|meditation|news|politics|economy|stock market|crypto|gameplay|"
-    r"walkthrough|speedrun|let's play|patch notes|tier list)\b)",
+    r"stretching|yoga|meditation|news|politics|economy|stock market|stocks?\b|crypto|gameplay|"
+    r"walkthrough|speedrun|let's play|patch notes|tier list|diy\b|dupe\b|pottery|ceramic|"
+    r"brisket|sandwich|seitan|vegan|bbq|charcuterie|meat curing|server|supermicro|gpu|nvidia|"
+    r"mobilization|military|war analysis|standup|comedy|norm macdonald)\b)",
     re.I,
 )
 
@@ -515,7 +517,12 @@ def clean_channel_artist(channel_name: str) -> str:
     """
     name = (channel_name or "").strip()
     name = re.sub(r"\s*-\s*Topic$", "", name, flags=re.I)
-    name = re.sub(r"\s*(?:VEVO|Official|Music|Records|Recordings)$", "", name, flags=re.I)
+    name = re.sub(
+        r"\s*(?:Official\s+Youtube\s+Page|Official\s+Channel|Official\s+Music|VEVO|Official|Music|Records|Recordings)$",
+        "",
+        name,
+        flags=re.I,
+    )
     return name.strip(" -–—")
 
 
@@ -576,7 +583,10 @@ def classify_music_video(video_id: str, rec: dict, mined_entry: dict | None = No
         or channel_name.lower().endswith(" - topic")
         or bool(re.search(r"vevo$", channel_name, re.I))
     )
-    has_non_music_marker = bool(WG_NON_MUSIC_PREFIX_RE.search(raw_title))
+    has_non_music_marker = bool(WG_NON_MUSIC_PREFIX_RE.search(raw_title)) or (
+        bool(topics)
+        and all(bool(WG_NON_MUSIC_PREFIX_RE.search(t)) for t in topics if isinstance(t, str))
+    )
     has_music_hint = bool(WG_MUSIC_TITLE_HINT_RE.search(raw_title))
     has_artist_dash_title = (
         (" - " in raw_title or " – " in raw_title or " — " in raw_title)
@@ -585,6 +595,21 @@ def classify_music_video(video_id: str, rec: dict, mined_entry: dict | None = No
     has_music_topic = any(WG_MUSIC_GENRE_RE.search(t) for t in topics if isinstance(t, str))
     credits = v.get("musicCredits") if isinstance(v.get("musicCredits"), dict) else None
     is_ytm = (v.get("surface") == "ytm") or bool(credits)
+
+    # Check if the left side of "Artist - Title" matches the uploader channel
+    left_matches_channel = False
+    if has_artist_dash_title and channel_name:
+        for sep in (" - ", " – ", " — "):
+            if sep in raw_title:
+                left_candidate = normalize_artist_key(raw_title.split(sep, 1)[0])
+                ch_candidate = normalize_artist_key(clean_channel_artist(channel_name))
+                if left_candidate and ch_candidate and (
+                    left_candidate == ch_candidate
+                    or left_candidate in ch_candidate
+                    or ch_candidate in left_candidate
+                ):
+                    left_matches_channel = True
+                break
 
     is_music = False
     reason = "unclassified"
@@ -600,7 +625,11 @@ def classify_music_video(video_id: str, rec: dict, mined_entry: dict | None = No
     elif has_music_hint:
         is_music = True
         reason = "title_hint"
-    elif has_artist_dash_title and (duration == 0 or 60 <= duration <= MAX_SONG_DURATION_SECONDS):
+    elif (
+        has_artist_dash_title
+        and (not topics or left_matches_channel)
+        and (duration == 0 or 60 <= duration <= MAX_SONG_DURATION_SECONDS)
+    ):
         is_music = True
         reason = "artist_dash_title"
 
@@ -626,6 +655,12 @@ def classify_music_video(video_id: str, rec: dict, mined_entry: dict | None = No
             topic_artist = clean_channel_artist(channel_name)
             if topic_artist:
                 artist = topic_artist
+    elif not artist and is_music:
+        # Handle 'Artist "Song Title" (Official Video)' shape
+        m_quote = re.match(r'^([A-Za-z0-9 .&\'_-]{2,40}?)\s+["“]([^"”]{2,80})["”](.*)$', raw_title)
+        if m_quote:
+            artist = m_quote.group(1).strip()
+            clean_title = m_quote.group(2).strip()
 
     clean_title = WG_TITLE_JUNK_RE.sub("", clean_title)
     clean_title = clean_title.strip().strip("\"'“”‘’").strip()
