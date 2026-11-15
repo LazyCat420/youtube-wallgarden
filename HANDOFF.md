@@ -91,7 +91,9 @@ Four commits on this repo (`6f8215c` era buckets + ledger, `cfaf6d2` slate,
 `lazy-agent-service@5955b89` (roles + FIT). All three containers deployed to
 synology and live-verified. Assets at `?v=20260906-v68`.
 
-The blueprint with the full audit is `plan/calibrated_feed.md`. Read it first.
+The blueprint with the full audit was `plan/calibrated_feed.md` — built
+(`4316e65`, `7132c5a`, `4621985`/`7b5e220`) and purged from `plan/` on
+2026-11-14; its history lives in git.
 
 ## Why
 
@@ -140,8 +142,9 @@ wgPromptAB()  // unchanged; the brainstorm path finally stamps src
 WG_DEBUG = 1  // logs each composed slate's era/topic/channel breakdown
 ```
 
-Acceptance after ≥ 7 days of ledger and ≥ 20 shown topics per role is written
-in `plan/calibrated_feed.md`. **Do not edit prompts or constants before that
+Acceptance after ≥ 7 days of ledger and ≥ 20 shown topics per role was written
+in `plan/calibrated_feed.md` (built; purged 2026-11-14, recoverable from git).
+**Do not edit prompts or constants before that
 horizon** — this repo has learned twice that an eyeball read does not survive
 n = 30.
 
