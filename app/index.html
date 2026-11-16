@@ -317,8 +317,8 @@
     </style>
 
     <!-- Non-blocking full CSS via preload pattern -->
-    <link rel="preload" href="app.min.css?v=20261020-v71" as="style" onload="this.onload=null;this.rel='stylesheet'">
-    <noscript><link rel="stylesheet" href="app.min.css?v=20261020-v71"></noscript>
+    <link rel="preload" href="app.min.css?v=20261115-v73" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="app.min.css?v=20261115-v73"></noscript>
 </head>
 <body>
     <div class="app-layout">
@@ -687,6 +687,11 @@
                         </div>
                     </div>
 
+                    <div class="topic-reset-row" style="display:flex; align-items:center; gap:0.75rem; margin-top:0.75rem;">
+                        <button id="btn-reset-discovery" class="btn btn-danger btn-sm" title="Drop every topic that was not earned by a like, a play or a hand edit. Likes, ratings, burns and blocked channels are kept."><svg class="icon-svg icon-14 icon-14-r" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 4 3 10 9 10"/></svg>Reset topics (keep likes)</button>
+                        <span class="form-hint">Purges generated guesses and the impression ledger; keeps likes, mined topics, burns and blocked channels. The reset is pushed to the sync server.</span>
+                    </div>
+
                     <div class="global-filters-container" style="margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border); margin-bottom: 2rem;">
                         <h3>Global Filters & Scraper Settings</h3>
                         <div class="filter-option settings-row settings-row-tight">
@@ -920,7 +925,7 @@
 
     <script src="ontology.js?v=20260916-v70" defer></script>
     <script src="ontologyRenderer.js?v=20260916-v70" defer></script>
-    <script src="app.min.js?v=20261022-v72" defer></script>
+    <script src="app.min.js?v=20261115-v73" defer></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

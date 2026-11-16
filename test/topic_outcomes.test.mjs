@@ -58,7 +58,7 @@ function boot() {
 }
 
 /** Build a ledger entry with the given per-kind counts. */
-const sig = (counts) => ({ t: 1, c: { cA: counts }, f: {} });
+const sig = (counts) => ({ t: 1, c: { cA: counts }, f: {}, lastPlayAt: counts.play ? Date.now() : 0 });
 
 console.log("Running Topic Outcome Tests...\n");
 

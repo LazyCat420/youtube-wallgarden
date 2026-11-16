@@ -121,18 +121,18 @@ console.log("Running Pool Hygiene Tests...\n");
 {
   const { get, state } = boot();
   const MAX = get("TOPIC_POOL_MAX");
-  // A PROVEN topic sitting at low weight (served + engaged, decayed)…
+  // A like-earned topic sitting at low weight (decayed)…
   state.topics = [{ phrase: "proven gem", weight: 0.6, addedAt: Date.now() }];
-  state.topicSignals = { "proven gem": sig({ play: 3 }) };
+  state.ratingStates = { gemvid: { r: 5, t: Date.now(), v: { id: "gemvid", title: "gem", matchedTopics: ["proven gem"] } } };
   // …plus a cap's worth of never-served weight-5 silt.
   for (let i = 0; i < MAX + 20; i++) {
     state.topics.push({ phrase: `silt ${i}`, weight: 5, addedAt: Date.now() });
   }
   get("pruneTopicPool")();
   assert.ok(state.topics.some(t => t.phrase === "proven gem"),
-    "PROVEN topic must survive the cap despite low weight (old code evicted it first)");
+    "like-earned topic must survive the cap despite low weight (old code evicted it first)");
   assert.ok(state.topics.length <= MAX);
-  console.log("✅ cap exempts PROVEN topics — served evidence no longer evicts first");
+  console.log("✅ cap exempts like-earned topics — served evidence no longer evicts first");
 }
 
 // ── 6. Burn parole: sentence ends, re-burn doubles it ──────────────
@@ -218,7 +218,7 @@ console.log("Running Pool Hygiene Tests...\n");
   // The replacements must be wired, not merely deleted.
   assert.ok(/startGroundingInterval\(\)/.test(src), "grounding runs on its own interval");
   assert.ok(/isIgnoredTopic\(t\.phrase, likeCounts\)/.test(src), "selection consults the IGNORED predicate");
-  assert.ok(/isProvenTopic\(t\.phrase, likeCounts\)/.test(src), "the cap exempts PROVEN topics");
+  assert.ok(/isLikeEarnedTopic\(t, likeCounts\)/.test(src), "the cap exempts like-earned topics");
   assert.ok(/channelId: item\.channel_id \|\| ""/.test(src), "discovery videos carry real channel ids");
   assert.ok(/evictPoolForDislike\(/.test(src), "dislike evicts from the pool");
   console.log("✅ regression gate: 6 broken mechanisms removed, 5 replacements wired");

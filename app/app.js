@@ -138,6 +138,9 @@ let state = {
     // Feed-mix ledger: every video the smart feed SHOWED, with its era bucket,
     // topic, channel and what it later earned. Read with wgFeedMix().
     feedMix: { shown: [] },
+    // Discovery reset epoch (ms). Signal records older than this are void;
+    // synced so a reset survives the next pull from another browser.
+    resetAt: 0,
     // Mined / defined topic retrieval policies (intent, positive facets, negative exclusions).
     topicPolicies: {},
     // Cached semantic candidate classifications (videoId -> { classification, reason, t }).
@@ -226,9 +229,15 @@ const QUEUE_COMPOSE = {
     fetchBudget: { core: 10, adjacent: 8, explore: 5 }   // per-form limit hint for fetchVideosForTopic
 };
 
-/** The role a topic plays. Legacy entries derive: proven or weight >= 10 -> core, else adjacent; never explore. */
+/** The role a topic plays. Generated topics never take core; legacy entries derive: proven or weight >= 10 -> core, else adjacent; never explore. */
 function topicRole(t, likeCounts) {
     if (!t) return "adjacent";
+    // A generated guess (brainstorm/seed expansion) is adjacent at best, even
+    // when the backend planner labelled its batch "core". Only evidence (a
+    // like, a hand add, or a graduated play) can put it in the core band.
+    if (isGeneratedTopic(t)) {
+        return (t.role === "explore" || t.bornRole === "explore") ? "explore" : "adjacent";
+    }
     if (TOPIC_ROLES.includes(t.role)) return t.role;
     if (isProvenTopic(t.phrase, likeCounts) || t.weight >= 10) return "core";
     return "adjacent";
@@ -240,8 +249,11 @@ function promoteTopicRole(phrase, why) {
     if (!key) return false;
     const t = (state.topics || []).find(x => normalizeTopic(x.phrase) === key);
     if (!t || t.weight <= 0) return false;
+    // Engagement promotes a generated topic out of the guess band: from here on
+    // it is "engaged" evidence and keeps the core role the promotion assigns.
+    if (isGeneratedTopic(t)) t.origin = "engaged";
     const before = TOPIC_ROLES.includes(t.role) ? t.role : null;
-    if (before === "core") return false;
+    if (before === "core") { saveTopics(); return false; }
     if (!t.bornRole) t.bornRole = before || "adjacent";
     t.role = "core";
     t.graduatedAt = Date.now();
@@ -351,16 +363,23 @@ function composeTopicQueue(topics, n) {
     const picked = { core: [], adjacent: [], explore: [] };
     const takeAll = (role, phrases) => { phrases.forEach(p => { taken.add(p); picked[role].push(p); }); };
 
-    // Core, calibrated across liked clusters by like share.
+    // Core, calibrated across liked clusters by like share. Half the core band
+    // is reserved for like/hand-earned topics so a brainstorm batch cannot
+    // crowd out the evidence the feed is supposed to follow.
     const idx = buildClusterIndex();
     const clusterNames = Object.keys(idx.share).filter(k => idx.share[k] > 0);
-    if (clusterNames.length && quota.core > 0) {
-        const perCluster = largestRemainderSlots(quota.core, idx.share);
+    const coreLiked = byRole.core.filter(t => isLikeEarnedTopic(t, likeCounts));
+    const coreOther = byRole.core.filter(t => !isLikeEarnedTopic(t, likeCounts));
+    const likedQuota = Math.min(coreLiked.length, Math.max(0, Math.ceil(quota.core / 2)));
+    if (clusterNames.length && likedQuota > 0) {
+        const perCluster = largestRemainderSlots(likedQuota, idx.share);
         clusterNames.forEach(name => {
-            const pool = byRole.core.filter(t => clusterOfTopic(t, idx) === name);
+            const pool = coreLiked.filter(t => clusterOfTopic(t, idx) === name);
             takeAll("core", pick(pool, perCluster[name] || 0, taken));
         });
     }
+    takeAll("core", pick(coreLiked, likedQuota - picked.core.length, taken));
+    takeAll("core", pick(coreOther, quota.core - picked.core.length, taken));
     takeAll("core", pick(byRole.core, quota.core - picked.core.length, taken));
     takeAll("adjacent", pick(byRole.adjacent, quota.adjacent, taken));
     takeAll("explore", pick(byRole.explore, quota.explore, taken));
@@ -970,6 +989,40 @@ const TOPIC_DECAY_PER_PRUNE = 0.5;
 const TOPIC_STALE_DECAY_MS = 7 * 86400e3;   // no signal for a week -> start decaying
 const TOPIC_STALE_EVICT_MS = 21 * 86400e3;  // decayed to the floor AND dead 3 weeks -> evict
 
+// ── Provenance ───────────────────────────────────────────────────────
+// Every topic records where it came from. Without this a guess (brainstorm /
+// seed expansion) and a like-earned topic were indistinguishable to the role
+// and weight logic, so a generated batch could take core seats and outrank
+// what the user actually liked. Generated topics are capped at ADJACENT;
+// like-mined and hand-added topics are core by evidence.
+const GENERATED_TOPIC_ORIGINS = new Set(["brainstorm", "seed", "similar"]);
+const LIKE_MINE_BASE_WEIGHT = { A: 10, B: 9 };   // strictly above the brainstorm cap
+const BRAINSTORM_WEIGHT_CAP = 6;
+const PROVEN_PLAY_TTL_MS = 90 * 86400e3;         // play evidence expires; likes have their own decay
+
+/** Where a topic came from: like-mined | hand | engaged | brainstorm | seed | similar | "" (legacy). */
+function topicOrigin(t) {
+    return (t && t.origin) || "";
+}
+
+function isGeneratedTopic(t) {
+    return GENERATED_TOPIC_ORIGINS.has(topicOrigin(t));
+}
+
+/**
+ * Like/hand-earned topics keep their seats through decay and the pool cap.
+ * Play-only evidence ("engaged") decays like everything else — that exemption
+ * was what made a brainstorm topic with two plays immortal.
+ */
+function isLikeEarnedTopic(t, likeCounts) {
+    if (!t) return false;
+    if (t.origin === "like-mined" || t.origin === "hand") return true;
+    const k = normalizeTopic(t.phrase);
+    if (!k) return false;
+    if (likeCounts && (likeCounts[k] || 0) >= OUTCOME_PROVEN_MIN_LIKE_WEIGHT) return true;
+    return (state.likedTopics || []).some(x => normalizeTopic(x) === k);
+}
+
 /** Most recent moment anything happened to this topic: added, or any signal. */
 function topicFreshness(t) {
     const rec = (state.topicSignals || {})[normalizeTopic(t.phrase)];
@@ -984,9 +1037,11 @@ function pruneTopicPool() {
     const likedSet = new Set((state.likedTopics || []).map(normalizeTopic));
     const likeCounts = buildTopicLikeCounts();
 
-    // Age-based decay. Exempt: negatives (user decisions), liked topics, and
-    // PROVEN topics (the ledger says they earn engagement — staleness there
-    // means the feed under-served them, not that they failed).
+    // Age-based decay. Exempt: negatives (user decisions) and like/hand-earned
+    // topics (the ledger says they earn engagement — staleness there means the
+    // feed under-served them, not that they failed). Play-only "engaged"
+    // evidence decays; that permanent exemption is what made a generated topic
+    // with two plays immortal.
     state.topics.forEach(t => {
         if (t.weight <= 0) return;
         // Unknown age is NOT infinite age: a topic that reaches here without a
@@ -995,7 +1050,7 @@ function pruneTopicPool() {
         if (!t.addedAt) { t.addedAt = now; return; }
         const phrase = normalizeTopic(t.phrase);
         const ignored = isIgnoredTopic(phrase, likeCounts);
-        if (isProvenTopic(phrase, likeCounts) || (likedSet.has(phrase) && !ignored)) return;
+        if (isLikeEarnedTopic(t, likeCounts) && !ignored) return;
         // An explore topic that was shown enough to be IGNORED has resolved:
         // the experiment failed. Drop it to the floor so the 21-day eviction
         // below can reach it. Core/adjacent keep the soft retirement only.
@@ -1037,14 +1092,14 @@ function pruneTopicPool() {
         debug(`[Learn] Evicted ${evicted.length} stale topic(s): ${evicted.join(", ")}`);
     }
 
-    // Hard cap: negatives and PROVEN topics keep their seats (engaged evidence
-    // must not lose the cap fight to freshly-minted weight-5 guesses); the
-    // rest compete on weight.
+    // Hard cap: negatives and like/hand-earned topics keep their seats
+    // (engaged evidence must not lose the cap fight to freshly-minted guesses);
+    // the rest compete on weight.
     if (state.topics.length > TOPIC_POOL_MAX) {
         const keep = [];
         const contenders = [];
         state.topics.forEach(t => {
-            if (t.weight < 0 || isProvenTopic(t.phrase, likeCounts)) keep.push(t);
+            if (t.weight < 0 || isLikeEarnedTopic(t, likeCounts)) keep.push(t);
             else contenders.push(t);
         });
         contenders.sort((a, b) => b.weight - a.weight);
@@ -1330,6 +1385,9 @@ function loadState() {
         state.watchedHistory = JSON.parse(localStorage.getItem("wallgarden_watched") || "{}");
     } catch (e) { state.watchedHistory = {}; }
     state.topicSignals = JSON.parse(getStoredItem("topic_signals") || "{}");
+    // Server-visible discovery reset epoch: signal records older than this are
+    // void (see resetDiscoveryFeed).
+    state.resetAt = Number(getStoredItem("reset_at") || 0) || 0;
     state.agentQueue = JSON.parse(getStoredItem("agent_queue") || "[]");
     state.llmCallStats = JSON.parse(getStoredItem("llm_call_stats") || "{}");
     try {
@@ -1434,7 +1492,7 @@ function loadState() {
     // under an older strategy (e.g. the date-sorted era queries) would keep
     // serving slop for days. Bump WG_POOL_VERSION to invalidate.
     // "4": flush stale 1,000-item reservoir (e.g. decayed "oklo stock" cards).
-    const WG_POOL_VERSION = "4";
+    const WG_POOL_VERSION = "5";
     if (getStoredItem("pool_version") !== JSON.stringify(WG_POOL_VERSION) && state.smartFeedSuggestionPool.length > 0) {
         debug(`[Smart Feed] Pool version changed — flushing ${state.smartFeedSuggestionPool.length} pre-ranking suggestions.`);
         state.smartFeedSuggestionPool = [];
@@ -1594,7 +1652,7 @@ function saveChannels() {
 // entries never represented a choice the user made. Anything the user actually
 // earned is kept: mined-from-a-like (10/6), hand-added, tier-A brainstormed (8),
 // and every negative weight (a burn is a decision too).
-const TOPIC_PURGE_VERSION = 1;
+const TOPIC_PURGE_VERSION = 2;
 
 function looksLikeVideoTitle(phrase) {
     // Real topics are 1-4 words by prompt contract; video titles are longer and
@@ -1620,9 +1678,10 @@ function purgeUnearnedTopics() {
         const phrase = normalizeTopic(t.phrase);
         if (t.weight < 0) return true;                       // burns are decisions
         if (liked.has(phrase) || mined.has(phrase)) return true; // earned via a like
+        if (t.origin === "hand" || t.origin === "engaged") return true; // user/play earned
         if (looksLikeVideoTitle(phrase)) { dropped.push(t.phrase); return false; }
         if (t.weight <= 2) { dropped.push(t.phrase); return false; } // /similar spam
-        return true;                                          // tier-A/B, hand-added
+        return true;                                          // tier-A/B
     });
 
     persistField("topic_purge_version", TOPIC_PURGE_VERSION);
@@ -1633,6 +1692,115 @@ function purgeUnearnedTopics() {
     console.log(`[Topics] Purged ${dropped.length} unearned topics (${before} -> ${state.topics.length}). ` +
                 `Inspect with JSON.parse(localStorage.getItem("${getProfileKey("topic_purge_log")}")).`);
 }
+
+/**
+ * Everything the user actually earned: topics mined from a liked video, topics
+ * attached to a like rating, the liked-topic seed list, hand-added topics, and
+ * topics played inside the last 90 days. This is the keep-set for a reset.
+ */
+function earnedTopicPhrases(now) {
+    const earned = new Set();
+    Object.values(state.minedVideos || {}).forEach(m => {
+        (m.topics || []).forEach(t => { const k = normalizeTopic(t); if (k) earned.add(k); });
+    });
+    Object.values(state.ratingStates || {}).forEach(st => {
+        if (!st || st.r !== 5 || !st.v) return;
+        const own = normalizeTopic(st.v.discoveryTopic || "");
+        if (own) earned.add(own);
+        (st.v.matchedTopics || []).forEach(t => { const k = normalizeTopic(t); if (k) earned.add(k); });
+    });
+    (state.likedTopics || []).forEach(t => { const k = normalizeTopic(t); if (k) earned.add(k); });
+    (state.topics || []).forEach(t => {
+        if (!t || !t.phrase || t.weight <= 0) return;
+        const k = normalizeTopic(t.phrase);
+        if (t.origin === "hand" || t.origin === "engaged") earned.add(k);
+        const rec = (state.topicSignals || {})[k];
+        const lastPlayAt = (rec && rec.lastPlayAt) || 0;
+        if (lastPlayAt && now - lastPlayAt <= PROVEN_PLAY_TTL_MS) earned.add(k);
+    });
+    earned.delete("");
+    return earned;
+}
+
+/**
+ * Reset the discovery topic list, keeping likes.
+ *
+ * Cleared: generated topics, the whole signal ledger, the suggestion pool, the
+ * pending queue, the 24h feed-mix ledger and the rendered feed.
+ * Preserved: ratings (likes/dislikes), mined topics, likedTopics, avoided videos,
+ * rejected facets, blocked channels, burns, disliked topics, queue, playlists,
+ * watched history, policies and settings.
+ *
+ * `resetAt` is pushed to the server (SYNC_FIELDS) so pre-reset impression
+ * counters cannot be resurrected by the next pull.
+ */
+function resetDiscoveryFeed(opts) {
+    const now = Date.now();
+    const likeCounts = buildTopicLikeCounts(now);
+    const earned = earnedTopicPhrases(now);
+    const before = (state.topics || []).length;
+    const previous = new Map((state.topics || []).map(t => [normalizeTopic(t.phrase), t]));
+    const dropped = [];
+
+    (state.topics || []).forEach(t => {
+        if (!earned.has(normalizeTopic(t.phrase))) dropped.push(t.phrase);
+    });
+
+    const kept = [];
+    earned.forEach(k => {
+        const prev = previous.get(k);
+        const likes = likeCounts[k] || 0;
+        const rec = (state.topicSignals || {})[k];
+        const playProven = rec && rec.lastPlayAt && (now - rec.lastPlayAt) <= PROVEN_PLAY_TTL_MS;
+        let weight = Math.max(2, Math.min(16, Math.round(2 + 4 * likes)));
+        if (likes > 0) weight = Math.max(weight, LIKE_MINE_BASE_WEIGHT.A);
+        if (playProven) weight = Math.max(weight, 8);
+        if (prev && prev.origin === "hand") weight = Math.max(weight, prev.weight || 5);
+        kept.push({
+            phrase: prev ? prev.phrase : k,
+            weight,
+            addedAt: (prev && prev.addedAt) || now,
+            origin: (likes > 0 || (prev && prev.origin === "like-mined")) ? "like-mined"
+                : (prev && prev.origin === "hand") ? "hand" : "engaged",
+            role: "core",
+            bornRole: "core"
+        });
+    });
+    kept.sort((a, b) => b.weight - a.weight);
+
+    state.topics = kept;
+    state.topicSignals = {};
+    state.smartFeedTopicsQueue = kept.map(t => normalizeTopic(t.phrase));
+    state.smartFeedUsedTopics = [];
+    state.smartFeedVideos = [];
+    state.smartFeedSuggestionPool = [];
+    state.smartFeedInitialized = false;
+    state.feedMix = { shown: [] };
+    state.resetAt = now;
+
+    persistField("reset_at", state.resetAt);
+    persistField("topic_signals", state.topicSignals);
+    persistField("feed_mix", state.feedMix);
+    persistField("pool_version", "5");
+    persistField("topic_purge_version", TOPIC_PURGE_VERSION);
+    persistField("topic_purge_log", {
+        at: now, before, after: kept.length, dropped, reset: true,
+        kept: kept.map(t => `${t.phrase} (${t.weight}, ${t.origin})`)
+    });
+    saveTopics();
+    flushSmartFeedSuggestionPoolSave();
+    invalidateScoreCache();
+    schedulePushRemoteState();
+
+    debug(`[Reset] Discovery reset: ${before} -> ${kept.length} topics (${dropped.length} dropped), likes kept.`);
+    return { before, after: kept.length, dropped, kept: kept.map(t => t.phrase) };
+}
+
+window.wgResetDiscovery = function (opts) {
+    const r = resetDiscoveryFeed(opts || { keepLikes: true });
+    console.log(`[Reset] kept ${r.after} topic(s), dropped ${r.dropped.length}. Inspect topic_purge_log.`);
+    return r;
+};
 
 // ══════════════════════════════════════════════════════════════════════
 // SIGNAL LEDGER — browsing counts, it does not generate
@@ -1751,6 +1919,8 @@ function recordTopicSignal(topic, kind, dedupeKey) {
     } else if (kind === "play" || kind === "open") {
         rec.impSinceEngage = 0;
         rec.lastEngagedAt = rec.t;
+        // PROVEN-by-play expires (see isProvenTopic); keep the play clock.
+        if (kind === "play") rec.lastPlayAt = rec.t;
     }
 
     const total = topicSignalTotal(phrase, kind);
@@ -2237,7 +2407,8 @@ function _wgSyncSnapshot() {
         mined: state.minedVideos || {},
         topicSignals: state.topicSignals || {},
         avoided: state.avoidedVideos || {},
-        rejectedFacets: state.rejectedFacets || {}
+        rejectedFacets: state.rejectedFacets || {},
+        resetAt: state.resetAt || 0
     };
     // Only ship a profile that exists — an empty object would fight the
     // server's LWW merge for no reason.
@@ -2326,8 +2497,23 @@ function _wgApplyRemoteFields(fields) {
     if (!fields) return;
     _syncApplying = true;
     try {
+        // A newer reset epoch voids every pre-reset signal record — locally and
+        // in the incoming push. Likes live in ratings/mined and are untouched.
+        if (typeof fields.resetAt === "number" && fields.resetAt > (state.resetAt || 0)) {
+            state.resetAt = fields.resetAt;
+            persistField("reset_at", state.resetAt);
+            const signals = state.topicSignals || {};
+            Object.keys(signals).forEach(k => {
+                if ((signals[k].t || 0) < state.resetAt) delete signals[k];
+            });
+            persistField("topic_signals", state.topicSignals);
+        }
         if (fields.topicSignals) {
-            state.topicSignals = mergeTopicSignals(state.topicSignals, fields.topicSignals);
+            const live = {};
+            Object.entries(fields.topicSignals).forEach(([k, rec]) => {
+                if (rec && (rec.t || 0) >= (state.resetAt || 0)) live[k] = rec;
+            });
+            state.topicSignals = mergeTopicSignals(state.topicSignals, live);
             persistField("topic_signals", state.topicSignals);
         }
         if (fields.ratings) {
@@ -2401,9 +2587,14 @@ function _wgApplyRemoteFields(fields) {
                 if (!rec || !Array.isArray(rec.topics)) return;
                 const cur = state.minedVideos[vid];
                 if (cur && (cur.t || 0) >= (rec.t || 0)) return;
-                // Remote entries carry plain labels; re-enter them at the
-                // default mined weight (tier unknown -> treat as B).
-                applyMinedTopics(vid, rec.topics.map(t2 => ({ topic: t2, tier: "B", weight: 4 })), { quiet: true });
+                // Remote entries carry plain labels plus the miner's tier map.
+                // Replay at the stored tier so a like mined in another browser
+                // keeps its weight instead of being forced down to B/4.
+                applyMinedTopics(vid, rec.topics.map(t2 => ({
+                    topic: t2,
+                    tier: (rec.tiers && rec.tiers[t2]) || "A",
+                    weight: 8
+                })), { quiet: true });
                 state.minedVideos[vid] = rec; // keep the remote timestamp
                 applied++;
             });
@@ -2745,6 +2936,17 @@ function setupSettingsTabListeners() {
             showToast("Graph successfully pruned", "success");
         });
     }
+
+    const btnResetDiscovery = document.getElementById("btn-reset-discovery");
+    if (btnResetDiscovery) {
+        btnResetDiscovery.addEventListener("click", () => {
+            if (!confirm("Reset the discovery topic list? Every topic that was not earned by a like, a play or a hand edit is dropped. Likes, ratings, burns and blocked channels are kept.")) return;
+            const r = resetDiscoveryFeed({ keepLikes: true });
+            renderTopicsList();
+            renderFeed();
+            showToast(`Discovery reset: ${r.after} topic(s) kept, ${r.dropped.length} dropped`, "success");
+        });
+    }
 }
 
 function setupChannelListeners() {
@@ -2841,7 +3043,7 @@ function setupTopicPrefListeners() {
         if (existingIdx !== -1) {
             state.topics[existingIdx].weight = weight;
         } else {
-            state.topics.push({ phrase, weight, addedAt: Date.now(), role: "core", bornRole: "core" });
+            state.topics.push({ phrase, weight, addedAt: Date.now(), origin: "hand", role: "core", bornRole: "core" });
         }
         
         saveTopics();
@@ -4240,12 +4442,18 @@ function scoreDiscoveryVideo(video, ctx) {
         intent = Math.max(0, 0.7 * overlap + 0.3 * rankPrior - classificationPenalty * 0.5);
     }
 
-    // authority: log-scale views (capped at 0.5) + liked-channel affinity (0.5)
+    // authority: log-scale views + graded like affinity for the topic this
+    // video is being fetched for + liked-channel affinity. The topic affinity
+    // used to be binary (channel liked or not); a topic the user liked 3+ times
+    // now lifts its videos even when the channel is new.
     // Views are clamped so 10M-view novelty videos cannot overcome relevance.
     const views = Math.max(10, video.viewCount || 10);
     const likedChannel = ctx && ctx.likedChannels &&
         ctx.likedChannels.has((video.channelName || "").toLowerCase()) ? 1 : 0;
-    const authority = 0.5 * Math.min(1, Math.log10(views) / 6.5) + 0.5 * likedChannel;
+    const topicLikeAffinity = ctx && ctx.likeCounts
+        ? Math.min(1, (ctx.likeCounts[normalizeTopic(topic)] || 0) / 3) : 0;
+    const authority = 0.35 * Math.min(1, Math.log10(views) / 6.5) +
+        0.35 * topicLikeAffinity + 0.30 * likedChannel;
 
     // maturity: proven beats brand-new
     let maturity = 0.5;
@@ -4309,7 +4517,10 @@ function getScoreAndMatches(video) {
         }
         
         if (matched) {
-            score += topic.weight;
+            // A like-earned topic carries 1.5x its weight: the user explicitly
+            // asked for this, so it must outrank a guess that happens to share
+            // the title's words.
+            score += topic.weight * (topic.origin === "like-mined" ? 1.5 : 1);
             matches.push(topic.phrase.toLowerCase());
         }
     });
@@ -8423,12 +8634,17 @@ function isIgnoredTopic(phrase, likeCounts) {
         topicSignalTotal(t, "open") === 0;
 }
 
-/** The PROVEN verdict — recently liked (decayed weight >= 0.5), or deliberately played enough to trust. */
+/** The PROVEN verdict — recently liked (decayed weight >= 0.5), or played enough inside the last 90 days. */
 function isProvenTopic(phrase, likeCounts) {
     const t = normalizeTopic(phrase);
     if (!t) return false;
     if (likeCounts && (likeCounts[t] || 0) >= OUTCOME_PROVEN_MIN_LIKE_WEIGHT) return true;
-    return topicSignalTotal(t, "play") >= OUTCOME_PROVEN_MIN_PLAYS;
+    if (topicSignalTotal(t, "play") < OUTCOME_PROVEN_MIN_PLAYS) return false;
+    const rec = (state.topicSignals || {})[t];
+    const lastPlayAt = (rec && rec.lastPlayAt) || 0;
+    // Play evidence expires. It used to be permanent, so a generated topic that
+    // got two plays once outranked every fresh like forever.
+    return !!lastPlayAt && (Date.now() - lastPlayAt) <= PROVEN_PLAY_TTL_MS;
 }
 
 function buildTopicOutcomes() {
@@ -8687,25 +8903,44 @@ function applyMinedTopics(videoId, ratedTopics, opts) {
     const quiet = opts && opts.quiet;
     let added = 0;
     const acceptedLabels = [];
+    const acceptedTiers = {};
+    const likeCounts = buildTopicLikeCounts();
+
+    // A fresh like invalidates the pending brainstorm tail: those entries are
+    // guesses, and keeping them ahead of like-earned topics is what drowned the
+    // likes out. Mined phrases are unshifted below, so filtering here cannot
+    // remove them.
+    if (state.smartFeedTopicsQueue.length) {
+        state.smartFeedTopicsQueue = state.smartFeedTopicsQueue.filter(p => {
+            const e = state.topics.find(x => normalizeTopic(x.phrase) === normalizeTopic(p));
+            return !e || !isGeneratedTopic(e);
+        });
+    }
 
     ratedTopics.forEach(rt => {
         const phrase = normalizeTopic(rt.topic);
         if (!phrase || isBurned(phrase)) return;
         acceptedLabels.push(phrase);
+        const tier = rt.tier === "B" ? "B" : "A";
+        acceptedTiers[phrase] = tier;
 
-        // Sink 1: topic pool. Mined topics carry direct evidence, so they
-        // enter 2 above their brainstorm-tier weight (A=10, B=6).
-        const weight = (rt.weight || 4) + 2;
+        // Sink 1: topic pool. A like is direct evidence, so it enters above the
+        // brainstorm cap (A=10, B=9) and scales with decayed likes (cap 16) —
+        // a generated guess can never outrank it. The old tier+2 formula put a
+        // B-tier like (6) BELOW a brainstorm A-tier (8).
+        const base = LIKE_MINE_BASE_WEIGHT[tier] || LIKE_MINE_BASE_WEIGHT.A;
+        const weight = Math.min(16, base + 2 * Math.min(3, likeCounts[phrase] || 0));
         const existing = state.topics.find(t => normalizeTopic(t.phrase) === phrase);
         if (!existing) {
-            // src = which prompt shape produced it. Without this stamp the
-            // A/B can never be scored on outcomes — the lesson from
-            // agent_skills, where 145 versions joined 0 outcome rows.
-            state.topics.push({ phrase, weight, addedAt: Date.now(), src: _lastContextVariant, role: "core", bornRole: "core" });
+            // src = which prompt shape produced it (A/B scoring); origin = where
+            // the topic came from (role/weight logic). Two different questions.
+            state.topics.push({ phrase, weight, addedAt: Date.now(), src: _lastContextVariant, origin: "like-mined", role: "core", bornRole: "core" });
             added++;
         } else if (existing.weight > 0) {
             if (existing.weight < weight) existing.weight = weight;
-            // A like just got mined into this topic: that is core evidence.
+            // A like just got mined into this topic: that is core evidence, and
+            // it stops being a guess.
+            existing.origin = "like-mined";
             promoteTopicRole(phrase, "like mined");
         }
         // Place newly mined topics at the FRONT of smartFeedTopicsQueue so
@@ -8744,8 +8979,9 @@ function applyMinedTopics(videoId, ratedTopics, opts) {
         }
     }
 
-    // Sink 4: idempotence marker.
-    state.minedVideos[videoId] = { t: Date.now(), topics: acceptedLabels };
+    // Sink 4: idempotence marker. `tiers` rides along so another browser can
+    // replay the extraction at the right weight instead of forcing tier B.
+    state.minedVideos[videoId] = { t: Date.now(), topics: acceptedLabels, tiers: acceptedTiers };
 
     if (!quiet && acceptedLabels.length > 0) {
         debug(`[Mining] ${videoId}: ${acceptedLabels.join(", ")}`);
@@ -8902,9 +9138,12 @@ async function generateBrainstormTopics(append, numRequests = 1) {
                 const role = TOPIC_ROLES.includes(r.role) ? r.role : undefined;
                 // src was never stamped on this path (the "unstamped" arm in
                 // wgPromptAB); role/cluster/fit/gen are the new stamps.
+                // A brainstorm topic is a GUESS: cap its weight below the
+                // like-mined band and mark its provenance so topicRole can never
+                // give it a core seat on the strength of the backend's label.
                 state.topics.push({
-                    phrase, weight: weight || 5, addedAt: Date.now(), src: _lastContextVariant,
-                    role, bornRole: role, cluster: r.cluster || undefined, fit: r.fit || undefined,
+                    phrase, weight: Math.min(BRAINSTORM_WEIGHT_CAP, weight || 5), addedAt: Date.now(), src: _lastContextVariant,
+                    origin: "brainstorm", role, bornRole: role, cluster: r.cluster || undefined, fit: r.fit || undefined,
                     tier: r.tier || undefined, gen
                 });
             }
@@ -8970,8 +9209,13 @@ async function generateTopicsForSeeds(seeds, budget, strongestReason) {
     cleanSeeds.forEach(seed => {
         if (isBurned(seed)) return;
         const idx = state.topics.findIndex(t => normalizeTopic(t.phrase) === seed);
-        if (idx === -1) state.topics.push({ phrase: seed, weight: 5, addedAt: Date.now(), role: "core", bornRole: "core" });
-        else state.topics[idx].weight = Math.max(state.topics[idx].weight, 5);
+        // The seed earned its seat by crossing a threshold, so it is core
+        // evidence — not a guess. Marking it "engaged" keeps topicRole honest.
+        if (idx === -1) state.topics.push({ phrase: seed, weight: 5, addedAt: Date.now(), origin: "engaged", role: "core", bornRole: "core" });
+        else {
+            state.topics[idx].weight = Math.max(state.topics[idx].weight, 5);
+            if (isGeneratedTopic(state.topics[idx])) state.topics[idx].origin = "engaged";
+        }
         if (!state.smartFeedTopicsQueue.includes(seed)) state.smartFeedTopicsQueue.push(seed);
     });
     saveTopics();
@@ -9025,8 +9269,8 @@ async function generateTopicsForSeeds(seeds, budget, strongestReason) {
             // the stored phrase, so a Title-Case reply duplicated the entry.
             if (!state.topics.some(t => normalizeTopic(t.phrase) === phrase)) {
                 state.topics.push({
-                    phrase, weight: (r && r.weight) || 4, addedAt: Date.now(), src: _lastContextVariant,
-                    role: bornRole, bornRole, parent: query,
+                    phrase, weight: Math.min(BRAINSTORM_WEIGHT_CAP, (r && r.weight) || 4), addedAt: Date.now(), src: _lastContextVariant,
+                    origin: "seed", role: bornRole, bornRole, parent: query,
                     fit: (r && r.fit) || undefined, tier: (r && r.tier) || undefined, gen
                 });
             }
@@ -9388,6 +9632,7 @@ function buildSlateCtx() {
         temperature: 0.15,
         targetEra: deriveEraPrior(undefined, now),
         likedChannels,
+        likeCounts,
         recent: buildRecentSlateCounts(now),
         shownIds: shownInfo.ids,
         lastTopTopic: shownInfo.lastTopTopic,
@@ -9400,7 +9645,7 @@ function buildSlateCtx() {
                 return -10;
             }
             const legacy = getScoreAndMatches(v).score;
-            const r = rankScoreFor(v, { topic, likedChannels, legacyScore: legacy });
+            const r = rankScoreFor(v, { topic, likedChannels, likeCounts, legacyScore: legacy });
             v._rankScore = r.rankScore;
             v._rankBreakdown = r.breakdown;
             return r.rankScore;
@@ -10537,7 +10782,7 @@ async function editDiscoverTopic(topic) {
     if (existingNewIndex !== -1) {
         state.topics[existingNewIndex].weight = Math.max(state.topics[existingNewIndex].weight, 5); // Ensure not muted
     } else {
-        state.topics.push({ phrase: newTopicClean, weight: 5, addedAt: Date.now(), role: "core", bornRole: "core" });
+        state.topics.push({ phrase: newTopicClean, weight: 5, addedAt: Date.now(), origin: "hand", role: "core", bornRole: "core" });
     }
     saveTopics();
     

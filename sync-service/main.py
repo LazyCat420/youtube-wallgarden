@@ -113,6 +113,9 @@ def _notify_music_player_async(updated_at: int) -> None:
 #   YouTube FYP recommendations or rejected videos to avoid in feeds.
 # * `rejectedFacets`: { facet: { facet, fromTopic, protectedAnchors, aliases, t, permanent } } —
 #   discriminating negative modifiers extracted when burning compound topics.
+# * `resetAt`: int epoch ms — the last "purge topics, keep likes" reset. Merges
+#   by scalar max (a stale push can never rewind it); topicSignals records with
+#   `t < resetAt` are void and dropped. Likes/mined/queue/etc. are untouched.
 SYNC_FIELDS = [
     "ratings",
     "queue",
@@ -123,6 +126,7 @@ SYNC_FIELDS = [
     "topicSignals",
     "avoided",
     "rejectedFacets",
+    "resetAt",
 ]
 
 
@@ -187,7 +191,24 @@ def _merge_profile(base, incoming):
     return incoming if inc_t >= base_t else base
 
 
-def _merge_topic_signals(base, incoming):
+def _as_epoch_ms(value):
+    """Coerce a stored/pushed epoch to a non-negative int; garbage reads as 0."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _merge_reset_at(base, incoming):
+    """Scalar max of the reset epoch. NOT last-write-wins: a browser that has
+    not pulled the reset yet re-pushes its older (or absent) value, and that
+    stale push must never rewind the epoch and resurrect purged signals."""
+    return max(_as_epoch_ms(base), _as_epoch_ms(incoming))
+
+
+def _merge_topic_signals(base, incoming, reset_at=0):
     """Per-CLIENT high-water merge of the topic interest counters.
 
     Every other field here is last-write-wins, and LWW is WRONG for this one.
@@ -203,10 +224,23 @@ def _merge_topic_signals(base, incoming):
 
     `f` (fired-at high-water marks) merges by max for the same reason: a
     threshold already spent on one browser must not be spent again on another.
+
+    `reset_at` (epoch ms, the merged `resetAt`) voids every record — stored or
+    incoming — whose `t` is older than the reset, so the purged impression
+    counters cannot be merged back in by a browser that has not pulled yet.
     """
+    reset_at = _as_epoch_ms(reset_at)
     out = dict(base) if isinstance(base, dict) else {}
+    if reset_at:
+        out = {
+            topic: rec
+            for topic, rec in out.items()
+            if isinstance(rec, dict) and _as_epoch_ms(rec.get("t")) >= reset_at
+        }
     for topic, rec in (incoming or {}).items():
         if not isinstance(rec, dict):
+            continue
+        if reset_at and _as_epoch_ms(rec.get("t")) < reset_at:
             continue
         cur = out.get(topic)
         if not isinstance(cur, dict):
@@ -242,7 +276,37 @@ _MERGERS = {
     "profile": _merge_profile,
     "avoided": _merge_lww_map,
     "rejectedFacets": _merge_lww_map,
+    "resetAt": _merge_reset_at,
 }
+
+
+def _merge_fields(existing, incoming):
+    """Merge one pushed `fields` payload into the stored document (pure).
+
+    Order matters: `resetAt` is resolved FIRST (max of stored and pushed) and
+    then fed into the `topicSignals` merge, so pre-reset records are dropped
+    from both the stored map and the push — even when this push carries only
+    `resetAt`, or only stale signals. Every other field (ratings, mined, queue,
+    avoided, rejectedFacets, watched, ...) merges as before: a reset keeps likes.
+    """
+    existing = existing if isinstance(existing, dict) else {}
+    incoming = incoming if isinstance(incoming, dict) else {}
+    merged = {}
+    if "resetAt" in incoming or "resetAt" in existing:
+        merged["resetAt"] = _merge_reset_at(existing.get("resetAt"), incoming.get("resetAt"))
+    reset_at = merged.get("resetAt", 0)
+
+    for field in SYNC_FIELDS:
+        if field == "resetAt":
+            continue
+        if field == "topicSignals":
+            if field in incoming or field in existing:
+                merged[field] = _merge_topic_signals(existing.get(field), incoming.get(field), reset_at)
+        elif field in incoming:
+            merged[field] = _MERGERS[field](existing.get(field), incoming[field])
+        elif field in existing:
+            merged[field] = existing[field]
+    return merged
 
 
 def _project(doc):
@@ -322,13 +386,7 @@ def put_state(profile: str = "global", body: dict = Body(default={})):
     incoming = (body or {}).get("fields", {}) or {}
     existing = _state.find_one({"_id": DOC_ID}) or {}
 
-    merged = {}
-    for field in SYNC_FIELDS:
-        if field in incoming:
-            merged[field] = _MERGERS[field](existing.get(field), incoming[field])
-        elif field in existing:
-            merged[field] = existing[field]
-
+    merged = _merge_fields(existing, incoming)
     merged["updatedAt"] = datetime.now(timezone.utc).isoformat()
     _state.update_one({"_id": DOC_ID}, {"$set": merged}, upsert=True)
 

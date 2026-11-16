@@ -1,3 +1,40 @@
+# Handoff — Discovery reset (keep likes), like-first topic roles, expiring play evidence (2026-11-15)
+
+**Discovery feed reset + like dominance.** The discovery feed kept re-seeding old generated
+clusters while likes were drowned out. Four mechanisms caused it, all fixed here:
+
+- **No reset affordance.** New Settings → Topics & Filters → **Reset topics (keep likes)**
+  (`resetDiscoveryFeed` / `window.wgResetDiscovery`): keeps topics mined from a liked video,
+  topics on a like rating, `likedTopics`, hand-added topics and topics played in the last 90
+  days; drops every other (generated) topic and clears the signal ledger, suggestion pool,
+  pending queue, 24h feed-mix ledger and rendered feed. Likes, dislikes, mined topics, burns,
+  avoided videos, rejected facets, blocked channels, queue/playlists/watched are untouched.
+- **Sync resurrection.** `topics` are browser-local, but `topicSignals` are synced, so a local
+  wipe was undone by the next pull. The reset stamps `resetAt` (new `SYNC_FIELDS` entry) and
+  both sides drop signal records older than that epoch: client in `_wgApplyRemoteFields`
+  (+ filtering incoming pushes), server in `_merge_fields` → `_merge_topic_signals(reset_at)`
+  and `brain_graph._live_topic_signals`. Likes (ratings/mined) are never filtered.
+- **Generated topics took core seats.** `topicRole` honoured the backend planner's `role:"core"`
+  for a whole brainstorm batch and derived core from `weight >= 10`. Every topic now carries
+  `origin` (`like-mined | hand | engaged | brainstorm | seed | similar`); generated topics are
+  capped at `adjacent` (or their `explore` birth role), brainstorm weight is capped at 6, and
+  half of the core quota is reserved for like/hand-earned topics. A like also drops pending
+  brainstorm entries from the queue before fronting the mined topic.
+- **Weights and evidence.** Like-mined topics enter at A=10 / B=9 (+2 per decayed like, cap 16)
+  — strictly above the brainstorm cap; `mined` records now carry a `tiers` map so a like mined
+  in another browser replays at the right tier instead of being forced to B/4. Play-proven
+  evidence expires after 90 days (`lastPlayAt`), and only like/hand-earned topics keep the
+  decay/eviction/cap exemptions. `getScoreAndMatches` gives like-mined topics a 1.5x weight
+  bonus and `scoreDiscoveryVideo` grades topic like-affinity (0.35 of authority) instead of the
+  binary liked-channel flag.
+
+Tests: `npm test` — 21 suites including the new `test/reset.test.mjs` (7 cases) all pass;
+`sync-service` pytest 41/41 (6 new reset/merge cases). Assets bumped to `?v=20261115-v73`.
+The wider channel-quality layer from `plan/discovery_reset_and_channel_quality.md` (Phase B)
+is **not** implemented yet.
+
+---
+
 # Handoff — Dependency security refresh of the sync-service Python pins (2026-10-22)
 
 **Dependency security refresh 2026-10-22.** `sync-service/requirements.txt` is what the Docker image installs

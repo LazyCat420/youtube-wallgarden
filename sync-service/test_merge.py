@@ -15,8 +15,10 @@ import os
 os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017/?serverSelectionTimeoutMS=1")
 
 from main import (  # noqa: E402
+    _merge_fields,
     _merge_lww_map,
     _merge_playlists,
+    _merge_reset_at,
     _merge_topic_signals,
     _merge_watched,
 )
@@ -194,6 +196,91 @@ def test_signals_tolerate_garbage():
     assert _merge_topic_signals({}, {"x": {"c": {"cA": "nope"}}})["x"]["c"] == {}
 
 
+# ── resetAt: "purge topics, keep likes" epoch ───────────────────────────────
+#
+# A monotonic scalar (max, never LWW) that voids every topicSignals record
+# older than it. Likes (ratings/mined) and every other field must survive.
+
+RESET = 1_700_000_000_000
+
+
+def test_reset_at_merges_to_max_not_incoming():
+    """A browser that has not pulled the reset re-pushes an older epoch."""
+    assert _merge_reset_at(RESET, RESET - 5000) == RESET
+    assert _merge_reset_at(RESET - 5000, RESET) == RESET
+    assert _merge_reset_at(None, RESET) == RESET
+    assert _merge_reset_at(RESET, None) == RESET
+    assert _merge_reset_at("garbage", None) == 0
+    merged = _merge_fields({"resetAt": RESET}, {"resetAt": RESET - 5000})
+    assert merged["resetAt"] == RESET
+
+
+def test_reset_at_absent_stays_absent():
+    """No reset ever happened: the field must not appear out of nowhere."""
+    merged = _merge_fields({"ratings": {}}, {"ratings": {"A": {"r": 5, "t": 1}}})
+    assert "resetAt" not in merged
+
+
+def test_signals_drop_records_older_than_reset():
+    base = {
+        "old_stored": {"t": RESET - 1, "c": {"cA": {"imp": 20}}, "f": {"imp": 10}},
+        "new_stored": {"t": RESET + 1, "c": {"cA": {"imp": 2}}, "f": {}},
+        "garbage": "not a dict",
+    }
+    incoming = {
+        "old_pushed": {"t": RESET - 1000, "c": {"cB": {"imp": 9}}, "f": {}},
+        "at_reset": {"t": RESET, "c": {"cB": {"imp": 1}}, "f": {}},
+        "new_pushed": {"t": RESET + 5, "c": {"cB": {"play": 1}}, "f": {}},
+    }
+    merged = _merge_topic_signals(base, incoming, RESET)
+    assert set(merged) == {"new_stored", "at_reset", "new_pushed"}
+    assert _total(merged, "new_stored") == 2
+    assert _total(merged, "at_reset") == 1
+    assert _total(merged, "new_pushed", "play") == 1
+
+
+def test_signals_reset_voids_stored_counters_of_reused_topic():
+    """A post-reset record for a topic must start fresh, not inherit the
+    purged pre-reset counters still sitting in the stored map."""
+    base = {"kiln": {"t": RESET - 1, "c": {"cA": {"imp": 20}}, "f": {"imp": 10}}}
+    incoming = {"kiln": {"t": RESET + 1, "c": {"cA": {"imp": 1}}, "f": {}}}
+    merged = _merge_topic_signals(base, incoming, RESET)
+    assert _total(merged, "kiln") == 1
+    assert merged["kiln"]["f"] == {}
+
+
+def test_reset_push_purges_stored_signals_but_keeps_likes():
+    existing = {
+        "ratings": {"v1": {"r": 5, "t": RESET - 10, "v": {"discoveryTopic": "kiln"}}},
+        "mined": {"v1": {"t": RESET - 10, "topics": ["kiln firing"]}},
+        "queue": {"q1": {"p": 1, "t": RESET - 10}},
+        "watched": {"v1": RESET - 10},
+        "avoided": {"v9": {"t": RESET - 10, "reason": "fyp"}},
+        "rejectedFacets": {"vegan": {"facet": "vegan", "t": RESET - 10, "permanent": True}},
+        "topicSignals": {"kiln": {"t": RESET - 1, "c": {"cA": {"imp": 20}}, "f": {}}},
+    }
+    merged = _merge_fields(existing, {"resetAt": RESET, "topicSignals": {}})
+    assert merged["resetAt"] == RESET
+    assert merged["topicSignals"] == {}
+    for field in ("ratings", "mined", "queue", "watched", "avoided", "rejectedFacets"):
+        assert merged[field] == existing[field], field
+
+
+def test_stale_browser_cannot_resurrect_purged_signals():
+    """After the reset landed, a browser still holding the old map pushes it
+    (with no or an older resetAt): the epoch holds and old records stay void."""
+    existing = {"resetAt": RESET, "topicSignals": {}}
+    stale = {
+        "resetAt": RESET - 99_999,
+        "topicSignals": {"kiln": {"t": RESET - 1, "c": {"cA": {"imp": 20}}, "f": {}}},
+    }
+    merged = _merge_fields(existing, stale)
+    assert merged["resetAt"] == RESET
+    assert merged["topicSignals"] == {}
+    merged = _merge_fields(existing, {"topicSignals": stale["topicSignals"]})
+    assert merged["topicSignals"] == {}
+
+
 # ── brain_graph: discriminating facets, PPR + Thompson, algorithmic grounding ──
 
 def test_vegan_bbq_extracts_vegan_and_protects_bbq():
@@ -250,6 +337,42 @@ def test_rank_brain_topics_decays_stale_likes_and_excludes_ignored():
     assert rec_topics[0] == "ceramic glaze chemistry"
     frontier_topics = [r["topic"] for r in res["exploreFrontier"]]
     assert "ash glaze" in frontier_topics, "co-mined unshown topic should appear in exploreFrontier via PPR"
+
+
+def test_rank_brain_topics_ignores_pre_reset_signals_but_keeps_likes():
+    day = 86400 * 1000
+    now_ms = RESET + day
+    doc = {
+        "resetAt": RESET,
+        "ratings": {
+            "v1": {
+                "r": 5,
+                "t": RESET - day,  # liked BEFORE the reset: must survive it
+                "v": {"discoveryTopic": "ceramic glaze chemistry"},
+            },
+        },
+        "mined": {"v1": {"t": RESET - day, "topics": ["ceramic glaze chemistry", "kiln firing"]}},
+        "topicSignals": {
+            "crypto memes": {"t": RESET - 1000, "c": {"cA": {"imp": 3, "play": 2, "open": 1}}, "f": {}},
+            "ceramic glaze chemistry": {"t": RESET - 1000, "c": {"cA": {"imp": 20}}, "f": {}},
+            "kiln firing": {"t": RESET + 1000, "c": {"cA": {"imp": 1, "play": 1}}, "f": {}},
+        },
+    }
+    res = rank_brain_topics(doc, n=10, now_ms=now_ms, deterministic=True)
+    by_topic = {r["topic"]: r for r in res["recommendations"]}
+    frontier = {r["topic"] for r in res["exploreFrontier"]}
+    assert "crypto memes" not in by_topic and "crypto memes" not in frontier, "pre-reset signal-only topic must vanish"
+    assert "ceramic glaze chemistry" in by_topic, "like-derived topic must survive the reset"
+    assert by_topic["ceramic glaze chemistry"]["likes"] >= 0.5
+    assert by_topic["ceramic glaze chemistry"]["impressions"] == 0, "pre-reset impressions are void"
+    assert by_topic["kiln firing"]["plays"] == 1 and by_topic["kiln firing"]["impressions"] == 1
+
+    # Control: without the epoch the same stale signals DO count.
+    no_reset = {k: v for k, v in doc.items() if k != "resetAt"}
+    res = rank_brain_topics(no_reset, n=10, now_ms=now_ms, deterministic=True)
+    by_topic = {r["topic"]: r for r in res["recommendations"]}
+    assert "crypto memes" in by_topic
+    assert by_topic["ceramic glaze chemistry"]["impressions"] == 20
 
 
 def test_ground_topics_algorithmically_classifies_real_dead_slop():

@@ -89,6 +89,27 @@ def _decayed_like_weight(ts_ms: float | int | None, now_ms: float) -> float:
     return math.pow(0.5, age_ms / LIKE_HALF_LIFE_MS)
 
 
+def _live_topic_signals(doc: dict | None) -> dict:
+    """Return `doc.topicSignals` minus records voided by the `resetAt` epoch.
+
+    A "purge topics, keep likes" reset stamps `resetAt` (epoch ms); any signal
+    record with `t < resetAt` holds pre-reset impression counters and must not
+    feed ranking or the positive corpus. Ratings/mined are NOT filtered here —
+    they carry the likes that survive a reset.
+    """
+    signals = (doc or {}).get("topicSignals") or {}
+    if not isinstance(signals, dict):
+        return {}
+    reset_at = max(0, _as_int((doc or {}).get("resetAt"), 0))
+    if not reset_at:
+        return signals
+    return {
+        topic: rec
+        for topic, rec in signals.items()
+        if isinstance(rec, dict) and _as_int(rec.get("t"), 0) >= reset_at
+    }
+
+
 def collect_positive_corpus(doc: dict, extra_positive_phrases: list[str] | None = None, now_ms: float | None = None) -> tuple[ dict[str, float], set[str] ]:
     """Return (topic_weights, positive_token_set) from liked videos, mined topics,
     played topics, and explicit positive phrases."""
@@ -98,7 +119,7 @@ def collect_positive_corpus(doc: dict, extra_positive_phrases: list[str] | None 
 
     ratings = (doc or {}).get("ratings") or {}
     mined = (doc or {}).get("mined") or {}
-    signals = (doc or {}).get("topicSignals") or {}
+    signals = _live_topic_signals(doc)
 
     for vid, rec in ratings.items():
         if not isinstance(rec, dict) or rec.get("r") != 5:
@@ -227,7 +248,7 @@ def rank_brain_topics(doc: dict, n: int = 30, now_ms: float | None = None, deter
     now = now_ms if now_ms is not None else time.time() * 1000.0
     ratings = (doc or {}).get("ratings") or {}
     mined = (doc or {}).get("mined") or {}
-    signals = (doc or {}).get("topicSignals") or {}
+    signals = _live_topic_signals(doc)
     rejected_facets = (doc or {}).get("rejectedFacets") or {}
 
     adj: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))

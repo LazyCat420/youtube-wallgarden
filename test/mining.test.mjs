@@ -103,10 +103,10 @@ extractResponses = [{
 }];
 await mineLikedVideosIntoTopics();
 
-// Sink 1: topic pool with tier+2 weights
+// Sink 1: topic pool with the like-mined band (A=10, B=9), above the brainstorm cap
 const pool = Object.fromEntries(S.topics.map(t => [t.phrase, t.weight]));
 assert.strictEqual(pool["one man sawmill"], 10, "A-tier mined topic enters at 10");
-assert.strictEqual(pool["machine restoration"], 6, "B-tier mined topic enters at 6");
+assert.strictEqual(pool["machine restoration"], 9, "B-tier mined topic enters at 9");
 assert.ok(!("burned niche" in pool), "burned topic never re-enters");
 assert.ok(S.smartFeedTopicsQueue.includes("one man sawmill"), "mined topic queued");
 // Sink 2: likedTopics gets A-tier only

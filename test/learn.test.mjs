@@ -149,13 +149,22 @@ reset(fresh());
 S.topics.forEach(t => { t.addedAt = Date.now(); });
 pruneTopicPool();
 assert.strictEqual(w("kiln atmosphere control"), 8, "a fresh topic does not decay");
-// ...and neither does a stale topic the ledger says the user engages with.
+// CONTRACT CHANGE (2026-11-15): play evidence no longer freezes a stale topic.
+// Two plays once made a topic PROVEN forever; now only like/hand-earned topics
+// are decay-exempt, so a stale topic with play-only evidence decays.
 reset(fresh());
 S.topics.forEach(t => { t.addedAt = Date.now() - (8 * 86400e3); });
-S.topicSignals = { "kiln atmosphere control": { t: Date.now() - (8 * 86400e3), c: { cA: { play: 3 } }, f: {} } };
+S.topicSignals = { "kiln atmosphere control": { t: Date.now() - (8 * 86400e3), c: { cA: { play: 3 } }, f: {}, lastPlayAt: Date.now() - (8 * 86400e3) } };
 pruneTopicPool();
-assert.strictEqual(w("kiln atmosphere control"), 8, "a PROVEN topic is decay-exempt");
-console.log("✅ stale topics decay; fresh and PROVEN topics do not");
+assert.ok(w("kiln atmosphere control") < 8, "play-only evidence no longer freezes a stale topic");
+// A like-earned topic still keeps its seat.
+reset(fresh());
+S.topics.forEach(t => { t.addedAt = Date.now() - (8 * 86400e3); });
+S.ratingStates = { liked1: { r: 5, t: Date.now(), v: { id: "liked1", title: "x", matchedTopics: ["kiln atmosphere control"] } } };
+S.topicSignals = {};
+pruneTopicPool();
+assert.strictEqual(w("kiln atmosphere control"), 8, "a like-earned topic is decay-exempt");
+console.log("✅ stale topics decay; fresh topics and like-earned topics do not");
 
 // ── 7. a SPECIFIC burn spares the broader topic it specialises ────
 reset(fresh());
