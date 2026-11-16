@@ -371,10 +371,14 @@ function composeTopicQueue(topics, n) {
     const coreLiked = byRole.core.filter(t => isLikeEarnedTopic(t, likeCounts));
     const coreOther = byRole.core.filter(t => !isLikeEarnedTopic(t, likeCounts));
     const likedQuota = Math.min(coreLiked.length, Math.max(0, Math.ceil(quota.core / 2)));
-    if (clusterNames.length && likedQuota > 0) {
-        const perCluster = largestRemainderSlots(likedQuota, idx.share);
+    // Calibrate over the like-earned core when there is one; legacy pools with
+    // no provenance still calibrate the whole core band, as before.
+    const calibPool = coreLiked.length ? coreLiked : byRole.core;
+    const calibQuota = coreLiked.length ? likedQuota : quota.core;
+    if (clusterNames.length && calibQuota > 0) {
+        const perCluster = largestRemainderSlots(calibQuota, idx.share);
         clusterNames.forEach(name => {
-            const pool = coreLiked.filter(t => clusterOfTopic(t, idx) === name);
+            const pool = calibPool.filter(t => clusterOfTopic(t, idx) === name);
             takeAll("core", pick(pool, perCluster[name] || 0, taken));
         });
     }
