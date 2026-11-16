@@ -329,6 +329,30 @@ def get_brain_recommendations(n: int = 30):
     return rank_brain_topics(doc, n=n)
 
 
+@app.get("/sync/brain/frontier-seeds")
+def get_brain_frontier_seeds(profile: str = "global"):
+    """Exploration seeds for the daily explore drip (plan §4.4-4.5): the same
+    `exploreFrontier` list `rank_brain_topics` already returns, lifted out of
+    the recommendations payload so the drip does not have to re-rank 30 topics.
+
+    Like every other `/sync/*` endpoint this reads the one global document and
+    has no auth; the `profile` segment is accepted for URL/nginx compatibility
+    only and, as elsewhere, ignored. Empty document (or one with no live
+    signals) yields `{"seeds": []}`.
+    """
+    doc = _state.find_one({"_id": DOC_ID}) or {}
+    ranked = rank_brain_topics(doc)
+    seeds = [
+        {"topic": s["topic"], "ppr": s["ppr"], "impressions": s["impressions"]}
+        for s in (ranked.get("exploreFrontier") or [])[:15]
+    ]
+    return {
+        "profile": doc.get("profile"),
+        "resetAt": _as_epoch_ms(doc.get("resetAt")),
+        "seeds": seeds,
+    }
+
+
 @app.post("/sync/brain/ground")
 def post_brain_ground(body: dict = Body(default={})):
     doc = _state.find_one({"_id": DOC_ID}) or {}

@@ -328,7 +328,7 @@ def test_rank_brain_topics_decays_stale_likes_and_excludes_ignored():
         "topicSignals": {
             "oklo stock": {"t": now_ms, "c": {"cA": {"imp": 20, "play": 0, "open": 0}}, "f": {}},
             "ceramic glaze chemistry": {"t": now_ms, "c": {"cA": {"imp": 4, "play": 3, "open": 1}}, "f": {}},
-            "ash glaze": {"t": now_ms, "c": {"cA": {"imp": 0, "play": 0, "open": 0}}, "f": {}},
+            "ash glaze": {"t": now_ms, "c": {"cA": {"imp": 3, "play": 0, "open": 0}}, "f": {}},
         },
     }
     res = rank_brain_topics(doc, n=10, now_ms=now_ms, deterministic=True)
@@ -336,7 +336,7 @@ def test_rank_brain_topics_decays_stale_likes_and_excludes_ignored():
     assert "oklo stock" not in rec_topics, "stale 90d single-like topic with 20 unplayed impressions must be excluded"
     assert rec_topics[0] == "ceramic glaze chemistry"
     frontier_topics = [r["topic"] for r in res["exploreFrontier"]]
-    assert "ash glaze" in frontier_topics, "co-mined unshown topic should appear in exploreFrontier via PPR"
+    assert "ash glaze" in frontier_topics, "co-mined low-impression (3 < 8) unengaged topic should appear in exploreFrontier via PPR"
 
 
 def test_rank_brain_topics_ignores_pre_reset_signals_but_keeps_likes():
@@ -531,6 +531,173 @@ def test_extract_music_likes_feed_tombstone_of_music_video():
     assert feed["count"] == 1
     assert feed["items"][0]["isMusic"] is True
     assert feed["items"][0]["rating"] == 0
+
+
+# ── frontier: "low impressions AND high PPR" (plan §4.5) ────────────────────
+#
+# The old predicate was `imp == 0`, so a topic shown even once was never
+# exploration material. The contract now: imp < 8 (same threshold as the
+# client's OUTCOME_IGNORED_MIN_IMPRESSIONS) AND ppr > 0 AND decayed likes
+# < 0.5, and the frontier must respect the existing hard skip
+# (likes < 0.5 && imp >= 8 && play == 0 && open == 0). Ordering is
+# (-ppr, imp, topic) so a never-shown high-PPR topic still leads.
+
+NOW = 1_700_000_000_000
+
+
+def _frontier_doc():
+    """One fresh like seeds 'ceramic glaze chemistry'. Two signal-only topics
+    bridge into that cluster through the shared 'glaze' token (token-overlap
+    PPR edges), so both have ppr > 0 and zero decayed likes:
+      * 'soda ash glaze' — 5 unengaged impressions: under the old predicate
+        this was NOT frontier; under the new contract it must be.
+      * 'oklo glaze' — 9 unengaged impressions (>= 8) across two browsers:
+        the hard skip must keep it out of recommendations AND the frontier.
+    """
+    return {
+        "ratings": {
+            "v1": {
+                "r": 5,
+                "t": NOW,
+                "v": {"discoveryTopic": "ceramic glaze chemistry"},
+            },
+        },
+        "mined": {"v1": {"t": NOW, "topics": ["ceramic glaze chemistry"]}},
+        "topicSignals": {
+            "soda ash glaze": {
+                "t": NOW,
+                "c": {"cA": {"imp": 5, "play": 0, "open": 0}},
+                "f": {},
+            },
+            "oklo glaze": {
+                "t": NOW,
+                "c": {
+                    "cB": {"imp": 5, "play": 0, "open": 0},
+                    "cC": {"imp": 4, "play": 0, "open": 0},
+                },
+                "f": {},
+            },
+        },
+    }
+
+
+def test_frontier_includes_low_imp_high_ppr_topic():
+    res = rank_brain_topics(_frontier_doc(), n=10, now_ms=NOW, deterministic=True)
+    rec = {r["topic"] for r in res["recommendations"]}
+    frontier = {r["topic"] for r in res["exploreFrontier"]}
+    assert "soda ash glaze" in rec
+    assert "soda ash glaze" in frontier, (
+        "low-imp (5 < 8) unengaged topic bridged into the liked cluster by PPR must be frontier"
+    )
+
+
+def test_frontier_excludes_high_imp_dead_topic_even_with_ppr():
+    # 'oklo glaze' shares the 'glaze' token with the liked cluster so its PPR
+    # is non-zero; only the hard skip may keep it out — and it must.
+    res = rank_brain_topics(_frontier_doc(), n=10, now_ms=NOW, deterministic=True)
+    by_topic = {r["topic"]: r for r in res["recommendations"]}
+    frontier = {r["topic"] for r in res["exploreFrontier"]}
+    assert "oklo glaze" not in by_topic, "9 unengaged impressions + no likes = hard skip"
+    assert "oklo glaze" not in frontier, "the frontier must respect the same hard skip (imp >= 8)"
+
+
+def test_frontier_never_shown_ranks_above_shown_low_ppr():
+    """Sort key (-ppr, imp, topic): the never-shown (imp 0) topic riding the
+    fresh-like cluster must lead the shown-once (imp 1) topic that only
+    bridges through a 60-day-old like (decayed weight 0.25 = weak PPR)."""
+    doc = _frontier_doc()
+    doc["ratings"]["v_old"] = {
+        "r": 5,
+        "t": NOW - 60 * 86400 * 1000,
+        "v": {"discoveryTopic": "oklo kiln firing"},
+    }
+    doc["mined"]["v_old"] = {"t": NOW, "topics": ["oklo kiln firing"]}
+    doc["topicSignals"]["wood kiln shelf"] = {
+        "t": NOW,
+        "c": {"cA": {"imp": 1, "play": 0, "open": 0}},
+        "f": {},
+    }
+    res = rank_brain_topics(doc, n=10, now_ms=NOW, deterministic=True)
+    frontier = [r["topic"] for r in res["exploreFrontier"]]
+    assert "soda ash glaze" in frontier and "wood kiln shelf" in frontier
+    assert frontier.index("soda ash glaze") < frontier.index("wood kiln shelf"), (
+        "never-shown high-PPR topic must lead a shown-once low-PPR topic"
+    )
+
+
+# ── GET /sync/brain/frontier-seeds ───────────────────────────────────────────
+
+
+def test_frontier_seeds_endpoint_payload_shape():
+    """Payload contract: {profile, resetAt, seeds[{topic, ppr, impressions}]},
+    capped at 15, mirroring rank_brain_topics' exploreFrontier. Mongo is
+    patched out — no network paths are exercised."""
+    import main as sync_main
+    from fastapi.testclient import TestClient
+
+    doc = _frontier_doc()
+    doc["resetAt"] = RESET
+    doc["profile"] = {"text": "ceramics enthusiast", "generatedAt": 123, "likeCount": 1}
+
+    class _FakeState:
+        def __init__(self):
+            self.calls = []
+
+        def find_one(self, flt):
+            self.calls.append(flt)
+            return dict(doc)
+
+    fake = _FakeState()
+    original = sync_main._state
+    sync_main._state = fake
+    try:
+        client = TestClient(sync_main.app)
+        resp = client.get("/sync/brain/frontier-seeds")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert set(body) == {"profile", "resetAt", "seeds"}
+        assert fake.calls == [{"_id": "global"}], "must read the one global document"
+        assert body["resetAt"] == RESET
+        assert body["profile"] == doc["profile"]
+        assert isinstance(body["seeds"], list) and 0 < len(body["seeds"]) <= 15
+        for seed in body["seeds"]:
+            assert set(seed) == {"topic", "ppr", "impressions"}
+            assert isinstance(seed["topic"], str)
+            assert isinstance(seed["ppr"], float)
+            assert isinstance(seed["impressions"], int)
+        seeds_by_topic = {s["topic"]: s for s in body["seeds"]}
+        assert "soda ash glaze" in seeds_by_topic
+        assert seeds_by_topic["soda ash glaze"]["impressions"] == 5
+        assert "oklo glaze" not in seeds_by_topic, "hard-skipped topic must not be a seed"
+        # Same list rank_brain_topics produces, projected to the seed shape.
+        expected = [
+            {"topic": s["topic"], "ppr": s["ppr"], "impressions": s["impressions"]}
+            for s in rank_brain_topics(doc)["exploreFrontier"][:15]
+        ]
+        assert body["seeds"] == expected
+    finally:
+        sync_main._state = original
+
+
+def test_frontier_seeds_endpoint_empty_doc_returns_no_seeds():
+    """No brain document at all -> {"seeds": []} (with neutral profile/resetAt)."""
+    import main as sync_main
+    from fastapi.testclient import TestClient
+
+    class _EmptyState:
+        def find_one(self, flt):
+            return None
+
+    original = sync_main._state
+    sync_main._state = _EmptyState()
+    try:
+        client = TestClient(sync_main.app)
+        body = client.get("/sync/brain/frontier-seeds").json()
+        assert body["seeds"] == []
+        assert body["resetAt"] == 0
+        assert body["profile"] is None
+    finally:
+        sync_main._state = original
 
 
 def _run_all():

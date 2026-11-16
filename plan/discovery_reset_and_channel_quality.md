@@ -5,10 +5,11 @@ Date: 2026-11-15. Audit of `app/app.js` (12010 lines), `sync-service/brain_graph
 `master`. Line numbers are the current file.
 
 **Status 2026-11-15:** Phases A1 (reset + `resetAt` tombstone), A2 (like dominance:
-provenance, weights, core quota, ranking) and the anti-stickiness items 1-2
-(play-proven expiry, narrowed decay exemption) are implemented and tested. Not
-yet built: near-duplicate collapse, the daily explore drip, the server frontier
-fix, and the whole channel-quality Phase B.
+provenance, weights, core quota, ranking), A3 (near-duplicate collapse, daily explore
+drip, server frontier predicate + `/sync/brain/frontier-seeds`) and B1-B5 (channel
+quality index, gates, authority lift, cross-slate cap, liked-channel supply,
+subscriber/verified enrichment) are implemented and tested. Nothing in this plan
+remains unbuilt.
 
 ## Verdict on "purge the topic list, keep the likes"
 

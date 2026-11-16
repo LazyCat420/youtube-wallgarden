@@ -28,6 +28,13 @@ import time
 from collections import defaultdict
 
 LIKE_HALF_LIFE_MS = 30 * 86400 * 1000
+
+# Frontier membership threshold: a topic with fewer impressions than this is
+# still "low impressions" (unproven) and stays eligible for exploration as
+# long as PPR carries it. Mirrors the client's OUTCOME_IGNORED_MIN_IMPRESSIONS
+# so the server retires a topic exactly when the client starts ignoring it.
+FRONTIER_MAX_IMPRESSIONS = 8
+
 STOPWORDS = {
     "the", "a", "an", "of", "and", "for", "in", "on", "to", "with", "at", "by",
     "from", "into", "over", "under", "long", "term", "new", "best", "top",
@@ -375,11 +382,18 @@ def rank_brain_topics(doc: dict, n: int = 30, now_ms: float | None = None, deter
             "role": role,
         }
         ranked.append(item)
-        if imp == 0 and ppr_score > 0 and likes < 0.5:
+        # Frontier = "low impressions AND high PPR" (plan §4.5), not `imp == 0`:
+        # a topic shown a few times but never engaged is still unexplored. The
+        # hard-skip `continue` above (likes < 0.5, imp >= 8, 0 plays/opens)
+        # already ran, so dead topics can never reach the frontier.
+        if imp < FRONTIER_MAX_IMPRESSIONS and ppr_score > 0 and likes < 0.5:
             explore_frontier.append(item)
 
     ranked.sort(key=lambda x: (-x["score"], x["topic"]))
-    explore_frontier.sort(key=lambda x: (-x["ppr"], x["topic"]))
+    # Highest PPR leads; ties break toward fewer impressions so a never-shown
+    # topic stays ahead of an equally-ranked topic that was already shown,
+    # then alphabetical for determinism.
+    explore_frontier.sort(key=lambda x: (-x["ppr"], x["impressions"], x["topic"]))
 
     return {
         "recommendations": ranked[: max(1, n)],

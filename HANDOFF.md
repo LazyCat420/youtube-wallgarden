@@ -1,3 +1,44 @@
+# Handoff — Anti-stickiness (A3) + channel-quality layer (B), 2026-11-15
+
+**Discovery feed, second batch.** Completes `plan/discovery_reset_and_channel_quality.md`.
+
+- **Near-duplicate collapse (A3-3).** `findNearDuplicateTopic` (token-set Jaccard >= 0.8,
+  cluster-guarded, negatives never merged) + `mergeNearDuplicateTopic` applied at every
+  insert site: brainstorm, seed expansion, hand add/edit, and like-mining. A mined lookalike
+  promotes the survivor to `like-mined` core at the mined weight and records the survivor
+  phrase in `minedVideos`, so replay dedupes identically; earned origins are never
+  downgraded by a generated insert.
+- **Daily explore drip (A3-4).** `maybeRunExploreDrip`: once per 24h (`explore_drip_at`),
+  expands the highest-weight like-mined seed by 3 topics with the weakest evidence tier.
+  Stamps before the call so a dead backend cannot hot-loop the preload cadence.
+- **Server frontier (A3-5).** `brain_graph.py` frontier is now "impressions < 8 AND PPR > 0
+  AND likes < 0.5" (the hard-skip still runs first), sorted by `(-ppr, impressions, topic)`.
+  New `GET /sync/brain/frontier-seeds` returns `{profile, resetAt, seeds:[{topic, ppr,
+  impressions}]}` from the same `exploreFrontier` list (cap 15).
+- **Channel quality (B1).** `buildChannelQuality()` (cached, invalidated with the liked-channel
+  cache, `window.wgChannelQuality`): likes/dislikes from ratings, impressions/plays from
+  `feedMix.shown` + watched ledgers, median views from the pool, plus subscriber/verified
+  bonuses. `q = 0.45·medianViews + 0.35·likes − 0.50·dislikes − 0.40·unengagedImpressions`,
+  clamped, `+0.15` for >=100k subs, `+0.05` verified.
+- **Gates (B2).** In the fetch filter: drop channels with >=2 dislikes or >=8 impressions with
+  0 plays; demote (score −2.5) channels with >=3 pool videos all >5M views and no likes/plays.
+  Liked channels stay exempt. Drops log as `channel-dislikes` / `channel-unengaged`.
+- **Scoring + cap (B3).** `authority += 0.25·q` (clamped), and composeSlate enforces 3 videos
+  per channel per 24h across slates from `feedMix.shown`, relaxing only when nothing else fits.
+- **Liked-channel supply (B4).** Fifth form `fetchLikedChannelUploads`: top 3 liked channels
+  with a channelId, 6 uploads each, 6h per-channel cache, pool-fill only, same gate/score
+  pipeline; `discoveryTopic` = the channel's dominant mined topic.
+- **Subscriber/verified (B5).** `fetchChannelStats` parses `/youtube/channel/<id>` for
+  subscriber counts and verified badges (7d TTL, 20 channels/run, 4 concurrent), and scraper
+  items carrying `channel_follower_count` / `channel_is_verified` are consumed directly.
+
+Tests: `npm test` 23 suites green (new `test/channel_quality.test.mjs`, `test/topic_dedupe.test.mjs`);
+`sync-service` pytest 46/46 (5 new frontier/endpoint cases). Assets `?v=20261115-v75`.
+Browser smoke: spam channel (2 dislikes, 8 unengaged impressions) dropped, liked kiln channel
+kept and authority lifted, reset still keeps only earned topics.
+
+---
+
 # Handoff — Discovery reset (keep likes), like-first topic roles, expiring play evidence (2026-11-15)
 
 **Discovery feed reset + like dominance.** The discovery feed kept re-seeding old generated

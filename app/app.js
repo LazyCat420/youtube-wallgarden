@@ -138,6 +138,13 @@ let state = {
     // Feed-mix ledger: every video the smart feed SHOWED, with its era bucket,
     // topic, channel and what it later earned. Read with wgFeedMix().
     feedMix: { shown: [] },
+    // ── Channel-quality layer (plan/discovery_reset_and_channel_quality.md §5) ──
+    // ts of the last daily explore drip (localStorage: explore_drip_at).
+    exploreDripAt: 0,
+    // {[channelId]: ts} — 6 h cache stamp for the liked-channel supply form.
+    likedChannelSupplyAt: {},
+    // {[channelId]: {subs, verified, at}} — 7 d TTL subscriber/verified cache.
+    channelStats: {},
     // Discovery reset epoch (ms). Signal records older than this are void;
     // synced so a reset survives the next pull from another browser.
     resetAt: 0,
@@ -488,6 +495,12 @@ function initSmartFeed() {
     
     // Start background preloading
     fillSmartFeedPreloadBuffer();
+
+    // Phase A3-4: one lateral batch per day from the top like-mined seed,
+    // uncoupled from thresholds. Feed-init only (never a render loop); the
+    // 24 h stamp lives in state.exploreDripAt and maybeRunExploreDrip never
+    // throws.
+    maybeRunExploreDrip();
 }
 
 // Initialize Application
@@ -616,6 +629,78 @@ function topicSignature(phrase) {
     return normalizeTopic(phrase)
         .split(/[^a-z0-9]+/)
         .filter(w => w.length > 2 && !TOPIC_STOPWORDS.has(w));
+}
+
+// ── Near-duplicate collapse (plan §4.3) ───────────────────────────────
+// Exact-string dedupe let "woodworking hand tools" and "hand woodworking
+// tools" live side by side as two topics with two weights and two fetch
+// budgets — the audit's "no semantic distance" failure. Every insert site
+// now asks findNearDuplicateTopic() first and merges into the survivor
+// instead of minting a second string.
+const NEAR_DUP_JACCARD = 0.8;
+const _nearDupLogAt = new Map();
+
+/**
+ * Token-set Jaccard against every live state.topics phrase; >= 0.8 is a
+ * duplicate. Cluster guard: two topics that both carry a `cluster` are only
+ * duplicates inside the SAME cluster (the backend planner's cluster label is
+ * evidence the strings mean different things); if either lacks one, compare
+ * globally. Negatives (weight <= 0) are user decisions — never merge into
+ * them, or a burn would be resurrected by a lookalike insert.
+ * opts: { cluster } — the incoming phrase's cluster, if known.
+ * Returns the matching topic record or null (highest Jaccard wins).
+ */
+function findNearDuplicateTopic(phrase, opts) {
+    const tokens = topicSignature(phrase);
+    if (!tokens.length) return null;
+    const a = new Set(tokens);
+    const incomingCluster = (opts && opts.cluster) || null;
+    let best = null, bestScore = 0;
+    (state.topics || []).forEach(t => {
+        if (!t || !t.phrase) return;
+        if (typeof t.weight === "number" && t.weight <= 0) return;
+        if (incomingCluster && t.cluster && incomingCluster !== t.cluster) return;
+        const bTokens = topicSignature(t.phrase);
+        if (!bTokens.length) return;
+        const b = new Set(bTokens);
+        let inter = 0;
+        a.forEach(w => { if (b.has(w)) inter += 1; });
+        const union = a.size + b.size - inter;
+        const score = union ? inter / union : 0;
+        if (score >= NEAR_DUP_JACCARD && score > bestScore) { best = t; bestScore = score; }
+    });
+    return best;
+}
+
+// One debug line per merged pair per minute — the insert loops would spam it.
+function logNearDupMerge(from, to) {
+    const key = normalizeTopic(from) + "\u0000" + normalizeTopic(to);
+    const now = Date.now();
+    if (now - (_nearDupLogAt.get(key) || 0) < 60000) return;
+    _nearDupLogAt.set(key, now);
+    debug(`[Topics] merged near-duplicate "${from}" -> "${to}"`);
+}
+
+/**
+ * Merge a would-be duplicate insert into an existing topic: weight max, and
+ * never downgrade an earned origin (like-mined / hand / engaged) to a
+ * generated one (brainstorm / seed) — the reverse direction is allowed.
+ * Recency fields are only touched when the record already carries them
+ * (legacy fixtures have no lastSeenAt and must not gain one here).
+ */
+const EARNED_ORIGINS = ["like-mined", "hand", "engaged"];
+function mergeNearDuplicateTopic(existing, incoming) {
+    if (!existing || !incoming) return existing;
+    existing.weight = Math.max(existing.weight || 0, incoming.weight || 0);
+    if (!EARNED_ORIGINS.includes(existing.origin) && incoming.origin) {
+        existing.origin = incoming.origin;
+    }
+    const nowTs = Date.now();
+    if ("lastSeenAt" in existing) existing.lastSeenAt = nowTs;
+    if ("addedAt" in existing) existing.addedAt = nowTs;
+    logNearDupMerge(incoming.phrase, existing.phrase);
+    saveTopics();
+    return existing;
 }
 
 // ── Burn parole ──────────────────────────────────────────────────────
@@ -1398,6 +1483,17 @@ function loadState() {
         state.feedMix = JSON.parse(getStoredItem("feed_mix") || '{"shown":[]}');
     } catch (e) { state.feedMix = null; }
     if (!state.feedMix || !Array.isArray(state.feedMix.shown)) state.feedMix = { shown: [] };
+    // Channel-quality layer: daily explore drip stamp, liked-channel supply
+    // cache, subscriber/verified stats (see buildChannelQuality / B4 / B5).
+    state.exploreDripAt = Number(getStoredItem("explore_drip_at") || 0) || 0;
+    try {
+        state.likedChannelSupplyAt = JSON.parse(getStoredItem("liked_channel_supply_at") || "{}");
+    } catch (e) { state.likedChannelSupplyAt = null; }
+    if (!state.likedChannelSupplyAt || typeof state.likedChannelSupplyAt !== "object") state.likedChannelSupplyAt = {};
+    try {
+        state.channelStats = JSON.parse(getStoredItem("channel_stats") || "{}");
+    } catch (e) { state.channelStats = null; }
+    if (!state.channelStats || typeof state.channelStats !== "object") state.channelStats = {};
     state.brainstormTopics = rawBrainstorm ? JSON.parse(rawBrainstorm) : [];
     state.videoRatings = rawVideoRatings ? JSON.parse(rawVideoRatings) : {};
     const rawRatingStates = getStoredItem("rating_states");
@@ -3044,10 +3140,21 @@ function setupTopicPrefListeners() {
         if (!phrase) return;
         
         const existingIdx = state.topics.findIndex(t => t.phrase === phrase);
+        let targetPhrase = phrase;
         if (existingIdx !== -1) {
             state.topics[existingIdx].weight = weight;
         } else {
-            state.topics.push({ phrase, weight, addedAt: Date.now(), origin: "hand", role: "core", bornRole: "core" });
+            // A3-3: merging a lookalike keeps ONE string in the pool; a hand
+            // add wins its origin over generated ones and always takes the
+            // max weight.
+            const dup = findNearDuplicateTopic(phrase);
+            if (dup) {
+                mergeNearDuplicateTopic(dup, { phrase, weight, origin: "hand" });
+                promoteTopicRole(dup.phrase, "hand add");
+                targetPhrase = dup.phrase;
+            } else {
+                state.topics.push({ phrase, weight, addedAt: Date.now(), origin: "hand", role: "core", bornRole: "core" });
+            }
         }
         
         saveTopics();
@@ -3056,8 +3163,8 @@ function setupTopicPrefListeners() {
         
         // If a positive topic was added, seed the smart feed pipeline
         if (weight > 0) {
-            if (!state.smartFeedTopicsQueue.includes(phrase)) {
-                state.smartFeedTopicsQueue.push(phrase);
+            if (!state.smartFeedTopicsQueue.includes(targetPhrase)) {
+                state.smartFeedTopicsQueue.push(targetPhrase);
             }
             // Kick the preloader + brainstormer if this is among the first topics
             fillSmartFeedPreloadBuffer();
@@ -4159,7 +4266,135 @@ function getLikedChannelAffinity() {
     _likedChannelCache = map;
     return map;
 }
-function invalidateLikedChannelCache() { _likedChannelCache = null; }
+// The channel-quality map reads the same likes, so it dies with them; B5
+// stats refresh invalidates it too.
+function invalidateLikedChannelCache() { _likedChannelCache = null; _channelQualityCache = null; }
+
+// ── Channel quality (plan §5 B1) ──────────────────────────────────────
+// There was no channel-level signal anywhere in discovery: authority was
+// per-video and the only channel gate was the <100-view spam floor. This map
+// aggregates what the ledger already knows per channel:
+//   likes/dislikes  <- ratingStates (r === 5 / r <= 1; 2-4 ignored for both)
+//   impressions     <- feedMix.shown rows (per channel)
+//   plays           <- shown rows that later appear in watched/watchedHistory
+//   medianViews     <- the channel's videos in the rendered pool
+//   subs/verified   <- state.channelStats (B5), folded as a capped bonus
+// Keyed by BOTH channelId and lowercased name (a record with both is one
+// entry registered under two keys), so any lookup key finds its channel.
+let _channelQualityCache = null;
+
+function medianOf(nums) {
+    const sorted = (nums || []).filter(n => Number.isFinite(n)).sort((a, b) => a - b);
+    if (!sorted.length) return 0;
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function buildChannelQuality() {
+    if (_channelQualityCache) return _channelQualityCache;
+    const map = new Map();
+    try {
+        const now = Date.now();
+        const ensure = (channelId, name) => {
+            const cid = channelId || "";
+            const nm = (name || "").toLowerCase();
+            const primaryKey = cid || nm;
+            if (!primaryKey) return null;
+            // Look up by BOTH keys first: a channel may have entered the map
+            // under only its name (name-only rows) or only its id.
+            let rec = (cid && map.get(cid)) || (nm && map.get(nm)) || null;
+            if (!rec) {
+                rec = { channelId: cid, name: nm, likes: 0, dislikes: 0,
+                        plays: 0, impressions: 0, viewCounts: [],
+                        subs: null, verified: false, medianViews: 0,
+                        unengagedImpressions: 0, baseQ: 0, q: 0 };
+                map.set(primaryKey, rec);
+                if (cid && nm && !map.has(nm)) map.set(nm, rec);
+            }
+            if (cid && !rec.channelId) rec.channelId = cid;
+            if (nm && !rec.name) rec.name = nm;
+            return rec;
+        };
+
+        Object.values(state.ratingStates || {}).forEach(st => {
+            if (!st || !st.v || (!st.v.channelId && !st.v.channelName)) return;
+            const rec = ensure(st.v.channelId, st.v.channelName);
+            if (!rec) return;
+            if (st.r === 5) rec.likes += 1;
+            else if (typeof st.r === "number" && st.r <= 1) rec.dislikes += 1;
+        });
+
+        const watchedHist = state.watchedHistory || {};
+        const watchedAlt = state.watched || {};
+        ((state.feedMix && Array.isArray(state.feedMix.shown) && state.feedMix.shown) || []).forEach(row => {
+            if (!row) return;
+            const nm = (row.channel || "").toLowerCase();
+            const cid = row.channelId || "";
+            const rec = ensure(cid, nm);
+            if (!rec) return;
+            rec.impressions += 1;
+            // Best-effort play join: the row's own stamped play (markFeedEvent)
+            // or the video surfacing in either watched ledger afterwards.
+            if (row.play || watchedHist[row.id] || watchedAlt[row.id]) rec.plays += 1;
+        });
+
+        (state.smartFeedVideos || []).forEach(v => {
+            if (!v || (!v.channelId && !v.channelName)) return;
+            const vc = Number(v.viewCount);
+            if (!Number.isFinite(vc)) return;
+            const rec = ensure(v.channelId, v.channelName);
+            if (rec) rec.viewCounts.push(vc);
+        });
+
+        const stats = state.channelStats || {};
+        const STATS_TTL_MS = 7 * 86400e3;
+        map.forEach(rec => {
+            const cs = rec.channelId ? stats[rec.channelId] : null;
+            if (cs && Number.isFinite(cs.at) && now - cs.at <= STATS_TTL_MS) {
+                if (Number.isFinite(cs.subs)) rec.subs = cs.subs;
+                rec.verified = !!cs.verified;
+            }
+        });
+
+        map.forEach(rec => {
+            rec.medianViews = medianOf(rec.viewCounts);
+            rec.unengagedImpressions = Math.max(0, rec.impressions - rec.plays);
+            const base = 0.45 * Math.min(1, Math.log10(rec.medianViews || 1) / 6.5) +
+                0.35 * Math.min(1, rec.likes / 3) -
+                0.50 * Math.min(1, rec.dislikes / 2) -
+                0.40 * Math.min(1, rec.unengagedImpressions / 8);
+            rec.baseQ = Math.max(-1, Math.min(1, base));
+            // B5 bonus folded on top of the base, capped at 1.
+            rec.q = Math.max(-1, Math.min(1, rec.baseQ +
+                0.15 * (rec.subs >= 1e5 ? 1 : 0) + 0.05 * (rec.verified ? 1 : 0)));
+        });
+    } catch (err) {
+        // Never throw on odd state: an empty map degrades discovery to its
+        // pre-B1 behaviour instead of breaking the feed.
+        console.warn("[Channel Quality] build failed:", err && err.message);
+    }
+    _channelQualityCache = map;
+    return map;
+}
+window.wgChannelQuality = buildChannelQuality;
+
+/**
+ * The q used for a specific video: cached record (by id, then name) with the
+ * live scraper fields (channelSubs / channelVerified from B5's item mapping)
+ * preferred over the cached stats.
+ */
+function channelQualityForVideo(video, ctx) {
+    const map = ctx && ctx.channelQuality;
+    if (!map || typeof map.get !== "function" || !video) return 0;
+    const nm = (video.channelName || "").toLowerCase();
+    const rec = (video.channelId && map.get(video.channelId)) || (nm && map.get(nm)) || null;
+    if (!rec) return 0;
+    const base = typeof rec.baseQ === "number" ? rec.baseQ : (rec.q || 0);
+    const subs = typeof video.channelSubs === "number" ? video.channelSubs : (rec.subs || 0);
+    const verified = video.channelVerified !== undefined ? !!video.channelVerified : !!rec.verified;
+    return Math.max(-1, Math.min(1, base +
+        0.15 * (subs >= 1e5 ? 1 : 0) + 0.05 * (verified ? 1 : 0)));
+}
 
 // Built-in starter policies for common / polysemous topics.
 const BUILTIN_TOPIC_POLICIES = {
@@ -4295,6 +4530,9 @@ function recordFeedShown(videos, mode) {
             id: v.id, era,
             topic: normalizeTopic(v._topic || v.discoveryTopic || ""),
             channel: (v.channelName || "").toLowerCase(),
+            // Channel-quality (B1) and the cross-slate channel cap (B3) join
+            // the ledger by id too — names are only a fallback key.
+            channelId: v.channelId || "",
             form: v._form || "", mode: mode || FEED_COMPOSE_MODE, t: now
         });
     });
@@ -4456,8 +4694,15 @@ function scoreDiscoveryVideo(video, ctx) {
         ctx.likedChannels.has((video.channelName || "").toLowerCase()) ? 1 : 0;
     const topicLikeAffinity = ctx && ctx.likeCounts
         ? Math.min(1, (ctx.likeCounts[normalizeTopic(topic)] || 0) / 3) : 0;
-    const authority = 0.35 * Math.min(1, Math.log10(views) / 6.5) +
-        0.35 * topicLikeAffinity + 0.30 * likedChannel;
+    // Phase B3: a channel-quality lift (B1's q, live scraper fields preferred
+    // over cached stats). ctx.channelQuality is absent for the bare callers
+    // (per-topic fetch ranking), so those keep the pre-B3 shape; the slate
+    // path always supplies it.
+    const channelQ = channelQualityForVideo(video, ctx);
+    const authority = Math.max(0, Math.min(1,
+        0.35 * Math.min(1, Math.log10(views) / 6.5) +
+        0.35 * topicLikeAffinity + 0.30 * likedChannel +
+        0.25 * channelQ));
 
     // maturity: proven beats brand-new
     let maturity = 0.5;
@@ -8924,9 +9169,7 @@ function applyMinedTopics(videoId, ratedTopics, opts) {
     ratedTopics.forEach(rt => {
         const phrase = normalizeTopic(rt.topic);
         if (!phrase || isBurned(phrase)) return;
-        acceptedLabels.push(phrase);
         const tier = rt.tier === "B" ? "B" : "A";
-        acceptedTiers[phrase] = tier;
 
         // Sink 1: topic pool. A like is direct evidence, so it enters above the
         // brainstorm cap (A=10, B=9) and scales with decayed likes (cap 16) —
@@ -8934,7 +9177,27 @@ function applyMinedTopics(videoId, ratedTopics, opts) {
         // B-tier like (6) BELOW a brainstorm A-tier (8).
         const base = LIKE_MINE_BASE_WEIGHT[tier] || LIKE_MINE_BASE_WEIGHT.A;
         const weight = Math.min(16, base + 2 * Math.min(3, likeCounts[phrase] || 0));
-        const existing = state.topics.find(t => normalizeTopic(t.phrase) === phrase);
+        let existing = state.topics.find(t => normalizeTopic(t.phrase) === phrase);
+        let promotedDup = false;
+        if (!existing) {
+            // A3-3: a near-duplicate string of an existing topic must not
+            // become a second entry — the SURVIVOR is promoted to like-mined
+            // core with the mined weight, and every downstream sink records
+            // the survivor's phrase so replay dedupes the same way.
+            existing = findNearDuplicateTopic(phrase);
+            if (existing) {
+                existing.weight = Math.max(existing.weight || 0, weight);
+                existing.origin = "like-mined";
+                existing.role = "core";
+                existing.bornRole = "core";
+                existing.graduatedAt = Date.now();
+                promotedDup = true;
+                logNearDupMerge(phrase, existing.phrase);
+            }
+        }
+        const storedPhrase = existing ? existing.phrase : phrase;
+        acceptedLabels.push(storedPhrase);
+        acceptedTiers[storedPhrase] = tier;
         if (!existing) {
             // src = which prompt shape produced it (A/B scoring); origin = where
             // the topic came from (role/weight logic). Two different questions.
@@ -8945,25 +9208,25 @@ function applyMinedTopics(videoId, ratedTopics, opts) {
             // A like just got mined into this topic: that is core evidence, and
             // it stops being a guess.
             existing.origin = "like-mined";
-            promoteTopicRole(phrase, "like mined");
+            if (!promotedDup) promoteTopicRole(storedPhrase, "like mined");
         }
         // Place newly mined topics at the FRONT of smartFeedTopicsQueue so
         // fresh likes shape the very next preload pass instead of waiting behind
         // 30+ older queued topics.
-        const existingQueueIdx = state.smartFeedTopicsQueue.indexOf(phrase);
+        const existingQueueIdx = state.smartFeedTopicsQueue.indexOf(storedPhrase);
         if (existingQueueIdx > 0) {
             state.smartFeedTopicsQueue.splice(existingQueueIdx, 1);
-            state.smartFeedTopicsQueue.unshift(phrase);
+            state.smartFeedTopicsQueue.unshift(storedPhrase);
         } else if (existingQueueIdx === -1) {
-            const usedIdx = state.smartFeedUsedTopics.indexOf(phrase);
+            const usedIdx = state.smartFeedUsedTopics.indexOf(storedPhrase);
             if (usedIdx !== -1) state.smartFeedUsedTopics.splice(usedIdx, 1);
-            state.smartFeedTopicsQueue.unshift(phrase);
+            state.smartFeedTopicsQueue.unshift(storedPhrase);
         }
 
         // Sink 2: likedTopics — revives graph-based discovery. A-tier only,
         // capped so the seed list stays sharp.
-        if (rt.tier === "A" && !state.likedTopics.some(t => normalizeTopic(t) === phrase)) {
-            state.likedTopics.push(phrase);
+        if (rt.tier === "A" && !state.likedTopics.some(t => normalizeTopic(t) === storedPhrase)) {
+            state.likedTopics.push(storedPhrase);
             if (state.likedTopics.length > 60) {
                 state.likedTopics = state.likedTopics.slice(-60);
             }
@@ -9138,7 +9401,20 @@ async function generateBrainstormTopics(append, numRequests = 1) {
             }
 
             const existing = state.topics.find(t => normalizeTopic(t.phrase) === phrase);
+            let queuePhrase = phrase;
             if (!existing) {
+                // A3-3: collapse against a lookalike already in the pool —
+                // merge weight/origin into the survivor instead of minting a
+                // second string, and queue the SURVIVOR's phrase so the
+                // fetcher spends its budget on the one topic that exists.
+                const dup = findNearDuplicateTopic(phrase, { cluster: r.cluster });
+                if (dup) {
+                    mergeNearDuplicateTopic(dup, {
+                        phrase, weight: Math.min(BRAINSTORM_WEIGHT_CAP, weight || 5),
+                        origin: "brainstorm"
+                    });
+                    queuePhrase = dup.phrase;
+                } else {
                 const role = TOPIC_ROLES.includes(r.role) ? r.role : undefined;
                 // src was never stamped on this path (the "unstamped" arm in
                 // wgPromptAB); role/cluster/fit/gen are the new stamps.
@@ -9150,13 +9426,14 @@ async function generateBrainstormTopics(append, numRequests = 1) {
                     origin: "brainstorm", role, bornRole: role, cluster: r.cluster || undefined, fit: r.fit || undefined,
                     tier: r.tier || undefined, gen
                 });
+                }
             }
 
-            const inQueue = state.smartFeedTopicsQueue.includes(phrase);
-            const inUsed = state.smartFeedUsedTopics.includes(phrase);
+            const inQueue = state.smartFeedTopicsQueue.includes(queuePhrase);
+            const inUsed = state.smartFeedUsedTopics.includes(queuePhrase);
             if (!inQueue && !inUsed) {
-                state.smartFeedTopicsQueue.push(phrase);
-                allAddedPhrases.push(phrase);
+                state.smartFeedTopicsQueue.push(queuePhrase);
+                allAddedPhrases.push(queuePhrase);
             }
         });
 
@@ -9271,16 +9548,29 @@ async function generateTopicsForSeeds(seeds, budget, strongestReason) {
             }
             // normalizeTopic on BOTH sides — the old comparison lowercased only
             // the stored phrase, so a Title-Case reply duplicated the entry.
+            let queuePhrase = phrase;
             if (!state.topics.some(t => normalizeTopic(t.phrase) === phrase)) {
-                state.topics.push({
-                    phrase, weight: Math.min(BRAINSTORM_WEIGHT_CAP, (r && r.weight) || 4), addedAt: Date.now(), src: _lastContextVariant,
-                    origin: "seed", role: bornRole, bornRole, parent: query,
-                    fit: (r && r.fit) || undefined, tier: (r && r.tier) || undefined, gen
-                });
+                // A3-3: a lookalike of an existing topic merges into it
+                // (weight max, earned origin never downgraded to "seed")
+                // instead of becoming a second string; queue the survivor.
+                const dup = findNearDuplicateTopic(phrase);
+                if (dup) {
+                    mergeNearDuplicateTopic(dup, {
+                        phrase, weight: Math.min(BRAINSTORM_WEIGHT_CAP, (r && r.weight) || 4),
+                        origin: "seed"
+                    });
+                    queuePhrase = dup.phrase;
+                } else {
+                    state.topics.push({
+                        phrase, weight: Math.min(BRAINSTORM_WEIGHT_CAP, (r && r.weight) || 4), addedAt: Date.now(), src: _lastContextVariant,
+                        origin: "seed", role: bornRole, bornRole, parent: query,
+                        fit: (r && r.fit) || undefined, tier: (r && r.tier) || undefined, gen
+                    });
+                }
             }
-            if (!state.smartFeedTopicsQueue.includes(phrase) && !state.smartFeedUsedTopics.includes(phrase)) {
-                state.smartFeedTopicsQueue.push(phrase);
-                addedPhrases.push(phrase);
+            if (!state.smartFeedTopicsQueue.includes(queuePhrase) && !state.smartFeedUsedTopics.includes(queuePhrase)) {
+                state.smartFeedTopicsQueue.push(queuePhrase);
+                addedPhrases.push(queuePhrase);
             }
         });
 
@@ -9298,6 +9588,43 @@ async function generateTopicsForSeeds(seeds, budget, strongestReason) {
         console.error("[Topics] Seed expansion failed:", err);
         showToast(`Couldn't expand "${query}"`, "danger");
         throw err;
+    }
+}
+
+// ── Daily explore drip (plan §4.4) ────────────────────────────────────
+// Between likes the pool only shrinks: decay takes topics down and eviction
+// finishes them. The drip buys ONE lateral batch a day from the strongest
+// like-mined seed — uncoupled from every signal threshold, so a quiet week
+// does not starve exploration. Awaitable, but never throws into the caller:
+// it runs fire-and-forget from the feed init path.
+const EXPLORE_DRIP_INTERVAL_MS = 24 * 3600e3;
+
+async function maybeRunExploreDrip() {
+    try {
+        if (typeof navigator !== "undefined" && navigator.onLine === false) {
+            debug("[Explore Drip] offline — skipping.");
+            return false;
+        }
+        const now = Date.now();
+        if (now - (state.exploreDripAt || 0) < EXPLORE_DRIP_INTERVAL_MS) return false;
+        const likeMined = (state.topics || []).filter(t => t.origin === "like-mined" && t.weight > 0);
+        if (!likeMined.length) {
+            debug("[Explore Drip] no like-mined seed — skipping.");
+            return false;
+        }
+        const seed = likeMined.reduce((a, b) => (b.weight > a.weight ? b : a));
+        // Stamp BEFORE the call: a failed expansion must not turn the 1.5 s
+        // preload cadence into a daily retry loop against a dead backend.
+        state.exploreDripAt = now;
+        persistField("explore_drip_at", now);
+        // strongestReason "imp" makes the children born explore/seed — the
+        // weakest evidence tier, exactly what an unearned lateral batch is.
+        const added = await generateTopicsForSeeds([seed.phrase], 3, "imp");
+        debug(`[Explore Drip] seeded "${seed.phrase}" -> ${(added || []).length} explore topic(s)`);
+        return true;
+    } catch (err) {
+        debug("[Explore Drip] failed:", err && err.message);
+        return false;
     }
 }
 
@@ -9525,6 +9852,14 @@ function composeSlate(pool, n, ctx) {
         const src = prior[k] || {};
         Object.keys(src).forEach(key => { if (src[key] > 0) cnt[k][key] = src[key]; });
     });
+    // Phase B3 cross-slate cap: at most 3 videos per channel per 24 h across
+    // slates (the per-slate caps only ever bounded a single batch). Raw
+    // feedMix.shown counts + this slate's own picks; relaxed — like every
+    // other cap — only when nothing else remains, via overCapPenalty.
+    const recentChannels = (o.recentChannels && typeof o.recentChannels === "object") ? o.recentChannels : null;
+    const CROSS_CHANNEL_CAP = 3;
+    const overRecentChannel = (c) => !!(recentChannels &&
+        ((recentChannels[c.channel] || 0) + (own.channel[c.channel] || 0)) >= CROSS_CHANNEL_CAP);
     const calibWith = (era) => {
         const total = chosen.length + 1;
         const mixed = {};
@@ -9534,11 +9869,12 @@ function composeSlate(pool, n, ctx) {
         });
         return -klDivergence(p, mixed);
     };
-    const underCaps = (c) => (cnt.channel[c.channel] || 0) < capC && (cnt.topic[c.topic] || 0) < capT && !c.shownRecently;
+    const underCaps = (c) => (cnt.channel[c.channel] || 0) < capC && (cnt.topic[c.topic] || 0) < capT && !c.shownRecently && !overRecentChannel(c);
     const overCapCount = (c) =>
         ((cnt.channel[c.channel] || 0) >= capC ? 1 : 0) +
         ((cnt.topic[c.topic] || 0) >= capT ? 1 : 0) +
-        (c.shownRecently ? 1 : 0);
+        (c.shownRecently ? 1 : 0) +
+        (overRecentChannel(c) ? 1 : 0);
     const take = (c) => {
         used.add(c.i); chosen.push(c);
         cnt.era[c.era] = (cnt.era[c.era] || 0) + 1;
@@ -9608,6 +9944,23 @@ function buildRecentSlateCounts(now) {
     return { topic: topics, channel: channels };
 }
 
+// Phase B3 cross-slate channel cap (composeSlate): RAW shown counts per
+// channel inside the 24 h horizon — unlike buildRecentSlateCounts' weighted,
+// capped decay prior, the cap needs honest integers. Rows count under both
+// their name and channelId so channelOf()'s name-or-id key always lands.
+function buildRecentChannelCounts(now) {
+    const rows = (state.feedMix && Array.isArray(state.feedMix.shown)) ? state.feedMix.shown : [];
+    const counts = {};
+    rows.forEach(r => {
+        if (!r) return;
+        const age = now - (r.t || 0);
+        if (age < 0 || age > RECENT_SLATE_HORIZON_MS) return;
+        if (r.channel) counts[r.channel] = (counts[r.channel] || 0) + 1;
+        if (r.channelId) counts[r.channelId] = (counts[r.channelId] || 0) + 1;
+    });
+    return counts;
+}
+
 function buildRecentShownVideoIds(now) {
     const rows = (state.feedMix && Array.isArray(state.feedMix.shown)) ? state.feedMix.shown : [];
     const ids = new Set();
@@ -9631,12 +9984,18 @@ function buildSlateCtx() {
     const likedChannels = new Set(getLikedChannelAffinity().keys());
     const shownInfo = buildRecentShownVideoIds(now);
     const likeCounts = buildTopicLikeCounts(now);
+    // Phase B1/B3: channel-level quality (authority lift) + the raw 24 h
+    // per-channel shown counts behind composeSlate's cross-slate cap.
+    const channelQuality = buildChannelQuality();
+    const recentChannels = buildRecentChannelCounts(now);
     return {
         now,
         temperature: 0.15,
         targetEra: deriveEraPrior(undefined, now),
         likedChannels,
         likeCounts,
+        channelQuality,
+        recentChannels,
         recent: buildRecentSlateCounts(now),
         shownIds: shownInfo.ids,
         lastTopTopic: shownInfo.lastTopTopic,
@@ -9649,7 +10008,7 @@ function buildSlateCtx() {
                 return -10;
             }
             const legacy = getScoreAndMatches(v).score;
-            const r = rankScoreFor(v, { topic, likedChannels, likeCounts, legacyScore: legacy });
+            const r = rankScoreFor(v, { topic, likedChannels, likeCounts, legacyScore: legacy, channelQuality });
             v._rankScore = r.rankScore;
             v._rankBreakdown = r.breakdown;
             return r.rankScore;
@@ -9819,6 +10178,9 @@ async function fetchVideosForTopic(topic) {
                             description: item.description || "",
                             duration: item.duration_secs,
                             viewCount: item.view_count,
+                            // Phase B5: yt-dlp flat fields, consumed by the q lookup
+                            // ahead of the cached /youtube/channel stats.
+                            ...scraperChannelFields(item),
                             isDiscover: true,
                             discoveryTopic: topic,
                             _form: form,
@@ -9938,74 +10300,450 @@ async function fetchVideosForTopic(topic) {
     }
     
     if (videos.length > 0) {
-        const spamLikedChannels = new Set(getLikedChannelAffinity().keys());
-        const spamDropped = {};
-        const kept = videos.filter(v => {
-            // Hard spam-shape gate first — cheaper than scoring, far cheaper
-            // than the classifier call the survivors get.
-            const spamReason = isSpamShapedVideo(v, spamLikedChannels);
-            if (spamReason) {
-                spamDropped[spamReason] = (spamDropped[spamReason] || 0) + 1;
-                return false;
-            }
-
-            const evaluation = getScoreAndMatches(v);
-            v.score = evaluation.score;
-            v.matchedTopics = evaluation.matches;
-
-            const isBlockedChannel = isChannelBlocked(v.channelId, v.channelName);
-
-            // Never resurface videos already watched (incl. synced from YouTube) or disliked
-            const isWatched = state.watchedHistory && state.watchedHistory[v.id];
-            const isDisliked = state.videoRatings && state.videoRatings[v.id] < 0;
-
-            // Deterministic hard exclusion: if title matches topic's excludeFacets, rejectedFacets, or novelty pattern
-            const titleLower = (v.title || "").toLowerCase();
-            const isExcludedFacet = policy.excludeFacets && policy.excludeFacets.some(f => titleLower.includes(f.toLowerCase()));
-            const rejectedFacetHit = isRejectedByFacet(v.title || "") || isRejectedByFacet(topic);
-            const isHardNovelty = WG_NOVELTY_RE.test(v.title || "") && !/\b(lego|minecraft|roblox|toy|brick)\b/i.test(topic);
-
-            if (isExcludedFacet || rejectedFacetHit || isHardNovelty) {
-                v._classification = "NOVELTY";
-                v._classificationReason = rejectedFacetHit ? `rejected facet (${rejectedFacetHit})` : (isExcludedFacet ? "excluded facet match" : "novelty pattern match");
-            }
-
-            return !isBlockedChannel && !isWatched && !isDisliked && !rejectedFacetHit && v.score > -10;
-        });
-
-        if (Object.keys(spamDropped).length) {
-            debug(`[Discovery] "${topic}": dropped spam-shaped ${JSON.stringify(spamDropped)}`);
-        }
-
-        // The classifier is a ~10 s Jetson call per topic (measured 10.2 s for
-        // 30 candidates on 2026-09-06) and it sat on the critical path of every
-        // render: nothing appeared until the scraper AND the model had both
-        // answered. Candidates now ship on the heuristic rank; the verdicts
-        // land in the background and evict NOVELTY/OFF_TOPIC from the pool
-        // when they arrive (composeSlate re-ranks from `_classification` at
-        // every draw, so a late verdict still orders later slates).
-        scheduleLateClassification(topic, kept.slice(0, 30));
-
-        // Rank best-first so the downstream per-topic keep takes the top
-        // candidates instead of whatever arrived first.
-        const likedChannels = new Set(getLikedChannelAffinity().keys());
-        kept.forEach(v => {
-            const r = rankScoreFor(v, { topic, topicPolicy: policy, likedChannels, legacyScore: v.score });
-            v._rankScore = r.rankScore;
-            v._rankBreakdown = r.breakdown;
-        });
-
-        // Filter out outright NOVELTY and OFF_TOPIC candidates before feed cap
-        const filteredKept = kept.filter(v => {
-            if (v._classification === "NOVELTY" || v._classification === "OFF_TOPIC") return false;
-            return v._rankScore > -5;
-        });
-
-        filteredKept.sort((a, b) => b._rankScore - a._rankScore);
-        return filteredKept;
+        return gateAndRankDiscoveryVideos(videos, topic, policy);
     }
 
     return [];
+}
+
+/**
+ * The shared candidate pipeline for every discovery supply form (the four
+ * search forms AND the B4 liked-channel form): spam-shape gate, B2 channel
+ * gates, legacy scoring, blocked/watched/disliked filters, late
+ * classification, rank + sort. Pure over `videos` (mutates the candidates'
+ * score fields, touches no state) so a fifth form cannot drift from it.
+ */
+function gateAndRankDiscoveryVideos(videos, topic, policy) {
+    const spamLikedChannels = new Set(getLikedChannelAffinity().keys());
+    const spamDropped = {};
+    const gateLog = {};
+    // Phase B2: per-channel quality gates beside isSpamShapedVideo. The
+    // liked-channel exemption is absolute — a channel the user liked is
+    // never dropped for channel history, same rule as the low-views floor.
+    const channelQuality = buildChannelQuality();
+    const channelPoolStats = buildChannelPoolStats();
+    const kept = videos.filter(v => {
+        // Hard spam-shape gate first — cheaper than scoring, far cheaper
+        // than the classifier call the survivors get.
+        const spamReason = isSpamShapedVideo(v, spamLikedChannels);
+        if (spamReason) {
+            spamDropped[spamReason] = (spamDropped[spamReason] || 0) + 1;
+            return false;
+        }
+
+        const chanName = (v.channelName || "").toLowerCase();
+        const likedExempt = spamLikedChannels.has(chanName);
+        const cq = (v.channelId && channelQuality.get(v.channelId)) ||
+            (chanName && channelQuality.get(chanName)) || null;
+        if (cq && !likedExempt) {
+            if (cq.dislikes >= 2) {
+                spamDropped["channel-dislikes"] = (spamDropped["channel-dislikes"] || 0) + 1;
+                return false;
+            }
+            if (cq.impressions >= 8 && cq.plays === 0) {
+                spamDropped["channel-unengaged"] = (spamDropped["channel-unengaged"] || 0) + 1;
+                return false;
+            }
+        }
+
+        const evaluation = getScoreAndMatches(v);
+        v.score = evaluation.score;
+        v.matchedTopics = evaluation.matches;
+
+        // Demote (never drop): a channel with >=3 pool videos ALL above 5M
+        // views and zero likes/plays is high-view spam — viral slop that is
+        // shown constantly and never chosen. No quality record at all means
+        // zero evidence too; a liked channel always has likes > 0 there.
+        if (!likedExempt) {
+            const likes = cq ? cq.likes : 0;
+            const plays = cq ? cq.plays : 0;
+            if (likes === 0 && plays === 0) {
+                const stats = (v.channelId && channelPoolStats[v.channelId]) ||
+                    (chanName && channelPoolStats[chanName]) || null;
+                if (stats && stats.count >= 3 && stats.allHighView) {
+                    v.score -= 2.5;
+                    gateLog["channel-highview-demote"] = (gateLog["channel-highview-demote"] || 0) + 1;
+                }
+            }
+        }
+
+        const isBlockedChannel = isChannelBlocked(v.channelId, v.channelName);
+
+        // Never resurface videos already watched (incl. synced from YouTube) or disliked
+        const isWatched = state.watchedHistory && state.watchedHistory[v.id];
+        const isDisliked = state.videoRatings && state.videoRatings[v.id] < 0;
+
+        // Deterministic hard exclusion: if title matches topic's excludeFacets, rejectedFacets, or novelty pattern
+        const titleLower = (v.title || "").toLowerCase();
+        const isExcludedFacet = policy.excludeFacets && policy.excludeFacets.some(f => titleLower.includes(f.toLowerCase()));
+        const rejectedFacetHit = isRejectedByFacet(v.title || "") || isRejectedByFacet(topic);
+        const isHardNovelty = WG_NOVELTY_RE.test(v.title || "") && !/\b(lego|minecraft|roblox|toy|brick)\b/i.test(topic);
+
+        if (isExcludedFacet || rejectedFacetHit || isHardNovelty) {
+            v._classification = "NOVELTY";
+            v._classificationReason = rejectedFacetHit ? `rejected facet (${rejectedFacetHit})` : (isExcludedFacet ? "excluded facet match" : "novelty pattern match");
+        }
+
+        return !isBlockedChannel && !isWatched && !isDisliked && !rejectedFacetHit && v.score > -10;
+    });
+
+    if (Object.keys(spamDropped).length) {
+        debug(`[Discovery] "${topic}": dropped spam-shaped ${JSON.stringify(spamDropped)}`);
+    }
+    if (Object.keys(gateLog).length) {
+        debug(`[Discovery] "${topic}": channel gates ${JSON.stringify(gateLog)}`);
+    }
+
+    // The classifier is a ~10 s Jetson call per topic (measured 10.2 s for
+    // 30 candidates on 2026-09-06) and it sat on the critical path of every
+    // render: nothing appeared until the scraper AND the model had both
+    // answered. Candidates now ship on the heuristic rank; the verdicts
+    // land in the background and evict NOVELTY/OFF_TOPIC from the pool
+    // when they arrive (composeSlate re-ranks from `_classification` at
+    // every draw, so a late verdict still orders later slates).
+    scheduleLateClassification(topic, kept.slice(0, 30));
+
+    // Rank best-first so the downstream per-topic keep takes the top
+    // candidates instead of whatever arrived first.
+    const likedChannels = new Set(getLikedChannelAffinity().keys());
+    kept.forEach(v => {
+        const r = rankScoreFor(v, { topic, topicPolicy: policy, likedChannels, legacyScore: v.score });
+        v._rankScore = r.rankScore;
+        v._rankBreakdown = r.breakdown;
+    });
+
+    // Filter out outright NOVELTY and OFF_TOPIC candidates before feed cap
+    const filteredKept = kept.filter(v => {
+        if (v._classification === "NOVELTY" || v._classification === "OFF_TOPIC") return false;
+        return v._rankScore > -5;
+    });
+
+    filteredKept.sort((a, b) => b._rankScore - a._rankScore);
+    return filteredKept;
+}
+
+/**
+ * Per-channel stats over the LIVE pool (suggestion reservoir + rendered
+ * feed), shared by the B2 high-view demotion: how many pool videos a channel
+ * has, and whether ALL of them sit above the 5M-view viral floor. Keyed by
+ * channelId AND lowercased name so either lookup lands.
+ */
+function buildChannelPoolStats() {
+    const stats = {};
+    const add = (v) => {
+        if (!v) return;
+        const cid = v.channelId || "";
+        const nm = (v.channelName || "").toLowerCase();
+        const primaryKey = cid || nm;
+        if (!primaryKey) return;
+        let s = (cid && stats[cid]) || (nm && stats[nm]) || null;
+        if (!s) {
+            s = { count: 0, allHighView: true };
+            if (cid) stats[cid] = s;
+            if (nm) stats[nm] = s;
+        }
+        s.count += 1;
+        const vc = Number(v.viewCount);
+        if (!(Number.isFinite(vc) && vc > 5e6)) s.allHighView = false;
+    };
+    (state.smartFeedSuggestionPool || []).forEach(add);
+    (state.smartFeedVideos || []).forEach(add);
+    return stats;
+}
+
+// ── Liked-channel upload supply (plan §5 B4) ──────────────────────────
+// A fifth supply form with quality by construction: uploads from channels the
+// user already liked cannot be spam channels. Runs only from the pool-fill
+// path (never per topic), max 3 channels per run, 6 h per-channel cache.
+const LIKED_CHANNEL_SUPPLY_TTL_MS = 6 * 3600e3;
+const LIKED_CHANNEL_SUPPLY_MAX_CHANNELS = 3;
+let _likedChannelSupplyInFlight = null;
+
+/** Phase B5: scraper flat-output channel fields normalised for the q lookup. */
+function scraperChannelFields(item) {
+    const out = {};
+    if (item && item.channel_follower_count !== undefined && item.channel_follower_count !== null) {
+        const n = Number(item.channel_follower_count);
+        if (Number.isFinite(n)) out.channelSubs = n;
+    }
+    if (item && item.channel_is_verified !== undefined) {
+        out.channelVerified = item.channel_is_verified === true || item.channel_is_verified === "true" || item.channel_is_verified === 1;
+    }
+    return out;
+}
+
+/** Top liked channels (by affinity) that carry a channelId and are not blocked. */
+function topLikedChannelIdsWithId(limit) {
+    const aff = getLikedChannelAffinity();
+    const ranked = Array.from(aff.entries()).sort((a, b) => b[1] - a[1]);
+    const idByName = {};
+    Object.values(state.ratingStates || {}).forEach(st => {
+        if (!st || st.r !== 5 || !st.v || !st.v.channelName || !st.v.channelId) return;
+        const nm = st.v.channelName.toLowerCase();
+        if (!idByName[nm]) idByName[nm] = st.v.channelId;
+    });
+    const out = [];
+    ranked.forEach(entry => {
+        if (out.length >= limit) return;
+        const nm = entry[0];
+        const cid = idByName[nm];
+        if (!cid || isChannelBlocked(cid, nm)) return;
+        out.push({ channelId: cid, channelName: nm });
+    });
+    return out;
+}
+
+/** Most frequent mined topic across the channel's liked videos, else "". */
+function dominantMinedTopicForChannel(channelName) {
+    const nm = (channelName || "").toLowerCase();
+    if (!nm) return "";
+    const counts = {};
+    Object.entries(state.ratingStates || {}).forEach(entry => {
+        const id = entry[0];
+        const st = entry[1];
+        if (!st || st.r !== 5 || !st.v) return;
+        if ((st.v.channelName || "").toLowerCase() !== nm) return;
+        (((state.minedVideos || {})[id] || {}).topics || []).forEach(t => {
+            const k = normalizeTopic(t);
+            if (k) counts[k] = (counts[k] || 0) + 1;
+        });
+    });
+    let best = "";
+    Object.keys(counts).forEach(k => { if (counts[k] > (counts[best] || 0)) best = k; });
+    return best;
+}
+
+async function fetchLikedChannelUploads() {
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return [];
+    if (_likedChannelSupplyInFlight) return _likedChannelSupplyInFlight;
+    _likedChannelSupplyInFlight = (async () => {
+        try {
+            if (!state.likedChannelSupplyAt || typeof state.likedChannelSupplyAt !== "object") state.likedChannelSupplyAt = {};
+            const now = Date.now();
+            const candidates = topLikedChannelIdsWithId(LIKED_CHANNEL_SUPPLY_MAX_CHANNELS)
+                .filter(c => (now - (state.likedChannelSupplyAt[c.channelId] || 0)) >= LIKED_CHANNEL_SUPPLY_TTL_MS);
+            if (!candidates.length) return [];
+            const knownIds = new Set((state.smartFeedSuggestionPool || []).map(v => v.id));
+            (state.smartFeedVideos || []).forEach(v => knownIds.add(v.id));
+            const fresh = [];
+            const seen = new Set();
+            await Promise.all(candidates.map(async c => {
+                // Stamp before the call so a failing channel cannot hot-loop
+                // every pool-fill tick.
+                state.likedChannelSupplyAt[c.channelId] = Date.now();
+                const items = await withScraperSlot(1, async () => {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 30000);
+                    try {
+                        const resp = await fetch("/scraper/collect", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                source: "youtube",
+                                channels: [c.channelId],
+                                limit: 6,
+                                days_back: 0,
+                                require_transcript: false,
+                                sort: "date"
+                            }),
+                            signal: controller.signal
+                        });
+                        clearTimeout(timeoutId);
+                        if (resp.ok) {
+                            const data = await resp.json();
+                            if (data && Array.isArray(data.items)) {
+                                debug(`[Liked-Channel Supply] ${c.channelName}: ${data.items.length} uploads`);
+                                return data.items;
+                            }
+                        }
+                    } catch (err) {
+                        clearTimeout(timeoutId);
+                        console.warn(`[Liked-Channel Supply] fetch failed for "${c.channelName}":`, err && err.message);
+                    }
+                    return [];
+                });
+                // discoveryTopic: the channel's dominant mined topic — the
+                // reason the user liked this channel — else the channel name.
+                const topic = dominantMinedTopicForChannel(c.channelName) || c.channelName;
+                items.forEach((item, idx) => {
+                    if (!item || !item.video_id) return;
+                    if (knownIds.has(item.video_id) || seen.has(item.video_id)) return;
+                    seen.add(item.video_id);
+                    fresh.push({
+                        id: item.video_id,
+                        title: item.title,
+                        channelName: item.channel || c.channelName,
+                        channelId: item.channel_id || c.channelId,
+                        published: item.published_at ? Date.parse(item.published_at) : null,
+                        publishedEstimated: !!item.published_at_estimated,
+                        description: item.description || "",
+                        duration: item.duration_secs,
+                        viewCount: item.view_count,
+                        ...scraperChannelFields(item),
+                        isDiscover: true,
+                        discoveryTopic: topic,
+                        _form: "liked-channel",
+                        _fetchRank: idx
+                    });
+                });
+            }));
+            persistField("liked_channel_supply_at", state.likedChannelSupplyAt);
+            if (!fresh.length) return [];
+            // Same pool pipeline as the search forms: spam/channel gates,
+            // scoring and dedupe all live in gateAndRankDiscoveryVideos.
+            const byTopic = new Map();
+            fresh.forEach(v => {
+                const k = v.discoveryTopic || "";
+                if (!byTopic.has(k)) byTopic.set(k, []);
+                byTopic.get(k).push(v);
+            });
+            const added = [];
+            const timestamp = Date.now();
+            byTopic.forEach((group, topic) => {
+                const gated = gateAndRankDiscoveryVideos(group, topic, getTopicPolicy(topic));
+                gated.forEach(v => {
+                    if (knownIds.has(v.id)) return;
+                    knownIds.add(v.id);
+                    v._topic = topic;
+                    v.crawledAt = timestamp;
+                    added.push(v);
+                });
+            });
+            if (added.length) {
+                state.smartFeedSuggestionPool.push(...added);
+                saveSmartFeedSuggestionPool();
+                invalidateScoreCache();
+                debug(`[Liked-Channel Supply] added ${added.length} upload(s) from ${candidates.length} liked channel(s)`);
+            }
+            return added;
+        } catch (err) {
+            console.warn("[Liked-Channel Supply] failed:", err && err.message);
+            return [];
+        }
+    })();
+    try { return await _likedChannelSupplyInFlight; } finally { _likedChannelSupplyInFlight = null; }
+}
+
+// ── Subscriber / verified enrichment (plan §5 B5) ─────────────────────
+// The backend's /youtube/channel/<id> proxy serves the channel page; we read
+// subscriberCountText/videoCountText out of ytInitialData and whether a
+// verified badge (CHECK_CIRCLE / BADGE_STYLE_TYPE_VERIFIED) rides in the
+// header. Best-effort: absence is "false", errors skip the channel.
+const CHANNEL_STATS_TTL_MS = 7 * 86400e3;
+const CHANNEL_STATS_MAX_PER_RUN = 20;
+const CHANNEL_STATS_CONCURRENCY = 4;
+let _channelStatsInFlight = null;
+let _channelStatsLastRunAt = 0;
+
+function parseCountText(text) {
+    if (typeof text !== "string") return null;
+    const m = text.replace(/,/g, "").match(/([\d.]+)\s*([kmb])?/i);
+    if (!m) return null;
+    const n = parseFloat(m[1]);
+    if (!Number.isFinite(n) || n < 0) return null;
+    const mult = { k: 1e3, m: 1e6, b: 1e9 }[(m[2] || "").toLowerCase()] || 1;
+    return Math.round(n * mult);
+}
+
+function extractCountTextValue(node) {
+    if (!node) return null;
+    if (typeof node === "string") return node;
+    if (typeof node.simpleText === "string") return node.simpleText;
+    if (Array.isArray(node.runs)) return node.runs.map(r => (r && r.text) || "").join("");
+    if (node.content) return extractCountTextValue(node.content);
+    return null;
+}
+
+function collectChannelStatFields(data) {
+    const out = { subs: null, videoCount: null, verified: false };
+    const stack = [data];
+    const VERIFIED_RE = /CHECK_CIRCLE|BADGE_STYLE_TYPE_VERIFIED/;
+    while (stack.length) {
+        const node = stack.pop();
+        if (!node || typeof node !== "object") continue;
+        for (const key in node) {
+            const val = node[key];
+            if (key === "subscriberCountText" && out.subs === null) out.subs = parseCountText(extractCountTextValue(val));
+            else if (key === "videoCountText" && out.videoCount === null) out.videoCount = parseCountText(extractCountTextValue(val));
+            else if (VERIFIED_RE.test(key)) out.verified = true;
+            else if (key === "verifiedBadge" && val) out.verified = true;
+            else if (typeof val === "string" && VERIFIED_RE.test(val)) out.verified = true;
+            if (val && typeof val === "object") stack.push(val);
+        }
+    }
+    return out;
+}
+
+async function fetchOneChannelStats(channelId) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    try {
+        const resp = await fetch(`/youtube/channel/${channelId}`, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (!resp || !resp.ok) return null;
+        const html = await resp.text();
+        const match = html.match(/ytInitialData\s*=\s*({.+?});/);
+        if (!match) return null;
+        const fields = collectChannelStatFields(JSON.parse(match[1]));
+        return { subs: fields.subs, videoCount: fields.videoCount, verified: fields.verified };
+    } catch (err) {
+        clearTimeout(timeoutId);
+        return null;
+    }
+}
+
+async function fetchChannelStats(channelIds) {
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return 0;
+    if (_channelStatsInFlight) return _channelStatsInFlight;
+    _channelStatsInFlight = (async () => {
+        try {
+            if (!state.channelStats || typeof state.channelStats !== "object") state.channelStats = {};
+            const now = Date.now();
+            const ids = Array.from(new Set((channelIds || []).filter(Boolean))).slice(0, CHANNEL_STATS_MAX_PER_RUN);
+            const due = ids.filter(id => {
+                const rec = state.channelStats[id];
+                return !rec || !Number.isFinite(rec.at) || (now - rec.at) > CHANNEL_STATS_TTL_MS;
+            });
+            if (!due.length) return 0;
+            const queue = due.slice();
+            let updated = 0;
+            const worker = async () => {
+                while (queue.length) {
+                    const id = queue.shift();
+                    const rec = await fetchOneChannelStats(id);
+                    if (rec) {
+                        state.channelStats[id] = { subs: rec.subs, verified: !!rec.verified, at: Date.now() };
+                        updated += 1;
+                    }
+                }
+            };
+            await Promise.all(Array.from({ length: CHANNEL_STATS_CONCURRENCY }, () => worker()));
+            if (updated) {
+                persistField("channel_stats", state.channelStats);
+                _channelQualityCache = null;
+                invalidateLikedChannelCache();
+                debug(`[Channel Stats] refreshed ${updated} channel(s)`);
+            }
+            return updated;
+        } catch (err) {
+            debug("[Channel Stats] failed:", err && err.message);
+            return 0;
+        }
+    })();
+    try { return await _channelStatsInFlight; } finally { _channelStatsInFlight = null; }
+}
+
+/** Channels to enrich opportunistically: most-shown first, then pool-only. */
+function topPoolChannelIds(limit) {
+    const cap = typeof limit === "number" ? limit : CHANNEL_STATS_MAX_PER_RUN;
+    const counts = {};
+    ((state.feedMix && Array.isArray(state.feedMix.shown) && state.feedMix.shown) || []).forEach(r => {
+        if (r && r.channelId) counts[r.channelId] = (counts[r.channelId] || 0) + 1;
+    });
+    (state.smartFeedSuggestionPool || []).forEach(v => {
+        if (v && v.channelId && !(v.channelId in counts)) counts[v.channelId] = 1;
+    });
+    return Object.keys(counts).sort((a, b) => counts[b] - counts[a]).slice(0, cap);
 }
 
 // ── Grounding gate ───────────────────────────────────────────
@@ -10321,6 +11059,20 @@ async function fillSmartFeedPreloadBuffer() {
     // three yt-dlp calls at a time on its 4-core box (the rest queue). A wider
     // fan-out only makes every topic wait for every other topic.
     const parallelCount = isPoolEmpty ? 3 : (isPoolLow ? 2 : 1);
+
+    // Phase B4/B5: while the reservoir is low, opportunistically (a) top it
+    // up with uploads from the top liked channels and (b) enrich subscriber/
+    // verified stats for the most-shown pool channels. Both are guarded by
+    // their own in-flight flag + cache TTL, so the 1.5 s refill cadence
+    // cannot turn them into a hammer; neither blocks this fill.
+    if (isPoolLow || isPoolEmpty) {
+        fetchLikedChannelUploads().catch(err => debug("[Liked-Channel Supply] skipped:", err && err.message));
+        const statsNow = Date.now();
+        if (statsNow - _channelStatsLastRunAt > 3600e3) {
+            _channelStatsLastRunAt = statsNow;
+            fetchChannelStats(topPoolChannelIds()).catch(err => debug("[Channel Stats] skipped:", err && err.message));
+        }
+    }
     
     const topicsToFetch = [];
     for (let i = 0; i < parallelCount; i++) {
@@ -10786,7 +11538,16 @@ async function editDiscoverTopic(topic) {
     if (existingNewIndex !== -1) {
         state.topics[existingNewIndex].weight = Math.max(state.topics[existingNewIndex].weight, 5); // Ensure not muted
     } else {
-        state.topics.push({ phrase: newTopicClean, weight: 5, addedAt: Date.now(), origin: "hand", role: "core", bornRole: "core" });
+        // A3-3: the edited name may be a lookalike of a topic that already
+        // exists — merge into it (hand origin wins over generated) instead of
+        // inserting a second string for the same idea.
+        const dup = findNearDuplicateTopic(newTopicClean);
+        if (dup) {
+            mergeNearDuplicateTopic(dup, { phrase: newTopicClean, weight: 5, origin: "hand" });
+            promoteTopicRole(dup.phrase, "hand add");
+        } else {
+            state.topics.push({ phrase: newTopicClean, weight: 5, addedAt: Date.now(), origin: "hand", role: "core", bornRole: "core" });
+        }
     }
     saveTopics();
     
