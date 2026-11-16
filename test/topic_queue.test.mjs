@@ -107,10 +107,13 @@ console.log("Running Topic Queue Tests...\n");
   const small = names.find(n => n !== big);
   for (let i = 0; i < 20; i++) state.topics.push(topic("synth topic " + i, { role: "core", cluster: small }));
   const q = plain(get("composeTopicQueue")(state.topics, 10));
+  // QUEUE_COMPOSE gives core 60% of the slate: 6 slots, split 70/30 -> 4/2.
+  const kilnCore = q.slice(0, 6).filter(p => p.startsWith("kiln")).length;
+  assert.strictEqual(kilnCore, 4, `core calibration gave ${kilnCore} of 6 core slots`);
+  // Shortfall in any role fills from the whole core band randomly, so the
+  // total can exceed the calibrated share; it must never fall below it.
   const kiln = q.filter(p => p.startsWith("kiln")).length;
-  // Shortfall in any role fills from core, so the majority cluster can
-  // legitimately receive up to 9 of 10 — only a minority outcome is wrong.
-  assert.ok(kiln >= 5 && kiln <= 9, `majority cluster got ${kiln} of 10 core slots`);
+  assert.ok(kiln >= 4, `majority cluster got ${kiln} of 10 core slots`);
   console.log("✅ core slots calibrated to like share across clusters");
 }
 
