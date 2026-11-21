@@ -9553,6 +9553,75 @@ async function mineLikedVideosIntoTopics() {
     _miningInProgress = false;
 }
 
+// ── Brainstorm domain focus gate ─────────────────────────────────────
+// The backend accepts an OPTIONAL `domainFocus` ("finance") plus
+// `seedDomains`; absent, its prompt is byte-identical to before. That option
+// must never be a way to inject finance content the user did not ask for, so
+// the client opens it only from the user's OWN likes:
+//   • the share is weighted, using the topic weights the pool already carries
+//     (LIKE_MINE_BASE_WEIGHT band for like-earned topics) — a like counts and
+//     a finance topic the user liked carries its own weight;
+//   • generated topics (brainstorm/seed/similar) are guesses, not likes, and
+//     are excluded — a guess can never open the gate;
+//   • seeds are the user's own finance phrases, capped and deduped. Nothing
+//     is synthesized here.
+// The share must reach FINANCE_MIN_SHARE (0.25, the finance-pack threshold
+// the explore drip already uses) before focus is sent.
+const FINANCE_FOCUS_SEED_MAX = 5;
+
+/**
+ * Weighted finance share over the user's own liked topics.
+ * Pure: reads only its argument. Returns { share, total, finance, seeds }
+ * where `share` is null when there are no liked topics at all — unknown
+ * evidence never opens the gate. `seeds` are the finance phrases ordered by
+ * weight, deduped and capped at FINANCE_FOCUS_SEED_MAX.
+ */
+function financeFocusShare(topics) {
+    const liked = (Array.isArray(topics) ? topics : []).filter(t =>
+        t && typeof t.weight === "number" && t.weight > 0 &&
+        !isGeneratedTopic(t) && normalizeTopic(t.phrase));
+    let total = 0;
+    let finance = 0;
+    const financeTopics = [];
+    liked.forEach(t => {
+        total += t.weight;
+        if (isFinanceText(t.phrase)) {
+            finance += t.weight;
+            financeTopics.push(t);
+        }
+    });
+    const seeds = [];
+    const seen = new Set();
+    financeTopics
+        .sort((a, b) => b.weight - a.weight)
+        .forEach(t => {
+            const phrase = normalizeTopic(t.phrase);
+            if (!phrase || seen.has(phrase)) return;
+            seen.add(phrase);
+            if (seeds.length < FINANCE_FOCUS_SEED_MAX) seeds.push(phrase);
+        });
+    return {
+        share: total > 0 ? finance / total : null,
+        total,
+        finance,
+        seeds
+    };
+}
+
+/**
+ * The brainstorm gate: { share, focus, seedDomains }. `focus` is "finance"
+ * only when the weighted share is ≥ FINANCE_MIN_SHARE AND the user has at
+ * least one finance like-mined topic; otherwise both fields stay empty so the
+ * request body is byte-identical to the pre-focus shape.
+ */
+function brainstormDomainFocus(topics) {
+    const { share, seeds } = financeFocusShare(topics);
+    if (share === null || share < FINANCE_MIN_SHARE || !seeds.length) {
+        return { share, focus: null, seedDomains: [] };
+    }
+    return { share, focus: "finance", seedDomains: seeds };
+}
+
 async function generateBrainstormTopics(append, numRequests = 1) {
     append = append || false;
     if (state.brainstormLoading) return;
@@ -9575,6 +9644,15 @@ async function generateBrainstormTopics(append, numRequests = 1) {
         // composed queue no longer drains the whole pool anyway.
         ctx.numTopics = 60;
         ctx.rateFit = state.settings.fitRatingEnabled !== false;
+        // Finance focus is an OPTION earned by the user's own likes, never a
+        // default: below FINANCE_MIN_SHARE the body keeps the pre-focus shape
+        // (no domainFocus / seedDomains keys at all).
+        const focus = brainstormDomainFocus(state.topics);
+        if (focus.focus) {
+            ctx.domainFocus = focus.focus;
+            ctx.seedDomains = focus.seedDomains.slice();
+        }
+        debug(`[Brainstorm] finance share ${focus.share === null ? "n/a" : focus.share.toFixed(3)} → domainFocus=${focus.focus || "none"} seeds=${focus.seedDomains.length}`);
         
         const resp = await countedFetch("/api/wallgarden/brainstorm", {
             method: "POST",
