@@ -1,3 +1,36 @@
+# Handoff — Finance-feed measurement (server-side ledger + brainstorm telemetry), 2026-11-21
+
+**Measurement only; no ranking, threshold or prompt change.** The finance-feed
+work (Options A/B + the brainstorm focus gate) was live but judgeable only in the
+browser console. Three surfaces are now server-side:
+
+- **Brainstorm log line.** `lazy-agent-service` `POST /wallgarden/brainstorm`
+  emits one structured line per request:
+  `[WallgardenRoutes] /brainstorm {"finance_share":…,"domain_focus":…,"seed_domains":…}`.
+  `finance_share` is the unweighted share of the request's `interests` that hit
+  the client's finance lexicon (mirrored in `WallgardenService.FINANCE_LEXICON`);
+  paired with `domain_focus` it shows whether the own-likes gate opened.
+- **Feed-candidate ledger.** `gateAndRankDiscoveryVideos` builds one row per
+  evaluated candidate — `form` (incl. `liked-channel-finance`), `finance`,
+  `finance_trust` (Option B channel origin), `accepted`/`rejected`, the
+  `financeScamReason()` `scam_pattern` on the rejected half, title tickers and
+  the explore-drip arm (`drip_mode`, stamped by `maybeRunExploreDrip`). Rows are
+  batched to `POST /sync/feed/candidates` and upserted by
+  `(video_id, topic, form)` into `wallgarden.feed_candidates` — the same Mongo
+  database the Wallgarden collector/sync already writes (`MONGO_URI` /
+  `WALLGARDEN_MONGO_DB`); no new database, no new env var.
+- **One-command aggregate (read-only).**
+  `python3 sync-service/feed_candidates.py --days 14` prints finance share of
+  feed supply, distinct finance channels, accepted finance videos, distinct
+  tickers, scam rejections by pattern, forms and drip arms over the window.
+
+Tests: `npm test` green (new `test/feed_candidates.test.mjs` +
+`sync-service/test_feed_candidates.py`, 9 aggregate cases); the lazy-agent-service
+route test `WallgardenBrainstormTelemetry.test.ts` (6 cases) plus its typecheck
+and eslint are green.
+
+---
+
 # Handoff — Anti-stickiness (A3) + channel-quality layer (B), 2026-11-15
 
 **Discovery feed, second batch.** Completes `plan/discovery_reset_and_channel_quality.md`.

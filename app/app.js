@@ -4751,6 +4751,104 @@ function markFeedEvent(videoId, kind) {
     return false;
 }
 
+// ── Feed-candidate ledger (server-side yield of the finance arms) ─────
+// The finance work was only measurable in this browser's console: the finance
+// share of supply, the `liked-channel-finance` form, the explore alternation,
+// the pump gate's rejections and the brainstorm focus gate. This ships one row
+// per candidate the discovery pipeline evaluated to the sync service, which
+// stores it in the SAME Mongo database the Wallgarden collector already writes
+// (`wallgarden.feed_candidates`). Read the yield with:
+//   python3 sync-service/feed_candidates.py --days 14
+// Instrumentation only: no gate, score or ranking path reads these fields.
+const FEED_TELEMETRY_ENABLED = true;
+const FEED_TELEMETRY_FLUSH_MS = 5000;
+const FEED_TELEMETRY_MAX_BUFFER = 500;
+const FEED_TELEMETRY_MAX_TICKERS = 8;
+let _feedTelemetryBuffer = [];
+let _feedTelemetryTimer = null;
+
+/** Tickers a finance title names: $AAPL or (AAPL), deduped and capped. */
+function financeTickers(title) {
+    const out = [];
+    const re = /\$([A-Z]{1,5})\b|\(([A-Z]{1,5})\)/g;
+    const text = String(title || "");
+    let match;
+    while ((match = re.exec(text)) && out.length < FEED_TELEMETRY_MAX_TICKERS) {
+        const ticker = match[1] || match[2];
+        if (ticker && !out.includes(ticker)) out.push(ticker);
+    }
+    return out;
+}
+
+/** One ledger row for a candidate the pipeline is about to gate. */
+function feedCandidateRow(v, topic, trustMap) {
+    // The candidate's OWN topic (what it was filed under) is the right text to
+    // classify; the pipeline `topic` is just the query that fetched it.
+    const ownTopic = v._topic || v.discoveryTopic || topic || "";
+    const ownTopicKey = normalizeTopic(ownTopic);
+    const drip = state.lastExploreDrip;
+    const dripMode = (drip && drip.mode && Array.isArray(drip.topics) &&
+        drip.topics.includes(ownTopicKey) &&
+        (Date.now() - (drip.t || 0)) < EXPLORE_DRIP_INTERVAL_MS) ? drip.mode : "";
+    return {
+        video_id: v.id || "",
+        title: v.title || "",
+        channel_id: v.channelId || "",
+        channel_name: v.channelName || "",
+        topic: ownTopicKey,
+        form: v._form || "",
+        finance: isFinanceText(`${ownTopic} ${v.title || ""} ${v.channelName || ""}`),
+        // Option B's channel origin: the trust the user's own finance likes
+        // earned this channel (0 when it has none).
+        finance_trust: financeTrustForChannel(v.channelId, v.channelName, trustMap),
+        accepted: false,
+        rejected: null,
+        scam_pattern: null,
+        tickers: financeTickers(v.title),
+        drip_mode: dripMode,
+        t: Date.now()
+    };
+}
+
+function flushFeedCandidates() {
+    if (_feedTelemetryTimer) { clearTimeout(_feedTelemetryTimer); _feedTelemetryTimer = null; }
+    if (!_feedTelemetryBuffer.length) return Promise.resolve(0);
+    const rows = _feedTelemetryBuffer;
+    _feedTelemetryBuffer = [];
+    // Browsers cap keepalive bodies at ~64 KiB; 100 rows stays well under it
+    // even with long titles, so a burst can never lose the whole batch.
+    const batches = [];
+    for (let i = 0; i < rows.length; i += 100) batches.push(rows.slice(i, i + 100));
+    return Promise.all(batches.map(batch =>
+        fetch("/sync/feed/candidates", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ rows: batch }),
+            keepalive: true
+        })
+    )).then(() => rows.length).catch(err => {
+        // Instrumentation must never break the feed.
+        debug("[Feed Ledger] flush failed:", err && err.message);
+        return 0;
+    });
+}
+
+function recordFeedCandidates(rows) {
+    if (!FEED_TELEMETRY_ENABLED || !Array.isArray(rows) || !rows.length) return;
+    _feedTelemetryBuffer.push(...rows);
+    if (_feedTelemetryBuffer.length > FEED_TELEMETRY_MAX_BUFFER) {
+        _feedTelemetryBuffer = _feedTelemetryBuffer.slice(-FEED_TELEMETRY_MAX_BUFFER);
+    }
+    if (_feedTelemetryTimer) return;
+    _feedTelemetryTimer = setTimeout(() => {
+        _feedTelemetryTimer = null;
+        flushFeedCandidates();
+    }, FEED_TELEMETRY_FLUSH_MS);
+}
+
+window.wgFeedCandidates = function () { return _feedTelemetryBuffer.slice(); };
+window.wgFlushFeedCandidates = flushFeedCandidates;
+
 // Pure: the report wgFeedMix() prints. Charges "unknown" to "recent" for the
 // KL (an undated row is a clock that starts now), reports it separately.
 function feedMixReport(shown, target, windowSize) {
@@ -9938,9 +10036,16 @@ async function maybeRunExploreDrip() {
         // preload cadence into a daily retry loop against a dead backend.
         state.exploreDripAt = now;
         persistField("explore_drip_at", now);
+        // Ledger: which alternation arm today's drip took. Candidate rows
+        // fetched inside the drip window carry this, so the finance arm's
+        // supply yield is separable server-side.
+        state.lastExploreDrip = { seed: seed.phrase, mode: picked.mode, t: now, topics: [] };
         // strongestReason "imp" makes the children born explore/seed — the
         // weakest evidence tier, exactly what an unearned lateral batch is.
         const added = await generateTopicsForSeeds([seed.phrase], 3, "imp");
+        // Only the topics this drip actually added are the finance arm's
+        // supply; candidate rows for them carry `drip_mode`.
+        if (Array.isArray(added)) state.lastExploreDrip.topics = added.slice(0, 10);
         debug(`[Explore Drip] seeded "${seed.phrase}" (${picked.mode}) -> ${(added || []).length} explore topic(s)`);
         return true;
     } catch (err) {
@@ -10652,12 +10757,32 @@ function gateAndRankDiscoveryVideos(videos, topic, policy) {
     // never dropped for channel history, same rule as the low-views floor.
     const channelQuality = buildChannelQuality();
     const channelPoolStats = buildChannelPoolStats();
+    // Ledger rows for every candidate this pipeline evaluates. Built here, not
+    // in recordFeedShown: the rejected half of the supply is the whole point
+    // (the pump gate's yield), and it never reaches the shown ledger.
+    const rowByVideo = new Map();
+    const rowFor = (v) => {
+        let row = rowByVideo.get(v);
+        if (!row) {
+            row = feedCandidateRow(v, topic, trustMap);
+            rowByVideo.set(v, row);
+        }
+        return row;
+    };
+    const rejectCandidate = (v, reason) => {
+        const row = rowFor(v);
+        row.rejected = reason;
+        // The pump gate's pattern string only counts when it CAUSED the
+        // rejection; a liked channel is exempt and is not a scam rejection.
+        if (reason === "finance-scam") row.scam_pattern = reason;
+    };
     const kept = videos.filter(v => {
         // Hard spam-shape gate first — cheaper than scoring, far cheaper
         // than the classifier call the survivors get.
         const spamReason = isSpamShapedVideo(v, spamLikedChannels);
         if (spamReason) {
             spamDropped[spamReason] = (spamDropped[spamReason] || 0) + 1;
+            rejectCandidate(v, spamReason);
             return false;
         }
 
@@ -10668,10 +10793,12 @@ function gateAndRankDiscoveryVideos(videos, topic, policy) {
         if (cq && !likedExempt) {
             if (cq.dislikes >= 2) {
                 spamDropped["channel-dislikes"] = (spamDropped["channel-dislikes"] || 0) + 1;
+                rejectCandidate(v, "channel-dislikes");
                 return false;
             }
             if (cq.impressions >= 8 && cq.plays === 0) {
                 spamDropped["channel-unengaged"] = (spamDropped["channel-unengaged"] || 0) + 1;
+                rejectCandidate(v, "channel-unengaged");
                 return false;
             }
         }
@@ -10714,7 +10841,12 @@ function gateAndRankDiscoveryVideos(videos, topic, policy) {
             v._classificationReason = rejectedFacetHit ? `rejected facet (${rejectedFacetHit})` : (isExcludedFacet ? "excluded facet match" : "novelty pattern match");
         }
 
-        return !isBlockedChannel && !isWatched && !isDisliked && !rejectedFacetHit && v.score > -10;
+        if (isBlockedChannel) { rejectCandidate(v, "blocked-channel"); return false; }
+        if (isWatched) { rejectCandidate(v, "watched"); return false; }
+        if (isDisliked) { rejectCandidate(v, "disliked"); return false; }
+        if (rejectedFacetHit) { rejectCandidate(v, "rejected-facet"); return false; }
+        if (v.score <= -10) { rejectCandidate(v, "low-score"); return false; }
+        return true;
     });
 
     if (Object.keys(spamDropped).length) {
@@ -10744,9 +10876,14 @@ function gateAndRankDiscoveryVideos(videos, topic, policy) {
 
     // Filter out outright NOVELTY and OFF_TOPIC candidates before feed cap
     const filteredKept = kept.filter(v => {
-        if (v._classification === "NOVELTY" || v._classification === "OFF_TOPIC") return false;
-        return v._rankScore > -5;
+        if (v._classification === "NOVELTY") { rejectCandidate(v, "novelty"); return false; }
+        if (v._classification === "OFF_TOPIC") { rejectCandidate(v, "off-topic"); return false; }
+        if (v._rankScore <= -5) { rejectCandidate(v, "low-rank"); return false; }
+        return true;
     });
+
+    filteredKept.forEach(v => { rowFor(v).accepted = true; });
+    recordFeedCandidates(Array.from(rowByVideo.values()));
 
     filteredKept.sort((a, b) => b._rankScore - a._rankScore);
     return filteredKept;

@@ -46,6 +46,7 @@ from brain_graph import (
     ground_topics_algorithmically,
     rank_brain_topics,
 )
+from feed_candidates import record_candidates
 
 MONGO_URI = os.environ.get("MONGO_URI")
 DB_NAME = os.environ.get("WALLGARDEN_MONGO_DB", "wallgarden")
@@ -382,6 +383,18 @@ def post_brain_reject_facet(body: dict = Body(default={})):
         )
         res["mergedRejectedFacets"] = merged_facets
     return res
+
+
+# Discovery-feed candidate ledger. The dashboard posts one row per candidate
+# its pipeline evaluated (form, finance score/trust, gate rejection, scam
+# pattern, tickers); rows land in the `feed_candidates` collection of this same
+# database. Declared BEFORE the generic /sync/{profile} POST route so it is not
+# swallowed as profile="feed". Read the yield with:
+#   python3 feed_candidates.py --days 14
+@app.post("/sync/feed/candidates")
+def post_feed_candidates(body: dict = Body(default={})):
+    rows = (body or {}).get("rows") or []
+    return record_candidates(rows)
 
 
 # The {profile} segment is accepted for URL/nginx compatibility but ignored:
