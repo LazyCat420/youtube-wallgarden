@@ -1089,6 +1089,60 @@ const LIKE_MINE_BASE_WEIGHT = { A: 10, B: 9 };   // strictly above the brainstor
 const BRAINSTORM_WEIGHT_CAP = 6;
 const PROVEN_PLAY_TTL_MS = 90 * 86400e3;         // play evidence expires; likes have their own decay
 
+// ── Finance precision pack ───────────────────────────────────────────
+// The miner produces finance topics ("equities", "macro", "crypto") and
+// polysemous ones ("market", "rates", "oil") that a generic policy cannot
+// separate from pump content. ONE lexicon feeds all three consumers — the
+// topic-policy fallback, the pump gate and the feed-mix stamp — so they
+// always agree on what counts as finance.
+//
+// Deliberate omissions: bare "market", "rates" and "oil" are NOT lexicon
+// entries. They are covered by exact BUILTIN presets, which keeps "oil
+// painting", "flea market" and "rates for a haircut" out of the finance
+// path. Ambiguous single words that collide with everyday English
+// ("bond" → James Bond, "shares", "portfolio" → art, "trading" → cards,
+// "yields" → recipes, "ira" → a name) only appear in finance collocations.
+const FINANCE_LEXICON = [
+    "equities", "equity market", "stocks", "stock market", "stock picks",
+    "earnings", "dividends", "valuation", "etf", "etfs", "etf flows",
+    "index fund", "mutual fund", "investment portfolio", "stock portfolio",
+    "macro", "macroeconomics", "inflation", "cpi", "fomc",
+    "federal reserve", "rate cut", "rate cuts", "rate hike", "rate hikes",
+    "interest rate", "interest rates", "bond market", "treasury bond",
+    "treasury yields", "bond yields", "commodities", "commodity market", "crude oil",
+    "oil price", "oil futures", "gold price", "silver price",
+    "natural gas", "opec", "personal finance", "budgeting", "retirement",
+    "401k", "roth ira", "mortgage", "crypto", "cryptocurrency", "bitcoin",
+    "ethereum", "altcoin", "defi", "blockchain", "day trading",
+    "stock trading", "options trading", "forex", "investing",
+    "investment", "finance", "financial", "economy", "gdp", "recession",
+    "hedge fund", "private equity", "venture capital", "ipo", "short selling"
+];
+
+// Narrow pump/scam phrasing only. Modelled on the extension's comment scam
+// rule (extension/scripts/content.js), which names the offer plus the
+// promise; every branch here needs an OFFER shape, not just a finance word.
+// "airdrop"/"presale" need a claim/join verb so crypto NEWS survives.
+const FINANCE_SCAM_RE = /\b(guaranteed (?:returns?|profits?|gains?|income)|risk[- ]free (?:returns?|profits?|gains?)|(?:100x|1000x)|\d{2,}x guaranteed|signal (?:group|channel|service)s?|vip (?:group|signal|trading|members)|claim (?:your )?airdrop|airdrop (?:claim|is live|now live|whitelist)|presale (?:live|whitelist|now)|join (?:the )?(?:airdrop|presale)|prop[- ]?firm.{0,24}payouts?|funded account payouts?|recovery (?:agent|expert|specialist)|get your (?:money|crypto|funds) back|binary options?|financial freedom (?:in|within) \d+ (?:days?|weeks?|months?))\b/i;
+
+const FINANCE_EXPLORE_ALTERNATION = 0.5;  // share of drip days that seed from a finance topic
+const FINANCE_MIN_SHARE = 0.25;            // finance topics must be ≥¼ of like-mined to alternate
+
+/** Lazily-built word-boundary matcher over FINANCE_LEXICON. */
+let _financeLexiconRe = null;
+function financeLexiconRe() {
+    if (!_financeLexiconRe) {
+        const terms = FINANCE_LEXICON.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+        _financeLexiconRe = new RegExp(`\\b(?:${terms.join("|")})\\b`, "i");
+    }
+    return _financeLexiconRe;
+}
+
+/** True when a topic / title / channel string looks like finance coverage. */
+function isFinanceText(text) {
+    return !!text && financeLexiconRe().test(String(text));
+}
+
 /** Where a topic came from: like-mined | hand | engaged | brainstorm | seed | similar | "" (legacy). */
 function topicOrigin(t) {
     return (t && t.origin) || "";
@@ -4396,8 +4450,34 @@ function channelQualityForVideo(video, ctx) {
         0.15 * (subs >= 1e5 ? 1 : 0) + 0.05 * (verified ? 1 : 0)));
 }
 
+// Finance presets share one facet set. Include facets are the intent-precise
+// qualifiers the depth query form can append; the exclude list is capped at
+// eight pump/scam phrases so a genuine earnings video is never dropped.
+const FINANCE_INCLUDE_FACETS = ["earnings", "guidance", "fomc", "cpi", "etf flows", "supply", "valuation"];
+const FINANCE_EXCLUDE_FACETS = ["pump", "moonshot", "signal group", "100x", "airdrop", "presale", "guaranteed returns", "get rich quick"];
+
+function financePolicy(intent) {
+    return {
+        intent,
+        includeFacets: [...FINANCE_INCLUDE_FACETS],
+        excludeFacets: [...FINANCE_EXCLUDE_FACETS],
+        scope: "broad"
+    };
+}
+
 // Built-in starter policies for common / polysemous topics.
 const BUILTIN_TOPIC_POLICIES = {
+    "equities": financePolicy("public equity markets, stock analysis, earnings, valuation"),
+    "macro": financePolicy("macroeconomics, monetary policy, inflation and growth data"),
+    "commodities": financePolicy("commodity markets, crude oil, metals, supply and demand"),
+    "earnings": financePolicy("company earnings reports, guidance and quarterly results"),
+    "personal finance": financePolicy("personal budgeting, saving, retirement accounts and debt"),
+    "crypto": financePolicy("cryptocurrency markets, bitcoin, blockchain and defi"),
+    // Polysemous keys: exact-topic presets keep the lexicon free of bare
+    // "market"/"rates"/"oil", so "oil painting" and "flea market" stay clean.
+    "market": financePolicy("financial markets, equities, rates and macro commentary"),
+    "rates": financePolicy("interest rates, central-bank policy and bond yields"),
+    "oil": financePolicy("crude oil markets, opec supply and energy prices"),
     "fish tanks": {
         intent: "aquarium keeping, planted tanks, aquascaping, freshwater and marine fish husbandry",
         includeFacets: ["aquascaping", "planted tank", "reef tank", "fishkeeping", "aquarium setup"],
@@ -4432,6 +4512,11 @@ function getTopicPolicy(topic) {
     }
     if (BUILTIN_TOPIC_POLICIES[norm]) {
         return { phrase: topic, ...BUILTIN_TOPIC_POLICIES[norm] };
+    }
+    // Any finance-looking topic the miner produced outside the preset keys
+    // ("dividend investing", "fed rate cuts") gets the same facets.
+    if (isFinanceText(norm)) {
+        return { phrase: topic, ...financePolicy(`${topic} finance coverage`) };
     }
     return {
         phrase: topic,
@@ -4526,14 +4611,18 @@ function recordFeedShown(videos, mode) {
         if (!v || !v.id) return;
         const era = eraBucketOf(v.published, now);
         hist[era] = (hist[era] || 0) + 1;
+        const topic = normalizeTopic(v._topic || v.discoveryTopic || "");
         state.feedMix.shown.push({
             id: v.id, era,
-            topic: normalizeTopic(v._topic || v.discoveryTopic || ""),
+            topic,
             channel: (v.channelName || "").toLowerCase(),
             // Channel-quality (B1) and the cross-slate channel cap (B3) join
             // the ledger by id too — names are only a fallback key.
             channelId: v.channelId || "",
-            form: v._form || "", mode: mode || FEED_COMPOSE_MODE, t: now
+            form: v._form || "", mode: mode || FEED_COMPOSE_MODE, t: now,
+            // Finance precision pack instrumentation: same lexicon as the
+            // topic policy and the pump gate. Local-only; no sync field.
+            finance: isFinanceText(`${topic} ${v.title || ""} ${v.channelName || ""}`)
         });
     });
     const overflow = state.feedMix.shown.length - FEED_MIX_MAX;
@@ -7910,6 +7999,20 @@ function isAvoidedVideo(video) {
     return null;
 }
 
+/**
+ * Finance pump/scam shape: the offer-plus-promise titles that no amount of
+ * view count should buy into the feed. Narrow on purpose — every branch
+ * needs an offer shape, so "bitcoin hits 100k" (news) passes while
+ * "bitcoin 100x guaranteed" does not. Liked channels are exempt at the call
+ * site, same as the low-views floor.
+ */
+function financeScamReason(v) {
+    if (!v) return null;
+    const title = v.title || "";
+    if (FINANCE_SCAM_RE.test(title)) return "finance-scam";
+    return null;
+}
+
 function isSpamShapedVideo(v, likedChannels) {
     const avoidedReason = isAvoidedVideo(v);
     if (avoidedReason) return avoidedReason;
@@ -7926,14 +8029,24 @@ function isSpamShapedVideo(v, likedChannels) {
     }
     if (/[!?]{3,}/.test(title)) return "punctuation";
 
+    const lc = (v.channelName || "").toLowerCase();
+    const likedChannel = !!(likedChannels && likedChannels.has(lc));
+
+    // Pump/scam titles fail BEFORE the low-views floor, so a 500k-view
+    // "guaranteed 100x" short is rejected rather than rewarded. The liked
+    // channel exemption is the same one the view floor uses.
+    if (!likedChannel) {
+        const scamReason = financeScamReason(v);
+        if (scamReason) return scamReason;
+    }
+
     // Near-zero views is the spam floor. The scorer used to round 0 views UP
     // to 10 and score on. Liked channels are exempt so a followed creator's
     // day-old upload is not punished for being new. Tunable; flagged in the
     // commit for retuning if it costs genuinely new niche videos.
     const views = Number(v.viewCount);
     if (Number.isFinite(views) && views >= 0 && views < 100 && v.viewCount !== undefined && v.viewCount !== null) {
-        const lc = (v.channelName || "").toLowerCase();
-        if (!(likedChannels && likedChannels.has(lc))) return "low-views";
+        if (!likedChannel) return "low-views";
     }
     return null;
 }
@@ -9599,6 +9712,30 @@ async function generateTopicsForSeeds(seeds, budget, strongestReason) {
 // it runs fire-and-forget from the feed init path.
 const EXPLORE_DRIP_INTERVAL_MS = 24 * 3600e3;
 
+/**
+ * Pick the daily drip seed. Pure so the alternation is testable with a fixed
+ * clock. The finance arm only exists when the like-mined set has at least one
+ * finance topic AND finance is ≥ FINANCE_MIN_SHARE of it — otherwise today's
+ * behaviour (strongest overall) is kept, so no seed is ever invented.
+ *
+ * Alternation is by day index: at FINANCE_EXPLORE_ALTERNATION = 0.5 every
+ * other day seeds from finance, deterministically — a retry on the same day
+ * cannot flip the seed, and a failed expansion cannot bias the split.
+ */
+function pickExploreDripSeed(likeMined, now) {
+    if (!Array.isArray(likeMined) || !likeMined.length) return null;
+    const strongest = likeMined.reduce((a, b) => (b.weight > a.weight ? b : a));
+    const financeMined = likeMined.filter(t => isFinanceText(t.phrase));
+    if (!financeMined.length) return { seed: strongest, mode: "overall" };
+    const share = financeMined.length / likeMined.length;
+    if (share < FINANCE_MIN_SHARE) return { seed: strongest, mode: "overall" };
+    const strongestFinance = financeMined.reduce((a, b) => (b.weight > a.weight ? b : a));
+    const period = Math.max(1, Math.round(1 / FINANCE_EXPLORE_ALTERNATION)); // 2 at 0.5
+    const dayIdx = Math.floor((Number.isFinite(now) ? now : Date.now()) / 86400e3);
+    if (dayIdx % period === 0) return { seed: strongestFinance, mode: "finance" };
+    return { seed: strongest, mode: "overall" };
+}
+
 async function maybeRunExploreDrip() {
     try {
         if (typeof navigator !== "undefined" && navigator.onLine === false) {
@@ -9612,7 +9749,8 @@ async function maybeRunExploreDrip() {
             debug("[Explore Drip] no like-mined seed — skipping.");
             return false;
         }
-        const seed = likeMined.reduce((a, b) => (b.weight > a.weight ? b : a));
+        const picked = pickExploreDripSeed(likeMined, now);
+        const seed = picked.seed;
         // Stamp BEFORE the call: a failed expansion must not turn the 1.5 s
         // preload cadence into a daily retry loop against a dead backend.
         state.exploreDripAt = now;
@@ -9620,7 +9758,7 @@ async function maybeRunExploreDrip() {
         // strongestReason "imp" makes the children born explore/seed — the
         // weakest evidence tier, exactly what an unearned lateral batch is.
         const added = await generateTopicsForSeeds([seed.phrase], 3, "imp");
-        debug(`[Explore Drip] seeded "${seed.phrase}" -> ${(added || []).length} explore topic(s)`);
+        debug(`[Explore Drip] seeded "${seed.phrase}" (${picked.mode}) -> ${(added || []).length} explore topic(s)`);
         return true;
     } catch (err) {
         debug("[Explore Drip] failed:", err && err.message);
