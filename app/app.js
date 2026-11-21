@@ -4324,6 +4324,83 @@ function getLikedChannelAffinity() {
 // stats refresh invalidates it too.
 function invalidateLikedChannelCache() { _likedChannelCache = null; _channelQualityCache = null; }
 
+// ── Finance-trust channel layer (Option B) ────────────────────────────
+// A channel earns finance trust only from the user's own likes on it: a
+// liked video counts as a finance like when its mined topics hit
+// FINANCE_LEXICON (Option A's lexicon). trust = min(1, financeLikes / 2);
+// a channel with no finance like is 0. Keyed by channelId (name alias for
+// name-only rows) and rebuilt only when the like/mined-topic inputs change,
+// never per candidate.
+const FINANCE_Q_BONUS = 0.10;
+const FINANCE_SUPPLY_MAX_CHANNELS = 5;
+const FINANCE_CHANNEL_SHOWN_CAP_7D = 3;
+const FINANCE_TRUST_LIKES_FOR_MAX = 2;
+let _channelFinanceTrustCache = null;
+let _channelFinanceTrustSig = "";
+
+/** Cheap fingerprint of the inputs financeTrust depends on. */
+function financeTrustSignature() {
+    const likes = [];
+    Object.keys(state.ratingStates || {}).forEach(id => {
+        const st = state.ratingStates[id];
+        if (!st || st.r !== 5 || !st.v) return;
+        likes.push(`${id}:${st.v.channelId || ""}:${st.v.channelName || ""}`);
+    });
+    likes.sort();
+    const mined = [];
+    Object.keys(state.minedVideos || {}).forEach(id => {
+        const rec = state.minedVideos[id];
+        mined.push(`${id}:${((rec && rec.topics) || []).join(",")}`);
+    });
+    mined.sort();
+    return `${likes.join("|")}#${mined.join("|")}`;
+}
+
+/** Map channelId/name -> { financeLikes, financeTrust }. */
+function buildChannelFinanceTrust() {
+    const sig = financeTrustSignature();
+    if (_channelFinanceTrustCache && sig === _channelFinanceTrustSig) return _channelFinanceTrustCache;
+    const map = new Map();
+    try {
+        const byKey = {};
+        Object.keys(state.ratingStates || {}).forEach(id => {
+            const st = state.ratingStates[id];
+            if (!st || st.r !== 5 || !st.v) return;
+            const cid = st.v.channelId || "";
+            const nm = (st.v.channelName || "").toLowerCase();
+            const key = cid || nm;
+            if (!key) return;
+            const topics = ((state.minedVideos || {})[id] || {}).topics || [];
+            if (!topics.some(t => isFinanceText(t))) return;
+            const rec = byKey[key] || { channelId: cid, name: nm, financeLikes: 0, financeTrust: 0 };
+            rec.financeLikes += 1;
+            if (cid && !rec.channelId) rec.channelId = cid;
+            if (nm && !rec.name) rec.name = nm;
+            byKey[key] = rec;
+        });
+        Object.keys(byKey).forEach(key => {
+            const rec = byKey[key];
+            rec.financeTrust = Math.min(1, rec.financeLikes / FINANCE_TRUST_LIKES_FOR_MAX);
+            map.set(key, rec);
+            if (rec.channelId && !map.has(rec.channelId)) map.set(rec.channelId, rec);
+            if (rec.name && !map.has(rec.name)) map.set(rec.name, rec);
+        });
+    } catch (err) {
+        console.warn("[Finance Trust] build failed:", err && err.message);
+    }
+    _channelFinanceTrustCache = map;
+    _channelFinanceTrustSig = sig;
+    return map;
+}
+
+/** 0..1 finance trust for a channel, read from the cached map (O(1)). */
+function financeTrustForChannel(channelId, channelName, trustMap) {
+    const map = trustMap || buildChannelFinanceTrust();
+    const nm = (channelName || "").toLowerCase();
+    const rec = (channelId && map.get(channelId)) || (nm && map.get(nm)) || null;
+    return rec ? rec.financeTrust : 0;
+}
+
 // ── Channel quality (plan §5 B1) ──────────────────────────────────────
 // There was no channel-level signal anywhere in discovery: authority was
 // per-video and the only channel gate was the <100-view spam floor. This map
@@ -4344,8 +4421,28 @@ function medianOf(nums) {
     return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
+/**
+ * Refresh rec.financeTrust + the finance term of q on an existing quality
+ * map. Called only on a cache hit; the trust map itself is signature-gated,
+ * so a like/mined-topic change is the only thing that can move these values.
+ */
+function refreshChannelQualityFinance(map) {
+    const trustMap = buildChannelFinanceTrust();
+    map.forEach(rec => {
+        const ft = financeTrustForChannel(rec.channelId, rec.name, trustMap);
+        if (ft === rec.financeTrust) return;
+        rec.financeTrust = ft;
+        rec.q = Math.max(-1, Math.min(1, rec.baseQ +
+            0.15 * (rec.subs >= 1e5 ? 1 : 0) + 0.05 * (rec.verified ? 1 : 0) +
+            FINANCE_Q_BONUS * ft));
+    });
+}
+
 function buildChannelQuality() {
-    if (_channelQualityCache) return _channelQualityCache;
+    if (_channelQualityCache) {
+        refreshChannelQualityFinance(_channelQualityCache);
+        return _channelQualityCache;
+    }
     const map = new Map();
     try {
         const now = Date.now();
@@ -4361,7 +4458,7 @@ function buildChannelQuality() {
                 rec = { channelId: cid, name: nm, likes: 0, dislikes: 0,
                         plays: 0, impressions: 0, viewCounts: [],
                         subs: null, verified: false, medianViews: 0,
-                        unengagedImpressions: 0, baseQ: 0, q: 0 };
+                        unengagedImpressions: 0, baseQ: 0, financeTrust: 0, q: 0 };
                 map.set(primaryKey, rec);
                 if (cid && nm && !map.has(nm)) map.set(nm, rec);
             }
@@ -4410,6 +4507,7 @@ function buildChannelQuality() {
             }
         });
 
+        const trustMap = buildChannelFinanceTrust();
         map.forEach(rec => {
             rec.medianViews = medianOf(rec.viewCounts);
             rec.unengagedImpressions = Math.max(0, rec.impressions - rec.plays);
@@ -4418,9 +4516,12 @@ function buildChannelQuality() {
                 0.50 * Math.min(1, rec.dislikes / 2) -
                 0.40 * Math.min(1, rec.unengagedImpressions / 8);
             rec.baseQ = Math.max(-1, Math.min(1, base));
-            // B5 bonus folded on top of the base, capped at 1.
+            rec.financeTrust = financeTrustForChannel(rec.channelId, rec.name, trustMap);
+            // B5 bonus + Option B finance-trust lift folded on top of the
+            // base, capped at 1 (and the base at -1).
             rec.q = Math.max(-1, Math.min(1, rec.baseQ +
-                0.15 * (rec.subs >= 1e5 ? 1 : 0) + 0.05 * (rec.verified ? 1 : 0)));
+                0.15 * (rec.subs >= 1e5 ? 1 : 0) + 0.05 * (rec.verified ? 1 : 0) +
+                FINANCE_Q_BONUS * rec.financeTrust));
         });
     } catch (err) {
         // Never throw on odd state: an empty map degrades discovery to its
@@ -4446,8 +4547,12 @@ function channelQualityForVideo(video, ctx) {
     const base = typeof rec.baseQ === "number" ? rec.baseQ : (rec.q || 0);
     const subs = typeof video.channelSubs === "number" ? video.channelSubs : (rec.subs || 0);
     const verified = video.channelVerified !== undefined ? !!video.channelVerified : !!rec.verified;
+    // Option B: same finance-trust lift as buildChannelQuality, read from the
+    // cached record — no per-candidate rebuild.
+    const financeTrust = typeof rec.financeTrust === "number" ? rec.financeTrust : 0;
     return Math.max(-1, Math.min(1, base +
-        0.15 * (subs >= 1e5 ? 1 : 0) + 0.05 * (verified ? 1 : 0)));
+        0.15 * (subs >= 1e5 ? 1 : 0) + 0.05 * (verified ? 1 : 0) +
+        FINANCE_Q_BONUS * financeTrust));
 }
 
 // Finance presets share one facet set. Include facets are the intent-precise
@@ -10452,6 +10557,15 @@ async function fetchVideosForTopic(topic) {
  * score fields, touches no state) so a fifth form cannot drift from it.
  */
 function gateAndRankDiscoveryVideos(videos, topic, policy) {
+    // Option B instrumentation: liked-channel supply rows that belong to a
+    // finance-trusted channel are retagged so the ledger separates the arm.
+    // No gate reads _form; the map is built once, not per candidate.
+    const trustMap = buildChannelFinanceTrust();
+    (videos || []).forEach(v => {
+        if (v && v._form === "liked-channel" && financeTrustForChannel(v.channelId, v.channelName, trustMap) > 0) {
+            v._form = "liked-channel-finance";
+        }
+    });
     const spamLikedChannels = new Set(getLikedChannelAffinity().keys());
     const spamDropped = {};
     const gateLog = {};
@@ -10595,6 +10709,13 @@ function buildChannelPoolStats() {
 // path (never per topic), max 3 channels per run, 6 h per-channel cache.
 const LIKED_CHANNEL_SUPPLY_TTL_MS = 6 * 3600e3;
 const LIKED_CHANNEL_SUPPLY_MAX_CHANNELS = 3;
+const LIKED_CHANNEL_SUPPLY_MAX_UPLOADS = 6;
+// Option B: finance-trusted liked channels get the larger budget (5 channels
+// / 8 uploads); every other channel keeps today's 3 x 6.
+const FINANCE_SUPPLY_MAX_UPLOADS = 8;
+// Ranking scan bound: trust sorts first, so the scan must reach past the
+// finance band to find the 3 non-finance channels behind it.
+const LIKED_CHANNEL_SUPPLY_SCAN_MAX = 24;
 let _likedChannelSupplyInFlight = null;
 
 /** Phase B5: scraper flat-output channel fields normalised for the q lookup. */
@@ -10610,10 +10731,17 @@ function scraperChannelFields(item) {
     return out;
 }
 
-/** Top liked channels (by affinity) that carry a channelId and are not blocked. */
+/**
+ * Top liked channels that carry a channelId and are not blocked. Option B:
+ * finance-trust ranks first; affinity breaks ties. Each entry carries the
+ * trust so the caller can size the fetch without rebuilding the map.
+ */
 function topLikedChannelIdsWithId(limit) {
     const aff = getLikedChannelAffinity();
-    const ranked = Array.from(aff.entries()).sort((a, b) => b[1] - a[1]);
+    const trustMap = buildChannelFinanceTrust();
+    const ranked = Array.from(aff.entries())
+        .map(([nm, affinity]) => ({ nm, affinity, financeTrust: financeTrustForChannel("", nm, trustMap) }))
+        .sort((a, b) => (b.financeTrust - a.financeTrust) || (b.affinity - a.affinity));
     const idByName = {};
     Object.values(state.ratingStates || {}).forEach(st => {
         if (!st || st.r !== 5 || !st.v || !st.v.channelName || !st.v.channelId) return;
@@ -10623,12 +10751,35 @@ function topLikedChannelIdsWithId(limit) {
     const out = [];
     ranked.forEach(entry => {
         if (out.length >= limit) return;
-        const nm = entry[0];
+        const nm = entry.nm;
         const cid = idByName[nm];
         if (!cid || isChannelBlocked(cid, nm)) return;
-        out.push({ channelId: cid, channelName: nm });
+        out.push({ channelId: cid, channelName: nm, financeTrust: entry.financeTrust });
     });
     return out;
+}
+
+/**
+ * Option B supply selection: finance channels first (up to 5), then
+ * non-finance ones capped at today's 3. Finance buys more channels; the
+ * non-finance budget is untouched.
+ */
+function selectLikedChannelSupply(ranked) {
+    const finance = ranked.filter(c => c.financeTrust > 0).slice(0, FINANCE_SUPPLY_MAX_CHANNELS);
+    const rest = ranked.filter(c => !(c.financeTrust > 0)).slice(0, LIKED_CHANNEL_SUPPLY_MAX_CHANNELS);
+    return finance.concat(rest);
+}
+
+/** Shown count per channel (id + lowercased name) over the last 7 days. */
+function channelShownCounts7d(now) {
+    const counts = {};
+    const horizon = now - 7 * 86400e3;
+    ((state.feedMix && Array.isArray(state.feedMix.shown) && state.feedMix.shown) || []).forEach(row => {
+        if (!row || !Number.isFinite(row.t) || row.t < horizon) return;
+        if (row.channelId) counts[row.channelId] = (counts[row.channelId] || 0) + 1;
+        if (row.channel) counts[row.channel] = (counts[row.channel] || 0) + 1;
+    });
+    return counts;
 }
 
 /** Most frequent mined topic across the channel's liked videos, else "". */
@@ -10658,8 +10809,12 @@ async function fetchLikedChannelUploads() {
         try {
             if (!state.likedChannelSupplyAt || typeof state.likedChannelSupplyAt !== "object") state.likedChannelSupplyAt = {};
             const now = Date.now();
-            const candidates = topLikedChannelIdsWithId(LIKED_CHANNEL_SUPPLY_MAX_CHANNELS)
-                .filter(c => (now - (state.likedChannelSupplyAt[c.channelId] || 0)) >= LIKED_CHANNEL_SUPPLY_TTL_MS);
+            const shownCounts = channelShownCounts7d(now);
+            const candidates = selectLikedChannelSupply(
+                topLikedChannelIdsWithId(LIKED_CHANNEL_SUPPLY_SCAN_MAX)
+                    .filter(c => (now - (state.likedChannelSupplyAt[c.channelId] || 0)) >= LIKED_CHANNEL_SUPPLY_TTL_MS)
+                    .filter(c => (shownCounts[c.channelId] || shownCounts[c.channelName] || 0) < FINANCE_CHANNEL_SHOWN_CAP_7D)
+            );
             if (!candidates.length) return [];
             const knownIds = new Set((state.smartFeedSuggestionPool || []).map(v => v.id));
             (state.smartFeedVideos || []).forEach(v => knownIds.add(v.id));
@@ -10679,7 +10834,9 @@ async function fetchLikedChannelUploads() {
                             body: JSON.stringify({
                                 source: "youtube",
                                 channels: [c.channelId],
-                                limit: 6,
+                                // Option B: finance-trusted channels get 8
+                                // uploads, every other channel keeps 6.
+                                limit: c.financeTrust > 0 ? FINANCE_SUPPLY_MAX_UPLOADS : LIKED_CHANNEL_SUPPLY_MAX_UPLOADS,
                                 days_back: 0,
                                 require_transcript: false,
                                 sort: "date"
